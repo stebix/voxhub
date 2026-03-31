@@ -48,6 +48,9 @@ ignore = [
     'ANN401',  # dynamically typed expressions (typing.Any) are disallowed
 ]
 
+[tool.ruff.lint.per-file-ignores]
+'packages/*/tests/**' = ['ANN']
+
 [tool.ruff.lint.isort]
 known-first-party = ['voxhub_core', 'voxhub_schema', 'voxhub_client']
 
@@ -66,5 +69,5 @@ reportMissingTypeStubs = false
 reportUnknownMemberType = false
 
 [tool.pytest.ini_options]
-testpaths = ['packages/*/tests']
+testpaths = ['packages/*/tests', 'tests']
 addopts = '-v --tb=short'
