@@ -1,1 +1,1 @@
-# voxhub-client: user-facing CLI for remote annotation workflows
+"""voxhub-client: user-facing CLI for remote annotation workflows."""
