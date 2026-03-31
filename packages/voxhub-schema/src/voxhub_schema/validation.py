@@ -5,6 +5,7 @@ and ontology conformance before push.  All checks are pure — no zarr or
 DICOM I/O.
 """
 
+import json
 from pathlib import Path
 
 import nrrd
@@ -295,8 +296,6 @@ def _parse_mrk_json(
     tuple
         ``(points, labels, coordinate_system)``
     """
-    import json
-
     raw = json.loads(path.read_text())
 
     markups = raw.get('markups')

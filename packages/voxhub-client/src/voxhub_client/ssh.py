@@ -3,6 +3,7 @@
 Invokes ``voxhub-server`` commands over SSH and parses JSON responses.
 """
 
+import getpass
 import json
 import subprocess
 from typing import Any, Self
@@ -75,8 +76,6 @@ class SshTarget:
         if '@' in host_part:
             user, host = host_part.split('@', 1)
         else:
-            import getpass
-
             user = getpass.getuser()
             host = host_part
 

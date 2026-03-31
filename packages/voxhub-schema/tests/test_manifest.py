@@ -1,5 +1,7 @@
 """Tests for manifest serialization and persistence."""
 
+import pytest
+
 from voxhub_schema.manifest import RemoteManifest, RemoteManifestEntry
 
 
@@ -55,8 +57,6 @@ class TestManifestRoundTrip:
         assert rt.stores['store-a'].shape == [10, 12, 14]
 
     def test_read_missing_raises(self, tmp_path):
-        import pytest
-
         with pytest.raises(FileNotFoundError):
             RemoteManifest.read(tmp_path / 'missing')
 
