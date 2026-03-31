@@ -5,20 +5,14 @@ and ontology conformance before push.  All checks are pure — no zarr or
 DICOM I/O.
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import nrrd
 import numpy as np
 
+from voxhub_schema.manifest import RemoteManifestEntry
 from voxhub_schema.models import IssueRecord
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from voxhub_schema.manifest import RemoteManifestEntry
-    from voxhub_schema.ontology import Ontology
+from voxhub_schema.ontology import Ontology
 
 
 def _parse_seg_nrrd_header(

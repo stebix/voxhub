@@ -4,8 +4,6 @@ All server logging is structured JSON to stderr, suitable for
 ingestion by systemd journal, logrotate, or similar tools.
 """
 
-from __future__ import annotations
-
 import structlog
 
 

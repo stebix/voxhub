@@ -3,11 +3,9 @@
 Invokes ``voxhub-server`` commands over SSH and parses JSON responses.
 """
 
-from __future__ import annotations
-
 import json
 import subprocess
-from typing import Any
+from typing import Any, Self
 
 import attrs
 
@@ -51,7 +49,7 @@ class SshTarget:
     port: int | None = None
 
     @classmethod
-    def parse(cls, target: str) -> SshTarget:
+    def parse(cls, target: str) -> Self:
         """Parse a target string like ``user@host:/path``.
 
         Parameters

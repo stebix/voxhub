@@ -6,10 +6,8 @@ defined here as an ``attrs`` class.  Serialization:
 ``from_dict()`` classmethods.
 """
 
-from __future__ import annotations
-
 import json
-from typing import Literal
+from typing import Literal, Self
 
 import attrs
 
@@ -28,7 +26,7 @@ class IssueRecord:
     message: str
 
     @classmethod
-    def from_dict(cls, d: dict[str, str]) -> IssueRecord:
+    def from_dict(cls, d: dict[str, str]) -> Self:
         """Deserialize from a plain dict."""
         return cls(severity=d['severity'], message=d['message'])
 
@@ -37,17 +35,15 @@ class IssueRecord:
 class AnnotationInfo:
     """Metadata about an existing annotation in a zarr store."""
 
-    path: str
     ontology: str
     ontology_version: int
     annotator_id: str
     integrated_at: str
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> AnnotationInfo:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         return cls(
-            path=str(d['path']),
             ontology=str(d['ontology']),
             ontology_version=int(d['ontology_version']),  # type: ignore[arg-type]
             annotator_id=str(d['annotator_id']),
@@ -72,7 +68,7 @@ class StoreInfo:
     error: str | None = None
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> StoreInfo:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         annotations_raw = d.get('annotations', [])
         annotations = [
@@ -110,7 +106,7 @@ class PreparedStore:
     included_annotations: list[str]
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> PreparedStore:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         return cls(
             raw_checksum=str(d['raw_checksum']),
@@ -151,7 +147,7 @@ class PrepareResponse:
     stores: dict[str, PreparedStore]
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> PrepareResponse:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         stores_raw = d.get('stores', {})
         stores = {
@@ -177,7 +173,7 @@ class IntegrateResult:
     issues: list[IssueRecord]
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> IntegrateResult:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         annotations = [
             AnnotationInfo.from_dict(a)  # type: ignore[arg-type]
@@ -215,7 +211,7 @@ class IntegrateResponse:
     stores: dict[str, IntegrateResult]
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> IntegrateResponse:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         stores_raw = d.get('stores', {})
         stores = {
@@ -239,7 +235,7 @@ class CleanupResponse:
     status: str
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> CleanupResponse:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         return cls(
             protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
@@ -256,7 +252,7 @@ class GcResponse:
     count: int
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> GcResponse:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         return cls(
             protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
@@ -278,7 +274,7 @@ class ServerError:
     message: str
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> ServerError:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         return cls(
             protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]

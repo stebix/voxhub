@@ -5,15 +5,11 @@ updated after push/integration.  It records the server origin,
 per-store spatial metadata, expected ontologies, and workflow status.
 """
 
-from __future__ import annotations
-
 import json
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import Literal, Self
 
 import attrs
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 type ManifestStatus = Literal['pulled', 'pushed', 'integrated']
 
@@ -32,7 +28,7 @@ class RemoteManifestEntry:
     included_annotations: list[str] = attrs.Factory(list)
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> RemoteManifestEntry:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         return cls(
             status=d['status'],  # type: ignore[arg-type]
@@ -69,7 +65,7 @@ class RemoteManifest:
     stores: dict[str, RemoteManifestEntry]
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> RemoteManifest:
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         stores_raw = d.get('stores', {})
         stores = {
@@ -90,12 +86,12 @@ class RemoteManifest:
         return json.dumps(attrs.asdict(self), indent=2)
 
     @classmethod
-    def from_json(cls, text: str) -> RemoteManifest:
+    def from_json(cls, text: str) -> Self:
         """Deserialize from a JSON string."""
         return cls.from_dict(json.loads(text))
 
     @classmethod
-    def read(cls, wip_dir: Path) -> RemoteManifest:
+    def read(cls, wip_dir: Path) -> Self:
         """Read a manifest from a WIP directory.
 
         Parameters

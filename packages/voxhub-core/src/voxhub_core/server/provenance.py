@@ -4,18 +4,14 @@ Writes provenance metadata to zarr array attrs and to the central
 ``.meta/provenance.jsonl`` index at the zarr root.
 """
 
-from __future__ import annotations
-
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import zarr
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from voxhub_schema import IssueRecord
+from voxhub_schema import IssueRecord
 
 
 def record_provenance(

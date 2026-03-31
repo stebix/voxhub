@@ -9,8 +9,6 @@ server-specific concerns (annotator ID, session ID, locks).  Server
 wrappers add provenance on top.
 """
 
-from __future__ import annotations
-
 from datetime import UTC, datetime
 from pathlib import Path
 

@@ -5,24 +5,21 @@ and stacks slices into 3D volumes.  Supports parallel loading via
 a thread pool.
 """
 
-from __future__ import annotations
-
 import os
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pydicom
 from tqdm.auto import tqdm
 
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
 from .geometry import compute_slice_geometry
 from .types import ActualizedDicomTree, DicomTree, DicomVolume
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from numpy.typing import NDArray
 
 
 def _dataset_to_dict(ds: pydicom.Dataset) -> dict[str, Any]:

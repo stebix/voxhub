@@ -4,16 +4,12 @@ Computes inter-slice spacing, spatial sort order, and validates
 ImageOrientationPatient consistency across slices.
 """
 
-from __future__ import annotations
-
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    import pydicom
-    from numpy.typing import NDArray
+import pydicom
+from numpy.typing import NDArray
 
 COMPUTED_METADATA_KEYS: dict[str, str] = {
     'computed_slice_spacing_mm': (

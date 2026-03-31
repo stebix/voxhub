@@ -4,16 +4,11 @@ Recursively discovers DICOM leaf directories, validates slice
 contiguity, and produces a :data:`DicomTree` structure.
 """
 
-from __future__ import annotations
-
 import itertools
 import warnings
-from typing import TYPE_CHECKING
+from pathlib import Path
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from .types import DicomTree
+from .types import DicomTree
 
 
 def _are_consecutive(numbers: list[int]) -> bool:

@@ -1,14 +1,8 @@
 """Matplotlib notebook helpers for volumetric visualization."""
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 import numpy as np
-
-if TYPE_CHECKING:
-    from matplotlib.axes import Axes
-    from matplotlib.figure import Figure
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 
 def show_slice(

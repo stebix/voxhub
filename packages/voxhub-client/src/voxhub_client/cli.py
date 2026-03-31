@@ -3,8 +3,6 @@
 Commands: pull, push, remote-catalog, whoami, set-identity.
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import sys

@@ -4,8 +4,6 @@ Thin wrappers around ``voxhub_schema.RemoteManifest`` for reading,
 writing, and updating manifests in WIP directories.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 from voxhub_schema import ManifestStatus, RemoteManifest

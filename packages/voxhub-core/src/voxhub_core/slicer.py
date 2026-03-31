@@ -6,8 +6,6 @@ Handles two file formats:
 - ``.mrk.json`` -- Slicer Markups JSON (fiducial point landmarks)
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any

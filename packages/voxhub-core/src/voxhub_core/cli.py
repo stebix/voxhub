@@ -3,8 +3,6 @@
 Commands: export, catalog, stage, integrate, audit, emit-nrrd.
 """
 
-from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path

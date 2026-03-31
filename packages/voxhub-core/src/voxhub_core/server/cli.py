@@ -7,8 +7,6 @@ Structured errors use the ``ServerError`` envelope.  Logs go to
 stderr via structlog.
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json

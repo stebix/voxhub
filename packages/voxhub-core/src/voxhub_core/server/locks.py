@@ -4,14 +4,9 @@ Uses ``filelock`` to serialize writes to individual zarr stores.
 Lock files live alongside the ``.zarr`` directories.
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from filelock import FileLock
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def store_lock(zarr_path: Path, *, timeout: float = 60) -> FileLock:

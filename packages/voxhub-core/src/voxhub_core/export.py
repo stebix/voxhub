@@ -4,8 +4,6 @@ Provides serial and parallel export of DICOM volumes to zarr stores
 with human-readable names (e.g. ``gallivanting-groundhog.zarr``).
 """
 
-from __future__ import annotations
-
 import json
 import os
 import random

@@ -3,15 +3,11 @@
 Handles pull and push of WIP directories between local and remote.
 """
 
-from __future__ import annotations
-
 import subprocess
-from typing import TYPE_CHECKING
 
 import attrs
 
-if TYPE_CHECKING:
-    from voxhub_client.ssh import SshTarget
+from voxhub_client.ssh import SshTarget
 
 
 @attrs.define

@@ -5,8 +5,6 @@ metadata (including annotation information), and renders structured
 overviews using ``rich``.
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any

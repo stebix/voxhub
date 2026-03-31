@@ -4,8 +4,6 @@ Reads zarr stores, extracts spatial metadata, and writes NRRD files
 to a WIP directory for annotation in 3D Slicer.
 """
 
-from __future__ import annotations
-
 import gzip
 import hashlib
 import sys

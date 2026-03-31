@@ -3,13 +3,12 @@
 Stores identity in ``~/.config/voxhub/identity.json``.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import platform
 import uuid
 from pathlib import Path
+from typing import Self
 
 import attrs
 
@@ -32,7 +31,7 @@ class Identity:
         return attrs.asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict[str, str]) -> Identity:
+    def from_dict(cls, d: dict[str, str]) -> Self:
         """Deserialize from a plain dict."""
         return cls(
             annotator_id=d['annotator_id'],

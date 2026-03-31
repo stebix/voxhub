@@ -4,8 +4,6 @@ Checks that annotations across zarr stores are consistent with their
 declared ontologies: same labels, same values, same landmark names.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 

@@ -5,8 +5,6 @@ Ontologies are YAML data files shipped with this package in the
 ``<name>-v<N>.yaml``.
 """
 
-from __future__ import annotations
-
 import re
 from importlib import resources
 from pathlib import Path
