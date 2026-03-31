@@ -22,7 +22,8 @@ from voxhub_core.slicer import (
     parse_mrk_json,
     parse_seg_nrrd,
 )
-from voxhub_schema import IssueRecord, Ontology
+from voxhub_core.staging import extract_spatial_metadata
+from voxhub_schema import IssueRecord, Ontology, generate_nano_id
 
 
 def find_annotation_files(
@@ -423,8 +424,6 @@ def integrate(
     zarr_root = Path(zarr_root)
     console = console or Console()
 
-    from voxhub_schema import generate_nano_id
-
     all_issues: dict[str, list[IssueRecord]] = {}
     stores_to_integrate: list[
         tuple[
@@ -463,8 +462,6 @@ def integrate(
         root = zarr.open_group(zarr_path, mode='r')
         arr = root['raw']['full']
         vol_attrs = dict(arr.attrs)
-        from voxhub_core.staging import extract_spatial_metadata
-
         origin, space_directions, spacing_mm = extract_spatial_metadata(vol_attrs)
         manifest_entry = {
             'shape': list(arr.shape),

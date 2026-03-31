@@ -1,5 +1,6 @@
 """Matplotlib notebook helpers for volumetric visualization."""
 
+import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
@@ -35,8 +36,6 @@ def show_slice(
     -------
     tuple[Figure, Axes]
     """
-    import matplotlib.pyplot as plt
-
     if index is None:
         index = volume.shape[axis] // 2
 
@@ -83,8 +82,6 @@ def show_orthogonal(
     -------
     tuple[Figure, list[Axes]]
     """
-    import matplotlib.pyplot as plt
-
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     labels = ['Axial', 'Coronal', 'Sagittal']
 

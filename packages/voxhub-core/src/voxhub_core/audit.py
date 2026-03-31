@@ -4,6 +4,7 @@ Checks that annotations across zarr stores are consistent with their
 declared ontologies: same labels, same values, same landmark names.
 """
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -143,8 +144,6 @@ def _check_segmentation_coherence(
         return issues
 
     # Use majority segment set as reference.
-    from collections import Counter
-
     name_sets = [frozenset(i.segment_map.values()) for i in seg_infos]
     most_common = Counter(name_sets).most_common(1)[0][0]
     ref_map = {}
@@ -206,8 +205,6 @@ def _check_landmark_coherence(
     lmk_infos = [i for i in infos if i.has_landmarks]
     if len(lmk_infos) < 2:
         return issues
-
-    from collections import Counter
 
     label_sets = [frozenset(i.landmark_labels) for i in lmk_infos]
     most_common = Counter(label_sets).most_common(1)[0][0]

@@ -7,6 +7,18 @@ import argparse
 import sys
 from pathlib import Path
 
+from voxhub_core.audit import audit
+from voxhub_core.catalog import catalog
+from voxhub_core.dicom import actualize, parse_dicom_tree
+from voxhub_core.export import (
+    export_zarr_collection,
+    export_zarr_collection_parallel,
+    flatten_to_volumes,
+)
+from voxhub_core.integrate import integrate
+from voxhub_core.staging import stage
+from voxhub_schema import load_ontology
+
 
 def _build_export_parser(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
@@ -183,17 +195,8 @@ def _build_audit_parser(
 
 
 def _run_export(args: argparse.Namespace) -> None:
-    from voxhub_core.dicom import parse_dicom_tree
-    from voxhub_core.export import (
-        export_zarr_collection,
-        export_zarr_collection_parallel,
-        flatten_to_volumes,
-    )
-
     try:
         if args.no_parallel:
-            from voxhub_core.dicom import actualize
-
             tree = parse_dicom_tree(args.input_dir, verbose=args.verbose)
             atree = actualize(tree, max_workers=args.workers)
             volumes = flatten_to_volumes(atree)
@@ -220,14 +223,10 @@ def _run_export(args: argparse.Namespace) -> None:
 
 
 def _run_catalog(args: argparse.Namespace) -> None:
-    from voxhub_core.catalog import catalog
-
     catalog(args.root, show_table=args.table)
 
 
 def _run_stage(args: argparse.Namespace) -> None:
-    from voxhub_core.staging import stage
-
     try:
         stage(
             args.zarr_root,
@@ -242,12 +241,8 @@ def _run_stage(args: argparse.Namespace) -> None:
 
 
 def _run_integrate(args: argparse.Namespace) -> None:
-    from voxhub_core.integrate import integrate
-
     ontology = None
     if args.ontology:
-        from voxhub_schema import load_ontology
-
         ontology = load_ontology(args.ontology)
 
     try:
@@ -266,8 +261,6 @@ def _run_integrate(args: argparse.Namespace) -> None:
 
 
 def _run_audit(args: argparse.Namespace) -> None:
-    from voxhub_core.audit import audit
-
     issues = audit(
         args.zarr_root,
         ontology_filter=args.ontology,

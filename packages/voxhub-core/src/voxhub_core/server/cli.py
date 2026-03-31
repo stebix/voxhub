@@ -12,12 +12,29 @@ import hashlib
 import json
 import shutil
 import sys
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import zarr
+from rich.console import Console
+
+from voxhub_core.catalog import discover_zarr_stores
+from voxhub_core.integrate import (
+    find_annotation_files,
+    parse_mrk_json,
+    parse_seg_nrrd,
+    validate_landmarks,
+    validate_segmentation,
+    write_landmarks_to_zarr,
+    write_segmentation_to_zarr,
+)
+from voxhub_core.server.locks import store_lock
 from voxhub_core.server.logging import configure_logging, get_logger
+from voxhub_core.server.provenance import record_provenance
+from voxhub_core.staging import extract_spatial_metadata, stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
     IssueRecord,
@@ -71,8 +88,6 @@ def _run_list_stores(args: argparse.Namespace) -> None:
     zarr_root = Path(args.zarr_root)
     log.info('list_stores_started', zarr_root=str(zarr_root))
 
-    from voxhub_core.catalog import discover_zarr_stores
-
     entries = discover_zarr_stores(zarr_root)
 
     stores: list[dict[str, Any]] = []
@@ -103,10 +118,6 @@ def _run_list_stores(args: argparse.Namespace) -> None:
                 }
             )
             continue
-
-        import zarr
-
-        from voxhub_core.staging import extract_spatial_metadata
 
         root = zarr.open_group(entry.path, mode='r')
         arr = root['raw']['full']
@@ -177,15 +188,11 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         ontologies=ontologies,
     )
 
-    from voxhub_core.staging import stage
-
     # Create a temp dir for staging.
     session_id = generate_nano_id()
     if args.wip_dir:
         wip_dir = Path(args.wip_dir)
     else:
-        import tempfile
-
         wip_dir = Path(
             tempfile.mkdtemp(
                 prefix=f'dt-pull-{session_id}-',
@@ -193,8 +200,6 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         )
 
     try:
-        from rich.console import Console
-
         console = Console(stderr=True, quiet=True)
         store_metadata = stage(
             zarr_root,
@@ -283,19 +288,6 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
             checksum = f'{parts[1]}:{parts[2]}'
             expected_checksums[filename] = checksum
 
-    from voxhub_core.integrate import (
-        find_annotation_files,
-        parse_mrk_json,
-        parse_seg_nrrd,
-        validate_landmarks,
-        validate_segmentation,
-        write_landmarks_to_zarr,
-        write_segmentation_to_zarr,
-    )
-    from voxhub_core.server.locks import store_lock
-    from voxhub_core.server.provenance import record_provenance
-    from voxhub_core.staging import extract_spatial_metadata
-
     date_str = datetime.now(UTC).strftime('%Y%m%d')
     annotator_dir = f'{annotator_id}-{nano_id}'
 
@@ -336,8 +328,6 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                     sys.exit(1)
 
         # Read volume metadata.
-        import zarr
-
         root = zarr.open_group(zarr_path, mode='r')
         arr = root['raw']['full']
         vol_attrs = dict(arr.attrs)
@@ -547,8 +537,6 @@ def _run_gc(args: argparse.Namespace) -> None:
     ttl_hours = args.ttl_hours
 
     log.info('gc_started', ttl_hours=ttl_hours)
-
-    import tempfile
 
     tmp_root = Path(tempfile.gettempdir())
     cutoff = time.time() - (ttl_hours * 3600)
