@@ -4,4 +4,4 @@ type: segmentation
 channel: single
 labels:
   0: background
-  1: inner ear total fluid space
+  1: inner_ear_total_fluid_space

@@ -3,6 +3,6 @@ version: 1
 type: landmarks
 coordinate_system: LPS
 points:
-  - round window
-  - oval window
-  - cochlear apex
+  - round_window
+  - oval_window
+  - cochlear_apex
