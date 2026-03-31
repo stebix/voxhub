@@ -1,0 +1,70 @@
+[project]
+name = 'voxhub'
+version = '0.1.0'
+description = 'Collaborative volumetric annotation system with SSH-based remote workflows'
+requires-python = '>=3.12'
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ['packages/*']
+
+[dependency-groups]
+dev = [
+    'ruff>=0.15.0',
+    'pyright>=1.1.400',
+    'pytest>=8.0',
+    'pytest-cov>=6.0',
+]
+analysis = [
+    'ipympl',
+    'ipywidgets',
+    'jupyter',
+    'matplotlib',
+]
+
+[tool.ruff]
+line-length = 90
+target-version = 'py312'
+
+[tool.ruff.lint]
+select = [
+    'E',      # pycodestyle errors
+    'W',      # pycodestyle warnings
+    'F',      # pyflakes
+    'I',      # isort
+    'N',      # pep8-naming
+    'UP',     # pyupgrade
+    'B',      # flake8-bugbear
+    'SIM',    # flake8-simplify
+    'TCH',    # flake8-type-checking
+    'RUF',    # ruff-specific rules
+    'C4',     # flake8-comprehensions
+    'PT',     # flake8-pytest-style
+    'ANN',    # flake8-annotations
+]
+ignore = [
+    'ANN401',  # dynamically typed expressions (typing.Any) are disallowed
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ['voxhub_core', 'voxhub_schema', 'voxhub_client']
+
+[tool.ruff.format]
+quote-style = 'single'
+docstring-code-format = true
+
+[tool.ruff.lint.pydocstyle]
+convention = 'numpy'
+
+[tool.pyright]
+pythonVersion = '3.12'
+typeCheckingMode = 'standard'
+include = ['packages/*/src']
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+
+[tool.pytest.ini_options]
+testpaths = ['packages/*/tests']
+addopts = '-v --tb=short'

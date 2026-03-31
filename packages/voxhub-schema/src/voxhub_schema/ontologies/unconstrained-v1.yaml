@@ -1,0 +1,9 @@
+name: unconstrained
+version: 1
+type: segmentation
+channel: multi
+labels: null
+constraints:
+  - non_negative_integers
+  - sequential_from_zero
+  - background_at_zero

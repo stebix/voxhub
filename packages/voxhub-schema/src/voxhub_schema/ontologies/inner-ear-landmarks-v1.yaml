@@ -1,0 +1,8 @@
+name: inner-ear-landmarks
+version: 1
+type: landmarks
+coordinate_system: LPS
+points:
+  - round window
+  - oval window
+  - cochlear apex

@@ -1,0 +1,34 @@
+[project]
+name = 'voxhub-core'
+version = '0.1.0'
+description = 'Domain library and server entrypoint for voxhub'
+requires-python = '>=3.12'
+dependencies = [
+    'attrs>=25.4.0',
+    'filelock>=3.16.0',
+    'jaxtyping>=0.3.9',
+    'numpy>=2.4.0',
+    'pydicom>=3.0.1',
+    'pylibjpeg>=2.1.0',
+    'pylibjpeg-libjpeg>=2.3.0',
+    'pynrrd>=1.1.3',
+    'rich>=14.0.0',
+    'structlog>=25.1.0',
+    'tqdm>=4.67.0',
+    'voxhub-schema',
+    'zarr>=3.1.5',
+]
+
+[project.scripts]
+voxhub = 'voxhub_core.cli:main'
+voxhub-server = 'voxhub_core.server.cli:main'
+
+[tool.uv.sources]
+voxhub-schema = { workspace = true }
+
+[build-system]
+requires = ['hatchling']
+build-backend = 'hatchling.build'
+
+[tool.hatch.build.targets.wheel]
+packages = ['src/voxhub_core']

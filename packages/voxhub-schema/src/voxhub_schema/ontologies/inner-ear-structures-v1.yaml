@@ -1,0 +1,9 @@
+name: inner-ear-structures
+version: 1
+type: segmentation
+channel: multi
+labels:
+  0: background
+  1: cochlea
+  2: vestibule
+  3: semicircular canals

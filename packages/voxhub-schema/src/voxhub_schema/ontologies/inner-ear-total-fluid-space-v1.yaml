@@ -1,0 +1,7 @@
+name: inner-ear-total-fluid-space
+version: 1
+type: segmentation
+channel: single
+labels:
+  0: background
+  1: inner ear total fluid space

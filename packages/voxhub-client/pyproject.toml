@@ -1,0 +1,22 @@
+[project]
+name = 'voxhub-client'
+version = '0.1.0'
+description = 'User-facing CLI for voxhub remote annotation workflows'
+requires-python = '>=3.12'
+dependencies = [
+    'rich>=14.0.0',
+    'voxhub-schema',
+]
+
+[project.scripts]
+voxhub = 'voxhub_client.cli:main'
+
+[tool.uv.sources]
+voxhub-schema = { workspace = true }
+
+[build-system]
+requires = ['hatchling']
+build-backend = 'hatchling.build'
+
+[tool.hatch.build.targets.wheel]
+packages = ['src/voxhub_client']
