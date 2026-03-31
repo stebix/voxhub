@@ -1,0 +1,113 @@
+"""Provenance recording for annotation integration.
+
+Writes provenance metadata to zarr array attrs and to the central
+``.meta/provenance.jsonl`` index at the zarr root.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+import zarr
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from voxhub_schema import IssueRecord
+
+
+def record_provenance(
+    zarr_root: Path,
+    store_name: str,
+    annotation_path: str,
+    *,
+    annotator_id: str,
+    machine_id: str,
+    nano_id: str,
+    pull_session_id: str,
+    ontology: str,
+    ontology_version: int,
+    source_nrrd_checksum: str,
+    source_file: str,
+    issues: list[IssueRecord] | None = None,
+) -> None:
+    """Record full provenance for an annotation integration.
+
+    Updates the zarr array attrs and appends to the JSONL index.
+
+    Parameters
+    ----------
+    zarr_root : Path
+        Root directory containing zarr stores.
+    store_name : str
+        Name of the zarr store (without ``.zarr``).
+    annotation_path : str
+        Path within the zarr store to the annotation array.
+    annotator_id : str
+        Annotator identifier.
+    machine_id : str
+        Machine identifier hash.
+    nano_id : str
+        8-char nano-ID.
+    pull_session_id : str
+        Session ID from the pull that created the WIP.
+    ontology : str
+        Ontology name.
+    ontology_version : int
+        Ontology version.
+    source_nrrd_checksum : str
+        SHA-256 checksum of the source NRRD file.
+    source_file : str
+        Original annotation filename.
+    issues : list[IssueRecord] | None
+        Validation issues (warnings that were accepted).
+    """
+    timestamp = datetime.now(UTC).isoformat()
+    zarr_path = zarr_root / f'{store_name}.zarr'
+
+    # Update zarr array attributes.
+    root = zarr.open_group(zarr_path, mode='r+')
+    parts = annotation_path.strip('/').split('/')
+    node: Any = root
+    for part in parts:
+        node = node[part]
+
+    provenance_attrs = {
+        'integrated_at': timestamp,
+        'annotator_id': annotator_id,
+        'machine_id': machine_id,
+        'nano_id': nano_id,
+        'pull_session_id': pull_session_id,
+        'source_nrrd_checksum': source_nrrd_checksum,
+        'source_file': source_file,
+        'ontology': ontology,
+        'ontology_version': ontology_version,
+    }
+    node.update_attributes(provenance_attrs)
+
+    # Append to provenance JSONL index.
+    meta_dir = zarr_root / '.meta'
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = meta_dir / 'provenance.jsonl'
+
+    session_id = f'dt-push-{datetime.now(UTC).strftime("%Y%m%dT%H%M%S")}'
+    record = {
+        'event': 'push',
+        'session_id': session_id,
+        'pull_session_id': pull_session_id,
+        'store': store_name,
+        'annotation_path': annotation_path,
+        'annotator_id': annotator_id,
+        'machine_id': machine_id,
+        'timestamp': timestamp,
+        'ontology': ontology,
+        'ontology_version': ontology_version,
+        'issues': [
+            {'severity': i.severity, 'message': i.message} for i in (issues or [])
+        ],
+    }
+
+    with open(jsonl_path, 'a') as f:
+        f.write(json.dumps(record) + '\n')

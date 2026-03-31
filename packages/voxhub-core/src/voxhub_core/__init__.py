@@ -1,1 +1,1 @@
-# voxhub-core: domain library and server entrypoint
+"""voxhub-core: domain library and server entrypoint."""
