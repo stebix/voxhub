@@ -15,6 +15,7 @@ dev = [
     'ruff>=0.15.0',
     'pyright>=1.1.400',
     'pytest>=8.0',
+    'pytest-benchmark>=4.0',
     'pytest-cov>=6.0',
 ]
 analysis = [
@@ -50,6 +51,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 'packages/*/tests/**' = ['ANN']
+'tests/**' = ['ANN']
 
 [tool.ruff.lint.isort]
 known-first-party = ['voxhub_core', 'voxhub_schema', 'voxhub_client']

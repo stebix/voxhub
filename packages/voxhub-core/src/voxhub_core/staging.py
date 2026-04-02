@@ -309,7 +309,7 @@ def stage(
             continue
 
         root = zarr.open_group(entry.path, mode='r')
-        arr = root['raw']['full']
+        arr: zarr.Array = root['raw']['full']
         volume_data = arr[:]
         attributes = dict(arr.attrs)
 
