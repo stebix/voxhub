@@ -1,6 +1,7 @@
 """SSH-invoked server CLI.
 
-Commands: list-stores, prepare-pull, integrate-annotations, cleanup, gc.
+Commands: list-stores, prepare-pull, integrate-annotations, cleanup, gc,
+healthcheck.
 
 Every command writes a single JSON object to stdout and exits.
 Structured errors use the ``ServerError`` envelope.  Logs go to
@@ -10,6 +11,7 @@ stderr via structlog.
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -33,7 +35,10 @@ from voxhub_core.integrate import (
 )
 from voxhub_core.server.locks import store_lock
 from voxhub_core.server.logging import configure_logging, get_logger
-from voxhub_core.server.provenance import record_provenance
+from voxhub_core.server.provenance import (
+    record_provenance,
+    validate_provenance_jsonl,
+)
 from voxhub_core.staging import extract_spatial_metadata, stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
@@ -567,6 +572,153 @@ def _run_gc(args: argparse.Namespace) -> None:
     )
 
 
+# -- healthcheck -------------------------------------------------------------
+
+
+def _check_python_version() -> dict[str, str]:
+    """Check that the Python version is 3.12+."""
+    version = sys.version.split()[0]
+    major, minor = sys.version_info[:2]
+    if (major, minor) >= (3, 12):
+        return {'name': 'python_version', 'status': 'ok', 'detail': version}
+    return {
+        'name': 'python_version',
+        'status': 'fail',
+        'detail': f'{version} (requires >= 3.12)',
+    }
+
+
+def _check_packages() -> dict[str, str]:
+    """Check that required voxhub packages are importable."""
+    missing: list[str] = []
+    for pkg in ('voxhub_schema', 'voxhub_core', 'voxhub_client'):
+        try:
+            __import__(pkg)
+        except ImportError:
+            missing.append(pkg)
+
+    if not missing:
+        return {'name': 'packages', 'status': 'ok', 'detail': 'all importable'}
+    return {
+        'name': 'packages',
+        'status': 'fail',
+        'detail': f'missing: {", ".join(missing)}',
+    }
+
+
+def _check_rsync() -> dict[str, str]:
+    """Check that rsync is available on PATH."""
+    import shutil as _shutil
+
+    rsync = _shutil.which('rsync')
+    if rsync:
+        return {'name': 'rsync', 'status': 'ok', 'detail': rsync}
+    return {'name': 'rsync', 'status': 'fail', 'detail': 'not found on PATH'}
+
+
+def _check_zarr_root(zarr_root: Path) -> dict[str, str]:
+    """Check that the zarr root directory exists and is writable."""
+    if not zarr_root.is_dir():
+        return {
+            'name': 'zarr_root',
+            'status': 'fail',
+            'detail': f'{zarr_root} is not a directory',
+        }
+    if not os.access(zarr_root, os.R_OK | os.W_OK):
+        return {
+            'name': 'zarr_root',
+            'status': 'fail',
+            'detail': f'{zarr_root} is not readable/writable',
+        }
+    return {'name': 'zarr_root', 'status': 'ok', 'detail': str(zarr_root)}
+
+
+def _check_stores(zarr_root: Path) -> dict[str, str]:
+    """Discover zarr stores and report their status."""
+    entries = discover_zarr_stores(zarr_root)
+    errored = [e for e in entries if e.error]
+    total = len(entries)
+
+    if not entries:
+        return {'name': 'stores', 'status': 'ok', 'detail': 'no stores found'}
+    if errored:
+        names = ', '.join(e.path.name.removesuffix('.zarr') for e in errored)
+        return {
+            'name': 'stores',
+            'status': 'fail',
+            'detail': f'{len(errored)}/{total} stores have errors: {names}',
+        }
+    return {
+        'name': 'stores',
+        'status': 'ok',
+        'detail': f'{total} stores healthy',
+    }
+
+
+def _check_provenance(zarr_root: Path) -> dict[str, str]:
+    """Validate all provenance JSONL files under the zarr root."""
+    meta_dir = zarr_root / '.meta'
+    jsonl_path = meta_dir / 'provenance.jsonl'
+
+    if not jsonl_path.is_file():
+        return {
+            'name': 'provenance',
+            'status': 'ok',
+            'detail': 'no provenance file yet',
+        }
+
+    errors = validate_provenance_jsonl(jsonl_path)
+    if errors:
+        return {
+            'name': 'provenance',
+            'status': 'fail',
+            'detail': f'{len(errors)} malformed entries',
+        }
+    return {'name': 'provenance', 'status': 'ok', 'detail': 'valid'}
+
+
+def _run_healthcheck(args: argparse.Namespace) -> None:
+    log = get_logger(command='healthcheck')
+    t0 = time.monotonic()
+
+    zarr_root = Path(args.zarr_root)
+    log.info('healthcheck_started', zarr_root=str(zarr_root))
+
+    checks = [
+        _check_python_version(),
+        _check_packages(),
+        _check_rsync(),
+        _check_zarr_root(zarr_root),
+    ]
+
+    # Only run store/provenance checks if zarr_root is accessible.
+    if checks[-1]['status'] == 'ok':
+        checks.append(_check_stores(zarr_root))
+        checks.append(_check_provenance(zarr_root))
+
+    any_failed = any(c['status'] == 'fail' for c in checks)
+    status = 'degraded' if any_failed else 'healthy'
+
+    duration = time.monotonic() - t0
+    log.info(
+        'healthcheck_completed',
+        status=status,
+        duration_s=round(duration, 3),
+    )
+
+    _write_dict(
+        {
+            'protocol_version': PROTOCOL_VERSION,
+            'status': status,
+            'python_version': sys.version.split()[0],
+            'checks': checks,
+        }
+    )
+
+    if any_failed:
+        sys.exit(1)
+
+
 # -- Parser ------------------------------------------------------------------
 
 
@@ -615,6 +767,11 @@ def main() -> None:
     gc = subparsers.add_parser('gc')
     gc.add_argument('--ttl-hours', type=float, default=24.0)
     gc.set_defaults(func=_run_gc)
+
+    # healthcheck
+    hc = subparsers.add_parser('healthcheck')
+    hc.add_argument('zarr_root')
+    hc.set_defaults(func=_run_healthcheck)
 
     args = parser.parse_args()
 

@@ -5,6 +5,7 @@ Writes provenance metadata to zarr array attrs and to the central
 """
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -107,3 +108,37 @@ def record_provenance(
 
     with open(jsonl_path, 'a') as f:
         f.write(json.dumps(record) + '\n')
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def validate_provenance_jsonl(path: Path) -> list[str]:
+    """Validate a provenance JSONL file.
+
+    Each line must be valid JSON. Missing files are not considered
+    errors (the file is created on first push).
+
+    Parameters
+    ----------
+    path : Path
+        Path to a ``provenance.jsonl`` file.
+
+    Returns
+    -------
+    list[str]
+        Error descriptions. Empty list means the file is valid.
+    """
+    if not path.is_file():
+        return []
+
+    errors: list[str] = []
+    with open(path) as f:
+        for line_no, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                errors.append(f'line {line_no}: {exc}')
+    return errors
