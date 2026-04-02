@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main, trunk]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - run: uv run ruff check packages/
+      - run: uv run ruff format --check packages/
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - run: uv run pyright
+
+  test-schema:
+    name: Test voxhub-schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - run: >-
+          uv run pytest packages/voxhub-schema/tests
+          -v --tb=short
+          --cov=voxhub_schema
+          --cov-report=term-missing
+          --cov-fail-under=70
+
+  test-core:
+    name: Test voxhub-core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - run: >-
+          uv run pytest packages/voxhub-core/tests
+          -v --tb=short
+          --cov=voxhub_core
+          --cov-report=term-missing
+          --cov-fail-under=70
+
+  test-client:
+    name: Test voxhub-client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - run: >-
+          uv run pytest packages/voxhub-client/tests
+          -v --tb=short
+          --cov=voxhub_client
+          --cov-report=term-missing
+          --cov-fail-under=70
+
+  test-e2e:
+    name: Test end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - run: uv run pytest tests/ -v --tb=short
