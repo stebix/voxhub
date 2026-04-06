@@ -44,6 +44,8 @@ from voxhub_core.staging import extract_spatial_metadata, stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
     IssueRecord,
+    Ontology,
+    RemoteManifest,
     ServerError,
     generate_nano_id,
     load_ontology,
@@ -266,6 +268,52 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
 # -- integrate-annotations ---------------------------------------------------
 
 
+def _resolve_ontologies(
+    expected_ontologies: list[str],
+    annotation_type: str,
+    log: Any,
+) -> tuple[list[Ontology], list[IssueRecord]]:
+    """Load ontology objects for the expected ontology names.
+
+    Parameters
+    ----------
+    expected_ontologies : list[str]
+        Ontology names from the pull manifest.
+    annotation_type : str
+        ``'segmentation'`` or ``'landmarks'`` -- used to filter.
+    log
+        structlog logger.
+
+    Returns
+    -------
+    tuple[list[Ontology], list[IssueRecord]]
+        Loaded ontologies and any issues encountered during loading.
+    """
+    ontologies: list[Ontology] = []
+    issues: list[IssueRecord] = []
+
+    for ont_name in expected_ontologies:
+        try:
+            ont = load_ontology(ont_name)
+        except FileNotFoundError:
+            issues.append(
+                IssueRecord(
+                    severity='warning',
+                    message=(
+                        f'Expected ontology {ont_name!r} not found; '
+                        f'skipping ontology-aware validation'
+                    ),
+                )
+            )
+            log.warning('ontology_not_found', ontology=ont_name)
+            continue
+
+        if ont.type == annotation_type:
+            ontologies.append(ont)
+
+    return ontologies, issues
+
+
 def _run_integrate_annotations(args: argparse.Namespace) -> None:
     log = get_logger(command='integrate-annotations')
     t0 = time.monotonic()
@@ -283,6 +331,27 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         zarr_root=str(zarr_root),
         wip_dir=str(wip_dir),
         annotator_id=annotator_id,
+    )
+
+    # Read the pull manifest from the WIP directory.  The manifest was
+    # written by ``prepare-pull`` and rsync'd alongside the annotation
+    # files.  It carries the authoritative ontology declarations.
+    try:
+        manifest = RemoteManifest.read(wip_dir)
+    except FileNotFoundError:
+        msg = (
+            f'No pull manifest found in {wip_dir}. '
+            f'The WIP directory must contain .voxhub_manifest.json '
+            f'from the original pull.'
+        )
+        log.error('manifest_missing', wip_dir=str(wip_dir))
+        _write_error('manifest_missing', msg)
+        sys.exit(1)
+
+    log.info(
+        'manifest_loaded',
+        pull_session_id=manifest.pull_session_id,
+        store_count=len(manifest.stores),
     )
 
     # Parse expected checksums.
@@ -345,15 +414,34 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
             'spacing_mm': spacing_mm,
         }
 
+        # Resolve ontologies from the pull manifest for this store.
+        store_manifest = manifest.stores.get(store_name)
+        expected_ontologies = store_manifest.expected_ontologies if store_manifest else []
+
+        seg_ontologies, seg_ont_issues = _resolve_ontologies(
+            expected_ontologies, 'segmentation', log
+        )
+        lmk_ontologies, lmk_ont_issues = _resolve_ontologies(
+            expected_ontologies, 'landmarks', log
+        )
+
         issues: list[IssueRecord] = []
+        issues.extend(seg_ont_issues)
+        issues.extend(lmk_ont_issues)
         annotations_written: list[dict[str, Any]] = []
 
         with store_lock(zarr_path):
             # Integrate segmentation.
             if seg_file is not None:
+                # Use the first matching segmentation ontology, or None.
+                seg_ontology = seg_ontologies[0] if seg_ontologies else None
                 try:
                     seg_data = parse_seg_nrrd(seg_file)
-                    seg_issues = validate_segmentation(seg_data, manifest_entry)
+                    seg_issues = validate_segmentation(
+                        seg_data,
+                        manifest_entry,
+                        ontology=seg_ontology,
+                    )
                     issues.extend(seg_issues)
 
                     errors = [i for i in seg_issues if i.severity == 'error']
@@ -364,17 +452,8 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             errors=[i.message for i in errors],
                         )
                     else:
-                        # Determine ontology from segments or manifest.
-                        ont_name = 'unconstrained'
-                        ont_version = 1
-                        ontology = None
-                        try:
-                            # Try to infer ontology from file metadata
-                            # or use default.
-                            ontology = load_ontology(ont_name)
-                            ont_version = ontology.version
-                        except FileNotFoundError:
-                            pass
+                        ont_name = seg_ontology.name if seg_ontology else 'unconstrained'
+                        ont_version = seg_ontology.version if seg_ontology else 1
 
                         short_random = generate_nano_id(size=4)
                         instance_dir = f'{ont_name}-{date_str}-{short_random}'
@@ -384,7 +463,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             zarr_path,
                             seg_data,
                             seg_path,
-                            ontology=ontology,
+                            ontology=seg_ontology,
                             force=force,
                         )
 
@@ -416,7 +495,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                     issues.append(
                         IssueRecord(
                             severity='error',
-                            message=f'Segmentation integration failed: {exc}',
+                            message=(f'Segmentation integration failed: {exc}'),
                         )
                     )
                     log.error(
@@ -427,9 +506,14 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
             # Integrate landmarks.
             if lmk_file is not None:
+                lmk_ontology = lmk_ontologies[0] if lmk_ontologies else None
                 try:
                     lmk_data = parse_mrk_json(lmk_file)
-                    lmk_issues = validate_landmarks(lmk_data, manifest_entry)
+                    lmk_issues = validate_landmarks(
+                        lmk_data,
+                        manifest_entry,
+                        ontology=lmk_ontology,
+                    )
                     issues.extend(lmk_issues)
 
                     errors = [i for i in lmk_issues if i.severity == 'error']
@@ -440,8 +524,8 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             errors=[i.message for i in errors],
                         )
                     else:
-                        ont_name = 'landmarks'
-                        ont_version = 1
+                        ont_name = lmk_ontology.name if lmk_ontology else 'landmarks'
+                        ont_version = lmk_ontology.version if lmk_ontology else 1
 
                         short_random = generate_nano_id(size=4)
                         instance_dir = f'{ont_name}-{date_str}-{short_random}'
@@ -451,6 +535,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             zarr_path,
                             lmk_data,
                             lmk_path,
+                            ontology=lmk_ontology,
                             force=force,
                         )
 

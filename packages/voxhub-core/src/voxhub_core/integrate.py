@@ -59,6 +59,7 @@ def validate_segmentation(
     seg: SegmentationData,
     manifest_entry: dict[str, object],
     *,
+    ontology: Ontology | None = None,
     spatial_tolerance: float = 0.01,
 ) -> list[IssueRecord]:
     """Validate a parsed segmentation against volume metadata.
@@ -69,6 +70,8 @@ def validate_segmentation(
         Parsed segmentation data.
     manifest_entry : dict[str, object]
         Store entry from the stage manifest.
+    ontology : Ontology | None
+        If provided, check label conformance against ontology.
     spatial_tolerance : float
         Tolerance in mm for spatial comparison.
 
@@ -161,6 +164,51 @@ def validate_segmentation(
                     message=(f'Gap in label sequence: missing labels {sorted(gaps)}'),
                 )
             )
+
+    # Ontology conformance.
+    if ontology is not None and not ontology.is_unconstrained:
+        ont_labels = ontology.label_map
+        if ont_labels is not None:
+            expected_labels = {v for v in ont_labels if v != 0}
+            seg_labels = {s.label_value: s.name for s in seg.segments}
+
+            for value, name in seg_labels.items():
+                if value == 0:
+                    continue
+                if value not in ont_labels:
+                    issues.append(
+                        IssueRecord(
+                            severity='error',
+                            message=(
+                                f'Segment label {value} ({name!r}) is not '
+                                f'defined in ontology {ontology.name!r} '
+                                f'v{ontology.version}'
+                            ),
+                        )
+                    )
+                elif ont_labels[value] != name:
+                    issues.append(
+                        IssueRecord(
+                            severity='warning',
+                            message=(
+                                f'Segment label {value} is named {name!r} '
+                                f'but ontology expects {ont_labels[value]!r}'
+                            ),
+                        )
+                    )
+
+            missing = expected_labels - set(seg_labels.keys())
+            if missing:
+                missing_names = [f'{v} ({ont_labels[v]})' for v in sorted(missing)]
+                issues.append(
+                    IssueRecord(
+                        severity='warning',
+                        message=(
+                            f'Ontology labels not present in segmentation: '
+                            f'{", ".join(missing_names)}'
+                        ),
+                    )
+                )
 
     return issues
 
