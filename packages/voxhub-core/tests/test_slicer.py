@@ -1,6 +1,5 @@
 """Tests for Slicer format parsers and writers."""
 
-
 import numpy as np
 import pytest
 from _core_helpers import ORIGIN_LPS, SHAPE, SPACE_DIRECTIONS

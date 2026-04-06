@@ -8,7 +8,6 @@ pushed to the server.
 The test data is built programmatically — no fixture files on disk.
 """
 
-
 import numpy as np
 from _schema_helpers import (
     ORIGIN_LPS,
@@ -23,6 +22,7 @@ from voxhub_schema.validation import validate_lmk_preflight, validate_seg_prefli
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _errors(issues: list[IssueRecord]) -> list[IssueRecord]:
     return [i for i in issues if i.severity == 'error']
@@ -119,9 +119,7 @@ class TestSegPreflightHappyPath:
 
 
 class TestSegShapeEnforcement:
-    def test_wrong_shape_is_error(
-        self, tmp_path, manifest_entry, inner_ear_ontology
-    ):
+    def test_wrong_shape_is_error(self, tmp_path, manifest_entry, inner_ear_ontology):
         wrong_shape = (8, 12, 14)  # z differs
         lm = np.zeros(wrong_shape, dtype=np.int16)
         seg = write_seg_nrrd(tmp_path / 'test.seg.nrrd', lm, [])
@@ -148,9 +146,7 @@ class TestSegSpatialEnforcement:
             origin=[o + nudge for o in ORIGIN_LPS],
         )
         issues = validate_seg_preflight(seg, manifest_entry, inner_ear_ontology)
-        origin_errors = [
-            e for e in _errors(issues) if 'origin' in e.message.lower()
-        ]
+        origin_errors = [e for e in _errors(issues) if 'origin' in e.message.lower()]
         assert origin_errors == []
 
     def test_origin_beyond_tolerance_is_error(
@@ -213,13 +209,9 @@ class TestSegValueIntegrity:
         issues = validate_seg_preflight(seg, manifest_entry, unconstrained_ontology)
         assert any('negative' in e.message.lower() for e in _errors(issues))
 
-    def test_file_not_found_is_error(
-        self, tmp_path, manifest_entry, inner_ear_ontology
-    ):
+    def test_file_not_found_is_error(self, tmp_path, manifest_entry, inner_ear_ontology):
         missing = tmp_path / 'nonexistent.seg.nrrd'
-        issues = validate_seg_preflight(
-            missing, manifest_entry, inner_ear_ontology
-        )
+        issues = validate_seg_preflight(missing, manifest_entry, inner_ear_ontology)
         assert len(_errors(issues)) == 1
         assert 'not found' in _errors(issues)[0].message.lower()
 
@@ -316,9 +308,7 @@ class TestSegConstrainedOntology:
         # Name mismatch = warning, not error.
         assert any('name mismatch' in w.message.lower() for w in _warnings(issues))
         # No errors about missing labels (all values are present).
-        missing_errors = [
-            e for e in _errors(issues) if 'not defined' in e.message
-        ]
+        missing_errors = [e for e in _errors(issues) if 'not defined' in e.message]
         assert missing_errors == []
 
     def test_all_labels_present_and_named_correctly(
@@ -332,7 +322,8 @@ class TestSegConstrainedOntology:
         )
         issues = validate_seg_preflight(seg, manifest_entry, inner_ear_ontology)
         ontology_issues = [
-            i for i in issues
+            i
+            for i in issues
             if 'ontology' in i.message.lower()
             or 'not in the' in i.message.lower()
             or 'not defined' in i.message.lower()
@@ -413,9 +404,7 @@ class TestSegUnconstrainedOntology:
 
 
 class TestLmkPreflightHappyPath:
-    def test_valid_landmarks_lps(
-        self, tmp_path, manifest_entry, landmark_ontology
-    ):
+    def test_valid_landmarks_lps(self, tmp_path, manifest_entry, landmark_ontology):
         """All three required points in LPS, inside volume."""
         pts = [[-4.0, -5.0, -6.0], [-3.0, -4.0, -5.0], [-2.0, -3.0, -4.0]]
         labels = ['round_window', 'oval_window', 'cochlear_apex']
@@ -423,9 +412,7 @@ class TestLmkPreflightHappyPath:
         issues = validate_lmk_preflight(lmk, manifest_entry, landmark_ontology)
         assert _errors(issues) == []
 
-    def test_valid_landmarks_ras(
-        self, tmp_path, manifest_entry, landmark_ontology
-    ):
+    def test_valid_landmarks_ras(self, tmp_path, manifest_entry, landmark_ontology):
         """Points in RAS coordinate system — should be accepted."""
         # RAS → LPS: negate x and y.  The LPS-equivalent should be
         # inside the volume bounding box.
@@ -515,7 +502,8 @@ class TestLmkOntologyEnforcement:
         lmk = write_mrk_json(tmp_path / 'test.mrk.json', pts, labels, 'LPS')
         issues = validate_lmk_preflight(lmk, manifest_entry, landmark_ontology)
         ontology_errors = [
-            e for e in _errors(issues)
+            e
+            for e in _errors(issues)
             if 'ontology' in e.message.lower()
             or 'missing' in e.message.lower()
             or 'not defined' in e.message.lower()
@@ -531,9 +519,7 @@ class TestLmkOntologyEnforcement:
         labels = ['arbitrary']
         lmk = write_mrk_json(tmp_path / 'test.mrk.json', pts, labels, 'LPS')
         issues = validate_lmk_preflight(lmk, manifest_entry, inner_ear_ontology)
-        ontology_errors = [
-            e for e in _errors(issues) if 'ontology' in e.message.lower()
-        ]
+        ontology_errors = [e for e in _errors(issues) if 'ontology' in e.message.lower()]
         assert ontology_errors == []
 
 
@@ -565,9 +551,7 @@ class TestLmkBoundingBox:
         labels = ['round_window', 'oval_window', 'cochlear_apex']
         lmk = write_mrk_json(tmp_path / 'test.mrk.json', pts, labels, 'LPS')
         issues = validate_lmk_preflight(lmk, manifest_entry, landmark_ontology)
-        bounds_warnings = [
-            w for w in _warnings(issues) if 'outside' in w.message.lower()
-        ]
+        bounds_warnings = [w for w in _warnings(issues) if 'outside' in w.message.lower()]
         assert bounds_warnings == []
 
 
@@ -577,12 +561,8 @@ class TestLmkBoundingBox:
 
 
 class TestLmkFileErrors:
-    def test_file_not_found_is_error(
-        self, tmp_path, manifest_entry, landmark_ontology
-    ):
+    def test_file_not_found_is_error(self, tmp_path, manifest_entry, landmark_ontology):
         missing = tmp_path / 'nonexistent.mrk.json'
-        issues = validate_lmk_preflight(
-            missing, manifest_entry, landmark_ontology
-        )
+        issues = validate_lmk_preflight(missing, manifest_entry, landmark_ontology)
         assert len(_errors(issues)) == 1
         assert 'not found' in _errors(issues)[0].message.lower()

@@ -107,9 +107,7 @@ class TestSshRunnerRun:
         assert data['data'] == 42
 
     def test_nonzero_exit_no_stdout_raises_ssh_failed(self):
-        result = _mock_run_result(
-            returncode=255, stderr='Connection refused'
-        )
+        result = _mock_run_result(returncode=255, stderr='Connection refused')
         with patch('subprocess.run', return_value=result):
             with pytest.raises(RemoteError, match='Connection refused') as exc:
                 self._runner().run('list-stores')
@@ -178,9 +176,7 @@ class TestSshRunnerMktemp:
         assert path == '/tmp/dt-push-abcdef'
 
     def test_failure_raises_remote_error(self):
-        result = _mock_run_result(
-            returncode=1, stderr='Permission denied'
-        )
+        result = _mock_run_result(returncode=1, stderr='Permission denied')
         with patch('subprocess.run', return_value=result):
             with pytest.raises(RemoteError, match='Permission denied') as exc:
                 self._runner().mktemp()

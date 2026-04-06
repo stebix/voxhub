@@ -11,10 +11,7 @@ from pathlib import Path
 
 _CORE_SRC = Path(__file__).resolve().parents[2] / 'voxhub-core' / 'src' / 'voxhub_core'
 _CLIENT_SRC = (
-    Path(__file__).resolve().parents[2]
-    / 'voxhub-client'
-    / 'src'
-    / 'voxhub_client'
+    Path(__file__).resolve().parents[2] / 'voxhub-client' / 'src' / 'voxhub_client'
 )
 
 
@@ -27,7 +24,7 @@ def _collect_imports(source_file: Path) -> list[str]:
             for alias in node.names:
                 modules.append(alias.name)
         elif isinstance(node, ast.ImportFrom) and node.module:
-                modules.append(node.module)
+            modules.append(node.module)
     return modules
 
 

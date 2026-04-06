@@ -5,7 +5,6 @@ the annotator-scoped path convention.  Uses synthetic zarr stores
 and programmatically built annotation files.
 """
 
-
 import numpy as np
 import pytest
 import zarr
@@ -54,9 +53,7 @@ def _valid_seg() -> SegmentationData:
         segments=[
             Segment(id='s0', name='cochlea', label_value=1, color=(1, 0, 0)),
             Segment(id='s1', name='vestibule', label_value=2, color=(0, 1, 0)),
-            Segment(
-                id='s2', name='semicircular_canals', label_value=3, color=(0, 0, 1)
-            ),
+            Segment(id='s2', name='semicircular_canals', label_value=3, color=(0, 0, 1)),
         ],
         space_origin=np.array(ORIGIN_LPS),
         space_directions=np.array(SPACE_DIRECTIONS),
@@ -145,9 +142,7 @@ class TestValidateLandmarks:
             labels=['round_window', 'oval_window'],  # missing cochlear_apex
             coordinate_system='LPS',
         )
-        issues = validate_landmarks(
-            lmk, _manifest_entry(), ontology=landmark_ontology
-        )
+        issues = validate_landmarks(lmk, _manifest_entry(), ontology=landmark_ontology)
         assert any('cochlear_apex' in e.message for e in _errors(issues))
 
     def test_extra_ontology_point(self, landmark_ontology):
@@ -156,9 +151,7 @@ class TestValidateLandmarks:
             labels=['round_window', 'oval_window', 'cochlear_apex', 'bonus'],
             coordinate_system='LPS',
         )
-        issues = validate_landmarks(
-            lmk, _manifest_entry(), ontology=landmark_ontology
-        )
+        issues = validate_landmarks(lmk, _manifest_entry(), ontology=landmark_ontology)
         assert any('bonus' in e.message for e in _errors(issues))
 
     def test_no_ontology_skips_point_check(self):
@@ -168,9 +161,7 @@ class TestValidateLandmarks:
             coordinate_system='LPS',
         )
         issues = validate_landmarks(lmk, _manifest_entry(), ontology=None)
-        ontology_errors = [
-            e for e in _errors(issues) if 'ontology' in e.message.lower()
-        ]
+        ontology_errors = [e for e in _errors(issues) if 'ontology' in e.message.lower()]
         assert ontology_errors == []
 
 
@@ -185,14 +176,12 @@ class TestWriteSegmentationToZarr:
         seg = _valid_seg()
         group_path = 'annotations/alice-abc123/inner-ear-structures-20260101-xyzw/data'
 
-        write_segmentation_to_zarr(
-            store, seg, group_path, ontology=inner_ear_ontology
-        )
+        write_segmentation_to_zarr(store, seg, group_path, ontology=inner_ear_ontology)
 
         root = zarr.open_group(store, mode='r')
-        arr = root['annotations']['alice-abc123'][
-            'inner-ear-structures-20260101-xyzw'
-        ]['data']
+        arr = root['annotations']['alice-abc123']['inner-ear-structures-20260101-xyzw'][
+            'data'
+        ]
         assert arr.shape == SHAPE
         assert int(arr[0, 0, 0]) == 1
         assert int(arr[1, 1, 1]) == 2
@@ -202,9 +191,7 @@ class TestWriteSegmentationToZarr:
         seg = _valid_seg()
         group_path = 'annotations/alice-abc/seg-20260101-xyzw/data'
 
-        write_segmentation_to_zarr(
-            store, seg, group_path, ontology=inner_ear_ontology
-        )
+        write_segmentation_to_zarr(store, seg, group_path, ontology=inner_ear_ontology)
 
         root = zarr.open_group(store, mode='r')
         arr = root['annotations']['alice-abc']['seg-20260101-xyzw']['data']
@@ -259,9 +246,7 @@ class TestWriteLandmarksToZarr:
         lmk = _valid_lmk_lps()
         group_path = 'annotations/alice-abc/lmk-20260101-xyzw/data'
 
-        write_landmarks_to_zarr(
-            store, lmk, group_path, ontology=landmark_ontology
-        )
+        write_landmarks_to_zarr(store, lmk, group_path, ontology=landmark_ontology)
 
         root = zarr.open_group(store, mode='r')
         arr = root['annotations']['alice-abc']['lmk-20260101-xyzw']['data']
