@@ -16,6 +16,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
+from voxhub_schema import DatasetAttributes
+
 
 @attrs.define
 class AnnotationEntry:
@@ -40,6 +42,7 @@ class ZarrEntry:
     attributes: dict[str, Any] = attrs.Factory(dict)
     annotations: list[AnnotationEntry] = attrs.Factory(list)
     error: str | None = None
+    dataset_attributes: DatasetAttributes | None = None
 
 
 def _discover_annotations(root: zarr.Group) -> list[AnnotationEntry]:
@@ -99,6 +102,10 @@ def _probe_zarr(path: Path) -> ZarrEntry:
         entry.source_directory = a.get('source_directory')
         entry.series_directory = a.get('series_directory')
         entry.annotations = _discover_annotations(root)
+
+        da_raw = dict(root.attrs).get('dataset_attributes')
+        if da_raw is not None:
+            entry.dataset_attributes = DatasetAttributes.from_dict(da_raw)  # type: ignore[arg-type]
     except Exception as exc:
         entry.error = str(exc)
     return entry

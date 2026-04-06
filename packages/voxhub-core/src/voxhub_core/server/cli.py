@@ -1,7 +1,7 @@
 """SSH-invoked server CLI.
 
 Commands: list-stores, prepare-pull, integrate-annotations, cleanup, gc,
-healthcheck.
+validate-attributes, healthcheck.
 
 Every command writes a single JSON object to stdout and exits.
 Structured errors use the ``ServerError`` envelope.  Logs go to
@@ -23,6 +23,11 @@ from typing import Any
 import zarr
 from rich.console import Console
 
+from voxhub_core.attributes import (
+    DATASET_ATTRIBUTES_KEY,
+    get_dataset_attributes,
+    validate_dataset_attributes,
+)
 from voxhub_core.catalog import discover_zarr_stores
 from voxhub_core.integrate import (
     find_annotation_files,
@@ -123,6 +128,7 @@ def _run_list_stores(args: argparse.Namespace) -> None:
                     'space_directions': [],
                     'annotations': [],
                     'error': entry.error,
+                    'dataset_attributes': None,
                 }
             )
             continue
@@ -144,10 +150,12 @@ def _run_list_stores(args: argparse.Namespace) -> None:
                     'space_directions': [],
                     'annotations': annotations,
                     'error': 'Missing spatial metadata',
+                    'dataset_attributes': None,
                 }
             )
             continue
 
+        da_raw = dict(root.attrs).get(DATASET_ATTRIBUTES_KEY)
         stores.append(
             {
                 'name': store_name,
@@ -158,6 +166,7 @@ def _run_list_stores(args: argparse.Namespace) -> None:
                 'space_directions': space_directions.tolist(),
                 'annotations': annotations,
                 'error': None,
+                'dataset_attributes': da_raw,
             }
         )
 
@@ -658,6 +667,67 @@ def _run_gc(args: argparse.Namespace) -> None:
     )
 
 
+# -- validate-attributes -----------------------------------------------------
+
+
+def _run_validate_attributes(args: argparse.Namespace) -> None:
+    log = get_logger(command='validate-attributes')
+    t0 = time.monotonic()
+
+    zarr_root = Path(args.zarr_root)
+    selected_stores: list[str] | None = args.stores
+
+    log.info(
+        'validate_attributes_started',
+        zarr_root=str(zarr_root),
+        stores=selected_stores,
+    )
+
+    entries = discover_zarr_stores(zarr_root)
+
+    results: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        store_name = entry.path.name.removesuffix('.zarr')
+        if selected_stores and store_name not in selected_stores:
+            continue
+
+        da = get_dataset_attributes(entry.path)
+        if da is None:
+            results[store_name] = {'status': 'missing', 'issues': []}
+            continue
+
+        issues = validate_dataset_attributes(entry.path)
+        if issues:
+            results[store_name] = {
+                'status': 'warning',
+                'issues': [
+                    {
+                        'field': i.field,
+                        'declared': i.declared,
+                        'actual': i.actual,
+                        'message': i.message,
+                    }
+                    for i in issues
+                ],
+            }
+        else:
+            results[store_name] = {'status': 'ok', 'issues': []}
+
+    duration = time.monotonic() - t0
+    log.info(
+        'validate_attributes_completed',
+        store_count=len(results),
+        duration_s=round(duration, 3),
+    )
+
+    _write_dict(
+        {
+            'protocol_version': PROTOCOL_VERSION,
+            'results': results,
+        }
+    )
+
+
 # -- healthcheck -------------------------------------------------------------
 
 
@@ -854,6 +924,12 @@ def main() -> None:
     gc = subparsers.add_parser('gc')
     gc.add_argument('--ttl-hours', type=float, default=24.0)
     gc.set_defaults(func=_run_gc)
+
+    # validate-attributes
+    va = subparsers.add_parser('validate-attributes')
+    va.add_argument('zarr_root')
+    va.add_argument('--stores', nargs='*')
+    va.set_defaults(func=_run_validate_attributes)
 
     # healthcheck
     hc = subparsers.add_parser('healthcheck')

@@ -18,6 +18,7 @@ import pydicom
 import zarr
 from tqdm.auto import tqdm
 
+from voxhub_core.attributes import dataset_attributes_to_dict
 from voxhub_core.dicom.geometry import compute_slice_geometry
 from voxhub_core.dicom.loading import _collect_leaves, _dataset_to_dict
 from voxhub_core.dicom.types import (
@@ -26,6 +27,7 @@ from voxhub_core.dicom.types import (
     DicomVolume,
 )
 from voxhub_core.naming import generate_unique_names
+from voxhub_schema import DatasetAttributes
 
 
 @attrs.define
@@ -87,6 +89,7 @@ def export_zarr(
     path: str | Path,
     *,
     force_write: bool = False,
+    dataset_attributes: DatasetAttributes | None = None,
 ) -> None:
     """Export a DicomVolume to a zarr v3 store.
 
@@ -100,6 +103,8 @@ def export_zarr(
         Output ``.zarr`` directory.
     force_write : bool
         Overwrite if the path already exists.
+    dataset_attributes : DatasetAttributes | None
+        Optional dataset attributes to write to root group attrs.
 
     Raises
     ------
@@ -114,6 +119,11 @@ def export_zarr(
     raw = root.create_group('raw')
     arr = raw.create_array('full', data=volume.volume)
     arr.update_attributes(_sanitize_for_json(volume.metadata))  # type: ignore[arg-type]
+
+    if dataset_attributes is not None:
+        root.update_attributes(
+            {'dataset_attributes': dataset_attributes_to_dict(dataset_attributes)}
+        )
 
 
 def flatten_to_volumes(
