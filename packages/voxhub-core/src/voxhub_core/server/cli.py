@@ -39,6 +39,7 @@ from voxhub_core.server.provenance import (
     record_provenance,
     validate_provenance_jsonl,
 )
+from voxhub_core.server.settings import load_settings
 from voxhub_core.staging import extract_spatial_metadata, stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
@@ -724,7 +725,8 @@ def _run_healthcheck(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """Entry point for the ``voxhub-server`` CLI."""
-    configure_logging()
+    settings = load_settings()
+    configure_logging(settings.logging)
 
     parser = argparse.ArgumentParser(
         prog='voxhub-server',
