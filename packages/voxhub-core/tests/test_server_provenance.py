@@ -11,6 +11,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import zarr
@@ -21,15 +22,12 @@ from voxhub_core.server.provenance import (
 )
 from voxhub_schema import IssueRecord
 
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_ANN_PATH = (
-    'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
-)
+_DEFAULT_ANN_PATH = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
 
 
 def _call_record_provenance(
@@ -79,17 +77,19 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
 class TestRecordProvenance:
     """Covers voxhub_core.server.provenance.record_provenance — happy paths."""
 
-    _EXPECTED_ATTR_KEYS = {
-        'integrated_at',
-        'annotator_id',
-        'machine_id',
-        'nano_id',
-        'pull_session_id',
-        'source_nrrd_checksum',
-        'source_file',
-        'ontology',
-        'ontology_version',
-    }
+    _EXPECTED_ATTR_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            'integrated_at',
+            'annotator_id',
+            'machine_id',
+            'nano_id',
+            'pull_session_id',
+            'source_nrrd_checksum',
+            'source_file',
+            'ontology',
+            'ontology_version',
+        }
+    )
 
     def test_writes_zarr_array_attributes(self, zarr_root_factory):
         root = zarr_root_factory(('alpha',), with_annotations=True)
@@ -99,7 +99,7 @@ class TestRecordProvenance:
             'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
         ]
         attrs = dict(arr.attrs)
-        assert self._EXPECTED_ATTR_KEYS <= attrs.keys()
+        assert attrs.keys() >= self._EXPECTED_ATTR_KEYS
         assert attrs['annotator_id'] == 'bob'
         assert attrs['machine_id'] == 'machine-7'
         assert attrs['nano_id'] == 'deadbeef'
@@ -225,9 +225,7 @@ class TestRecordProvenanceDurability:
             calls.append(fd)
             real_fsync(fd)
 
-        monkeypatch.setattr(
-            'voxhub_core.server.provenance.os.fsync', _recording_fsync
-        )
+        monkeypatch.setattr('voxhub_core.server.provenance.os.fsync', _recording_fsync)
         _call_record_provenance(root)
         assert len(calls) == 1
 
@@ -298,9 +296,7 @@ class TestValidateProvenanceJsonl:
         path.touch()
         assert validate_provenance_jsonl(path) == []
 
-    def test_valid_file_returns_empty_list(
-        self, tmp_path, provenance_jsonl_factory
-    ):
+    def test_valid_file_returns_empty_list(self, tmp_path, provenance_jsonl_factory):
         path = provenance_jsonl_factory(
             tmp_path / 'provenance.jsonl',
             entries=[
@@ -311,9 +307,7 @@ class TestValidateProvenanceJsonl:
         )
         assert validate_provenance_jsonl(path) == []
 
-    def test_malformed_line_reports_line_number(
-        self, tmp_path, provenance_jsonl_factory
-    ):
+    def test_malformed_line_reports_line_number(self, tmp_path, provenance_jsonl_factory):
         path = provenance_jsonl_factory(
             tmp_path / 'provenance.jsonl',
             entries=[
@@ -365,6 +359,4 @@ class TestValidateProvenanceJsonl:
         # restore the original string without mojibake.
         record = _read_jsonl(root / '.meta' / 'provenance.jsonl')[0]
         assert record['annotator_id'] == 'müller-李'
-        assert validate_provenance_jsonl(
-            root / '.meta' / 'provenance.jsonl'
-        ) == []
+        assert validate_provenance_jsonl(root / '.meta' / 'provenance.jsonl') == []

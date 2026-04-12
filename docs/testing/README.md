@@ -12,12 +12,12 @@ The plans in this directory are the **tactical** specifications that fulfill
 its P1 and P2 sections. They enumerate concrete test cases, fixtures, and
 scaffolding required to cover specific untested modules.
 
-| Top-level plan section         | Tactical plan                                                  | Status      |
-|--------------------------------|----------------------------------------------------------------|-------------|
-| §4 Server Command Integration  | [server-cli.md](server-cli.md)                                 | implemented |
-| §6 Concurrent Writer Safety    | [concurrency-and-provenance.md](concurrency-and-provenance.md) | implemented |
-| §7 Provenance / Audit          | [concurrency-and-provenance.md](concurrency-and-provenance.md) | implemented |
-| (gap — not in strategic plan)  | [catalog-staging-audit.md](catalog-staging-audit.md)           | implemented |
+| Top-level plan section         | Tactical plan                                                  | Status               |
+|--------------------------------|----------------------------------------------------------------|----------------------|
+| §4 Server Command Integration  | [server-cli.md](server-cli.md)                                 | implemented, audited |
+| §6 Concurrent Writer Safety    | [concurrency-and-provenance.md](concurrency-and-provenance.md) | implemented, audited |
+| §7 Provenance / Audit          | [concurrency-and-provenance.md](concurrency-and-provenance.md) | implemented, audited |
+| (gap — not in strategic plan)  | [catalog-staging-audit.md](catalog-staging-audit.md)           | implemented, audited |
 
 ## Scope
 

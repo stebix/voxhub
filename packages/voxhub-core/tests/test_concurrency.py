@@ -81,8 +81,7 @@ def _record_provenance_worker(kwargs: dict[str, Any]) -> None:
     issues_raw = kwargs.pop('_issues_raw', None)
     if issues_raw is not None:
         kwargs['issues'] = [
-            IssueRecord(severity=i['severity'], message=i['message'])
-            for i in issues_raw
+            IssueRecord(severity=i['severity'], message=i['message']) for i in issues_raw
         ]
     record_provenance(**kwargs)
 
@@ -221,9 +220,7 @@ class TestConcurrentIntegrateSameStore:
             ]
         )
 
-        assert all(r['returncode'] == 0 for r in results), [
-            r['stderr'] for r in results
-        ]
+        assert all(r['returncode'] == 0 for r in results), [r['stderr'] for r in results]
 
         annotator_dirs = {
             p.name
@@ -260,9 +257,7 @@ class TestConcurrentIntegrateSameStore:
         results = concurrent_integrate_runner(invocations, timeout=120.0)
         elapsed = time.monotonic() - t0
 
-        assert all(r['returncode'] == 0 for r in results), [
-            r['stderr'] for r in results
-        ]
+        assert all(r['returncode'] == 0 for r in results), [r['stderr'] for r in results]
         assert elapsed < 60.0, f'5 concurrent integrates took {elapsed:.1f}s'
 
         records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
@@ -292,16 +287,15 @@ class TestConcurrentIntegrateSameStore:
 
         monkeypatch.setattr(server_cli, 'store_lock', _short_lock)
 
-        with held_lock(zarr_root / 'alpha.zarr'):
-            with pytest.raises(Timeout):
-                server_cli._run_integrate_annotations(
-                    server_argv(
-                        zarr_root=zarr_root,
-                        wip_dir=str(wip),
-                        annotator_id='alice',
-                        nano_id='ccccdddd',
-                    )
+        with held_lock(zarr_root / 'alpha.zarr'), pytest.raises(Timeout):
+            server_cli._run_integrate_annotations(
+                server_argv(
+                    zarr_root=zarr_root,
+                    wip_dir=str(wip),
+                    annotator_id='alice',
+                    nano_id='ccccdddd',
                 )
+            )
 
     def test_lock_released_after_crash(
         self,
@@ -314,15 +308,14 @@ class TestConcurrentIntegrateSameStore:
 
         ctx = mp.get_context('fork')
         acquired = ctx.Event()
-        proc = ctx.Process(
-            target=_acquire_and_suicide, args=(str(zarr_path), acquired)
-        )
+        proc = ctx.Process(target=_acquire_and_suicide, args=(str(zarr_path), acquired))
         proc.start()
         try:
             assert acquired.wait(timeout=10.0)
             proc.join(timeout=5.0)
             assert not proc.is_alive()
-            assert proc.exitcode is not None and proc.exitcode < 0  # SIGKILL
+            assert proc.exitcode is not None
+            assert proc.exitcode < 0  # SIGKILL
         finally:
             if proc.is_alive():
                 proc.terminate()
@@ -368,9 +361,7 @@ class TestConcurrentIntegrateDifferentStores:
             ]
         )
 
-        assert all(r['returncode'] == 0 for r in results), [
-            r['stderr'] for r in results
-        ]
+        assert all(r['returncode'] == 0 for r in results), [r['stderr'] for r in results]
         records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
         assert {r['store'] for r in records} == {'alpha', 'beta'}
 
@@ -435,9 +426,7 @@ class TestConcurrentProvenanceAppend:
         store_names = [f'store{i:02d}' for i in range(10)]
         zarr_root = zarr_root_factory(tuple(store_names), with_annotations=True)
 
-        ann_path = (
-            'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
-        )
+        ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
         targets = [
             {
                 'zarr_root': zarr_root,
@@ -479,9 +468,7 @@ class TestConcurrentProvenanceAppend:
         store_names = [f'large{i:02d}' for i in range(4)]
         zarr_root = zarr_root_factory(tuple(store_names), with_annotations=True)
 
-        ann_path = (
-            'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
-        )
+        ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
 
         def _big_issues(tag: str) -> list[dict[str, str]]:
             return [
@@ -514,9 +501,7 @@ class TestConcurrentProvenanceAppend:
 
         jsonl_path = zarr_root / '.meta' / 'provenance.jsonl'
         raw_lines = [
-            ln
-            for ln in jsonl_path.read_text(encoding='utf-8').splitlines()
-            if ln.strip()
+            ln for ln in jsonl_path.read_text(encoding='utf-8').splitlines() if ln.strip()
         ]
         assert len(raw_lines) == 4, (
             f'expected 4 lines in provenance.jsonl, got {len(raw_lines)} — '
@@ -539,9 +524,7 @@ class TestConcurrentProvenanceAppend:
         store_names = [f'stress{i:03d}' for i in range(100)]
         zarr_root = zarr_root_factory(tuple(store_names), with_annotations=True)
 
-        ann_path = (
-            'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
-        )
+        ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
         targets = [
             {
                 'zarr_root': zarr_root,
@@ -621,9 +604,7 @@ class TestAnnotatorIsolation:
         assert alice_records[0]['annotation_path'].startswith(
             'annotations/alice-aaaa1111/'
         )
-        assert bob_records[0]['annotation_path'].startswith(
-            'annotations/bob-bbbb2222/'
-        )
+        assert bob_records[0]['annotation_path'].startswith('annotations/bob-bbbb2222/')
 
     def test_same_annotator_two_pushes_different_instances(
         self,

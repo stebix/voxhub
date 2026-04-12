@@ -394,8 +394,7 @@ def held_lock() -> Callable[..., Any]:
             if not acquired.wait(timeout=acquire_timeout):
                 proc.terminate()
                 raise RuntimeError(
-                    f'held_lock child did not acquire the lock within '
-                    f'{acquire_timeout}s'
+                    f'held_lock child did not acquire the lock within {acquire_timeout}s'
                 )
             yield
         finally:
