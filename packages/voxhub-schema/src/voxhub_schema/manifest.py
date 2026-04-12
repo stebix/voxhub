@@ -1,6 +1,6 @@
 """Remote manifest schema.
 
-The manifest is written to the local WIP directory after a pull and
+The manifest is written to the local staging directory after a pull and
 updated after push/integration.  It records the server origin,
 per-store spatial metadata, expected ontologies, and workflow status.
 """
@@ -51,7 +51,7 @@ class RemoteManifestEntry:
 
 @attrs.define
 class RemoteManifest:
-    """Manifest written to the WIP directory after ``pull``.
+    """Manifest written to the staging directory after ``pull``.
 
     Records the server target, protocol version, pull session ID,
     and per-store metadata + expected ontologies.
@@ -91,13 +91,13 @@ class RemoteManifest:
         return cls.from_dict(json.loads(text))
 
     @classmethod
-    def read(cls, wip_dir: Path) -> Self:
-        """Read a manifest from a WIP directory.
+    def read(cls, staging_dir: Path) -> Self:
+        """Read a manifest from a staging directory.
 
         Parameters
         ----------
-        wip_dir : Path
-            The local WIP directory containing ``.voxhub_manifest.json``.
+        staging_dir : Path
+            The local staging directory containing ``.voxhub_manifest.json``.
 
         Returns
         -------
@@ -108,20 +108,20 @@ class RemoteManifest:
         FileNotFoundError
             If the manifest file does not exist.
         """
-        path = wip_dir / '.voxhub_manifest.json'
+        path = staging_dir / '.voxhub_manifest.json'
         if not path.exists():
             msg = f'No manifest found at {path}'
             raise FileNotFoundError(msg)
         return cls.from_json(path.read_text())
 
-    def write(self, wip_dir: Path) -> None:
-        """Write the manifest to a WIP directory.
+    def write(self, staging_dir: Path) -> None:
+        """Write the manifest to a staging directory.
 
         Parameters
         ----------
-        wip_dir : Path
-            The local WIP directory to write to.
+        staging_dir : Path
+            The local staging directory to write to.
         """
-        path = wip_dir / '.voxhub_manifest.json'
+        path = staging_dir / '.voxhub_manifest.json'
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.to_json() + '\n')

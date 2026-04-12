@@ -51,7 +51,7 @@ class TestPrepareResponse:
     def test_round_trip_with_stores(self):
         orig = PrepareResponse(
             protocol_version=PROTOCOL_VERSION,
-            wip_dir='/tmp/wip',
+            staging_dir='/tmp/staging',
             stores={
                 'store-a': PreparedStore(
                     raw_checksum='sha256:abc',
@@ -121,7 +121,7 @@ class TestPrepareRequest:
         d = json.loads(serialize(req))
         assert d['store_names'] is None
         assert d['ontologies'] is None
-        assert d['wip_dir'] is None
+        assert d['staging_dir'] is None
 
 
 class TestCleanupAndGc:

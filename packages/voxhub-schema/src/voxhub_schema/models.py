@@ -268,7 +268,7 @@ class PrepareRequest:
     zarr_root: str
     store_names: list[str] | None = None
     ontologies: list[str] | None = None
-    wip_dir: str | None = None
+    staging_dir: str | None = None
     include_existing_annotations: list[str] | None = None
     compress: bool = False
 
@@ -278,7 +278,7 @@ class PrepareResponse:
     """Response from ``prepare-pull``."""
 
     protocol_version: int
-    wip_dir: str
+    staging_dir: str
     stores: dict[str, PreparedStore]
 
     @classmethod
@@ -291,7 +291,7 @@ class PrepareResponse:
         }
         return cls(
             protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
-            wip_dir=str(d['wip_dir']),
+            staging_dir=str(d['staging_dir']),
             stores=stores,
         )
 
@@ -330,7 +330,7 @@ class IntegrateRequest:
     """Arguments for ``integrate-annotations``."""
 
     zarr_root: str
-    wip_dir: str
+    staging_dir: str
     annotator_id: str
     machine_id: str
     nano_id: str
