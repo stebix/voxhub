@@ -150,9 +150,9 @@ and `extract_spatial_metadata()`.
 
 ### 4.2 `TestStageSingleStore` — happy path
 
-- `test_creates_wip_dir_with_store_subdirectory` —
-  `stage(root, wip_dir, store_names=['foo'])` → `wip_dir/foo/` exists.
-- `test_writes_raw_nrrd` — `wip_dir/foo/raw.nrrd` exists and can be
+- `test_creates_staging_dir_with_store_subdirectory` —
+  `stage(root, staging_dir, store_names=['foo'])` → `staging_dir/foo/` exists.
+- `test_writes_raw_nrrd` — `staging_dir/foo/raw.nrrd` exists and can be
   read via `nrrd.read`.
 - `test_nrrd_data_matches_zarr_data` — read back both; they match
   (modulo the axis reversal documented in `test_staging.py`).
@@ -163,7 +163,7 @@ and `extract_spatial_metadata()`.
 - `test_raw_checksum_is_sha256_hex` — checksum string is
   `sha256:<64 hex chars>`.
 - `test_checksum_matches_actual_file_contents` — compute sha256 of
-  `wip_dir/foo/raw.nrrd` directly; compare to manifest value.
+  `staging_dir/foo/raw.nrrd` directly; compare to manifest value.
 
 ### 4.3 `TestStageMultipleStores`
 
@@ -185,9 +185,9 @@ and `extract_spatial_metadata()`.
 
 ### 4.5 `TestStageForceAndErrors`
 
-- `test_refuses_to_overwrite_without_force` — pre-populate wip_dir
+- `test_refuses_to_overwrite_without_force` — pre-populate staging_dir
   with a file that would conflict → `FileExistsError`.
-- `test_force_overwrites_existing_wip_contents` — same setup but
+- `test_force_overwrites_existing_staging_contents` — same setup but
   `force=True` → succeeds, old contents gone.
 - `test_missing_zarr_root_raises` — `zarr_root` doesn't exist →
   `FileNotFoundError`.
@@ -276,7 +276,7 @@ Similar to the catalog rendering tests — smoke tests only.
 3. **`stage()` CLI args vs function args** — `stage()` takes a Console;
    the test may want to pass a `Console(file=io.StringIO())` to capture
    output without cluttering test logs.
-4. **Staging of already-staged stores** — if `wip_dir/foo/` exists from
+4. **Staging of already-staged stores** — if `staging_dir/foo/` exists from
    a previous stage, what happens on re-stage? Force flag is tested in
    §4.5, but verify the non-force failure mode produces a useful
    message.

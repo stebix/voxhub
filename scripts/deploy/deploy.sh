@@ -405,7 +405,7 @@ cat <<EOF
        sudo ./add-annotator.sh <name> <pubkey.pub>
 
     2. Annotators connect with:
-       voxhub pull $VOXHUB_USER@<server-ip>:$ZARR_ROOT ./local_wip
-       voxhub push ./local_wip
+       voxhub pull $VOXHUB_USER@<server-ip>:$ZARR_ROOT ./local_staging
+       voxhub push ./local_staging
 
 EOF

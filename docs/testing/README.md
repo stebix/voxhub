@@ -81,7 +81,7 @@ ontology fixtures and single-store builders. The new tests require extensions:
 - `zarr_root_factory` — pytest fixture producing a `tmp_path` containing one
   or more zarr stores built via `create_zarr_store`. Parameterized on store
   count and on whether existing annotations are pre-populated.
-- `wip_dir_with_manifest` — builds a WIP directory complete with a valid
+- `staging_dir_with_manifest` — builds a staging directory complete with a valid
   `.voxhub_manifest.json` written via `RemoteManifest.write()`, so server
   integration tests don't have to fabricate manifests by hand.
 - `server_argv` — helper fixture producing an `argparse.Namespace` shaped like
@@ -96,7 +96,7 @@ ontology fixtures and single-store builders. The new tests require extensions:
 
 - `create_zarr_root(root_path, store_specs)` — build multiple stores under a
   single parent directory in one call.
-- `write_remote_manifest(wip_dir, store_names, ...)` — thin wrapper around
+- `write_remote_manifest(staging_dir, store_names, ...)` — thin wrapper around
   `RemoteManifest.write()` with sensible defaults.
 - `write_provenance_jsonl(path, entries)` — write a synthetic provenance JSONL
   file for audit/validation tests.

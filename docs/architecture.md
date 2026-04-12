@@ -279,7 +279,7 @@ is manual `from_dict(d: dict)` classmethods. No `cattrs` dependency.
 ### Role
 
 User-facing CLI for remote workflows. Knows how to talk to a server over SSH, transfer
-files with rsync, and manage local WIP directories. Has no zarr dependency. Its only
+files with rsync, and manage local staging directories. Has no zarr dependency. Its only
 awareness of data shapes comes through `voxhub-schema`.
 
 ### Entrypoint
@@ -326,9 +326,9 @@ voxhub_client/
 │   # ScpFallback                   ← used when rsync unavailable
 │
 └── manifest.py
-    # read_manifest(wip_dir) → RemoteManifest
-    # write_manifest(wip_dir, manifest)
-    # update_manifest_status(wip_dir, store_name, status)
+    # read_manifest(staging_dir) → RemoteManifest
+    # write_manifest(staging_dir, manifest)
+    # update_manifest_status(staging_dir, store_name, status)
 ```
 
 ---
@@ -403,7 +403,7 @@ Response:
 }
 ```
 
-#### `prepare-pull <zarr_root> [--stores n1 n2] [--ontologies o1 o2] [--wip-dir /tmp/...] [--include-existing-annotations path1 path2] [--compress]`
+#### `prepare-pull <zarr_root> [--stores n1 n2] [--ontologies o1 o2] [--staging-dir /tmp/...] [--include-existing-annotations path1 path2] [--compress]`
 
 Calls `core.staging.stage()` into a server-side temp dir. Computes SHA-256 of each
 generated NRRD.
@@ -423,7 +423,7 @@ Response:
 ```json
 {
   "protocol_version": 1,
-  "wip_dir": "/tmp/dt-pull-abc123",
+  "staging_dir": "/tmp/dt-pull-abc123",
   "stores": {
     "gallivanting-groundhog": {
       "raw_checksum": "sha256:a3f1...",
@@ -438,7 +438,7 @@ Response:
 }
 ```
 
-#### `integrate-annotations <zarr_root> <wip_dir> --annotator-id <id> --machine-id <id> --nano-id <id> [--checksums file:sha256:... ...] [--force]`
+#### `integrate-annotations <zarr_root> <staging_dir> --annotator-id <id> --machine-id <id> --nano-id <id> [--checksums file:sha256:... ...] [--force]`
 
 Calls `core.integrate.integrate()` then `server.provenance.record()`. Holds a per-store
 filelock during zarr writes. Verifies annotation file checksums before integrating.
@@ -471,7 +471,7 @@ Response:
 }
 ```
 
-#### `cleanup <wip_dir>`
+#### `cleanup <staging_dir>`
 
 Removes server-side temp directory. Logged via structlog.
 
@@ -489,7 +489,7 @@ Response: `{"protocol_version": 1, "removed": [...], "count": N}`
 
 ## Client Workflows
 
-### `pull user@host:/zarr_root ./local_wip [--stores ...] [--ontologies ...] [--include-existing-annotations path1 path2] [--compress]`
+### `pull user@host:/zarr_root ./local_staging [--stores ...] [--ontologies ...] [--include-existing-annotations path1 path2] [--compress]`
 
 ```
 1. SshRunner.run("list-stores", zarr_root)
@@ -497,14 +497,14 @@ Response: `{"protocol_version": 1, "removed": [...], "count": N}`
 
 2. SshRunner.run("prepare-pull", zarr_root, "--stores", ..., "--ontologies", ...,
        "--include-existing-annotations", ...)
-       → PrepareResponse: wip_dir on server, per-store checksums, expected ontologies
+       → PrepareResponse: staging_dir on server, per-store checksums, expected ontologies
 
-3. RsyncTransfer.pull(server:wip_dir/, local_wip/)
-       rsync -az --progress user@host:/tmp/dt-abc/ ./local_wip/
+3. RsyncTransfer.pull(server:staging_dir/, local_staging/)
+       rsync -az --progress user@host:/tmp/dt-abc/ ./local_staging/
 
-4. SshRunner.run("cleanup", wip_dir)
+4. SshRunner.run("cleanup", staging_dir)
 
-5. write_manifest(local_wip, RemoteManifest(
+5. write_manifest(local_staging, RemoteManifest(
        server_host=..., server_zarr_root=...,
        stores={name: RemoteManifestEntry(
            status="pulled", raw_checksum=...,
@@ -519,16 +519,16 @@ push to validate that the annotator produced conformant annotations.
 Checksum caching: on re-pull, if local NRRD exists and SHA-256 matches
 `PreparedStore.raw_checksum`, skip rsync for that store.
 
-### `push ./local_wip [--validate-only] [--force]`
+### `push ./local_staging [--validate-only] [--force]`
 
 ```
 1. get_identity() → Identity (annotator_id + machine_id + nano_id)
        Abort if identity not configured (prompt user to run set-identity)
 
-2. read_manifest(local_wip) → RemoteManifest
+2. read_manifest(local_staging) → RemoteManifest
        Extract expected_ontologies per store
 
-3. Discover annotation files in local_wip (*.seg.nrrd, *.mrk.json)
+3. Discover annotation files in local_staging (*.seg.nrrd, *.mrk.json)
        Match each to its expected ontology from the manifest
 
 4. Pre-flight validation (schema.validation):
@@ -540,21 +540,21 @@ Checksum caching: on re-pull, if local NRRD exists and SHA-256 matches
 
 5. Compute checksums of annotation files
 
-6. SshRunner.mktemp() → server_wip
+6. SshRunner.mktemp() → server_staging
 
-7. RsyncTransfer.push(local_wip/, server:server_wip/)
-       rsync -az --progress ./local_wip/ user@host:/tmp/dt-push-xyz/
+7. RsyncTransfer.push(local_staging/, server:server_staging/)
+       rsync -az --progress ./local_staging/ user@host:/tmp/dt-push-xyz/
 
-8. SshRunner.run("integrate-annotations", zarr_root, server_wip,
+8. SshRunner.run("integrate-annotations", zarr_root, server_staging,
        "--annotator-id", identity.annotator_id,
        "--machine-id", identity.machine_id,
        "--nano-id", identity.nano_id,
        "--checksums", ...)
        → IntegrateResponse
 
-9. SshRunner.run("cleanup", server_wip)
+9. SshRunner.run("cleanup", server_staging)
 
-10. update_manifest_status(local_wip, store_name, "integrated")
+10. update_manifest_status(local_staging, store_name, "integrated")
 ```
 
 ### `remote-catalog user@host:/zarr_root [--ontology ...]`
@@ -842,7 +842,7 @@ Example log entries:
 
 ```json
 {"event": "prepare_pull_started", "stores": ["gallivanting-groundhog"], "annotator_id": "alice", "timestamp": "..."}
-{"event": "prepare_pull_completed", "stores": ["gallivanting-groundhog"], "wip_dir": "/tmp/dt-pull-abc123", "duration_s": 12.3, "timestamp": "..."}
+{"event": "prepare_pull_completed", "stores": ["gallivanting-groundhog"], "staging_dir": "/tmp/dt-pull-abc123", "duration_s": 12.3, "timestamp": "..."}
 {"event": "integrate_failed", "store": "gallivanting-groundhog", "error": "checksum_mismatch", "level": "error", "timestamp": "..."}
 {"event": "gc_completed", "removed": ["/tmp/dt-push-20260330..."], "count": 1, "timestamp": "..."}
 ```

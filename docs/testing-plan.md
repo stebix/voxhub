@@ -92,7 +92,7 @@ transport/protocol layer.
 The server is SSH-exposed. Validate that untrusted input cannot escape its sandbox.
 
 **Scope:**
-- **Path traversal**: Crafted `store_name` or `wip_dir` values containing `..`,
+- **Path traversal**: Crafted `store_name` or `staging_dir` values containing `..`,
   symlinks, or absolute paths must not escape the zarr root
 - **Annotator isolation**: Annotator A cannot read or overwrite annotator B's
   annotation directories

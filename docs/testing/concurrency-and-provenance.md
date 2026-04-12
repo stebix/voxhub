@@ -126,7 +126,7 @@ because production concurrency is cross-process only (SSH spawns a fresh
 `voxhub-server` process per invocation).
 
 - `test_two_concurrent_writes_to_same_store_serialize` — fixture: zarr
-  store, two distinct WIP dirs each with a different annotator_id.
+  store, two distinct staging dirs each with a different annotator_id.
   Launch two `integrate-annotations` subprocesses in parallel. Assert:
   - both exit 0
   - both annotations end up in the store (different annotator-scoped
@@ -184,7 +184,7 @@ here, defer deeper path-traversal tests to the security plan:
   `annotations/<annotator>-<nano>/` path, neither touches the other's
   attrs.
 - `test_same_annotator_two_pushes_different_instances` — two integrates
-  with identical annotator_id + nano_id but different WIP dirs → two
+  with identical annotator_id + nano_id but different staging dirs → two
   separate instance directories (because `instance_dir` includes a
   random suffix), both co-exist, both appear in list-stores.
 

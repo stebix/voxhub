@@ -50,8 +50,8 @@ Beyond the existing `create_zarr_store` helper, these tests need:
 
 - `zarr_root_factory(store_count=1, with_annotations=False)` — builds a
   `tmp_path / 'stores'` directory containing N zarr stores.
-- `wip_dir_with_manifest(zarr_root, store_names, ontologies=...)` — builds a
-  WIP directory that looks like the output of `prepare-pull`, including a
+- `staging_dir_with_manifest(zarr_root, store_names, ontologies=...)` — builds a
+  staging directory that looks like the output of `prepare-pull`, including a
   valid `.voxhub_manifest.json` written via `RemoteManifest.write()`.
 - `server_argv(**kwargs)` — returns an `argparse.Namespace` with defaults
   filled in, so tests only specify what they want to override.
@@ -100,10 +100,10 @@ Beyond the existing `create_zarr_store` helper, these tests need:
 
 **Happy path:**
 - `test_stages_single_store_to_tempdir` — one store in root → response has
-  `wip_dir` pointing at a `dt-pull-*` temp directory, `stores[name]` has
+  `staging_dir` pointing at a `dt-pull-*` temp directory, `stores[name]` has
   `raw_checksum` (sha256), `shape`, `spacing_mm`, `origin_lps`,
   `space_directions`, `expected_ontologies == []`, `included_annotations == []`.
-- `test_uses_explicit_wip_dir_when_provided` — `args.wip_dir=...` → response
+- `test_uses_explicit_staging_dir_when_provided` — `args.staging_dir=...` → response
   points at exactly that directory, not a `dt-pull-*` tempdir.
 - `test_filters_stores_by_name` — root has 3 stores, `--stores a c` → only
   a and c appear in response.
@@ -112,7 +112,7 @@ Beyond the existing `create_zarr_store` helper, these tests need:
 - `test_copies_existing_annotations_when_requested` — store has an
   annotation at `annotations/alice-xyz/.../data`, called with
   `--include-existing-annotations annotations/alice-xyz/seg-20260101-ab12`
-  → WIP directory contains that annotation copied over.
+  → staging directory contains that annotation copied over.
 - `test_compression_flag_propagates_to_stage` — `--compress` flag reaches
   `stage()` (use a spy / mock on `stage`).
 
@@ -126,7 +126,7 @@ Beyond the existing `create_zarr_store` helper, these tests need:
 
 **Protocol:**
 - `test_protocol_version_present`.
-- `test_wip_dir_is_string_not_path_object` — JSON serialization correctness.
+- `test_staging_dir_is_string_not_path_object` — JSON serialization correctness.
 
 ### 4.3 `_run_integrate_annotations` — `TestIntegrateAnnotations`
 
@@ -135,13 +135,13 @@ This is the largest and most complex handler. Split the class by concern.
 #### `TestIntegrateAnnotations_Happy`
 
 - `test_integrates_segmentation_writes_to_annotator_scoped_path` — valid
-  seg.nrrd in WIP → annotation written at
+  seg.nrrd in staging → annotation written at
   `annotations/<annotator_id>-<nano_id>/<ontology>-<date>-<random>/data`,
   response `stores[name].status == 'integrated'`, `annotations` list has
   one entry.
 - `test_integrates_landmarks_writes_to_annotator_scoped_path` — analogous
   for landmarks.
-- `test_integrates_both_seg_and_landmarks_in_single_call` — WIP has both →
+- `test_integrates_both_seg_and_landmarks_in_single_call` — staging has both →
   both written, both appear in response.
 - `test_provenance_recorded_on_success` — after integration, assert
   `.meta/provenance.jsonl` has a new entry with matching annotator_id,
@@ -155,7 +155,7 @@ This is the largest and most complex handler. Split the class by concern.
 
 #### `TestIntegrateAnnotations_Errors`
 
-- `test_missing_manifest_writes_error_envelope_and_exits` — WIP has no
+- `test_missing_manifest_writes_error_envelope_and_exits` — staging has no
   `.voxhub_manifest.json` → `ServerError` with `code='manifest_missing'`,
   `SystemExit(1)`.
 - `test_checksum_mismatch_writes_error_envelope_and_exits` — wrong checksum
@@ -177,13 +177,13 @@ This is the largest and most complex handler. Split the class by concern.
 
 #### `TestIntegrateAnnotations_MultiStore`
 
-- `test_partial_failure_per_store_isolated` — WIP has 2 stores; store A's
+- `test_partial_failure_per_store_isolated` — staging has 2 stores; store A's
   annotation is valid, store B's is corrupted → A integrated, B's response
   entry has `status='failed'` with issues, A unaffected.
-- `test_iteration_order_deterministic` — WIP has stores `c`, `a`, `b` →
-  response stores dict order matches `sorted(wip_dir.iterdir())`.
-- `test_skips_hidden_directories` — WIP has `.hidden/` → ignored.
-- `test_skips_directories_without_matching_zarr_store` — WIP has
+- `test_iteration_order_deterministic` — staging has stores `c`, `a`, `b` →
+  response stores dict order matches `sorted(staging_dir.iterdir())`.
+- `test_skips_hidden_directories` — staging has `.hidden/` → ignored.
+- `test_skips_directories_without_matching_zarr_store` — staging has
   `orphan/seg.nrrd` but no `orphan.zarr` in zarr_root → silently skipped
   (verify current behavior, document).
 
@@ -196,16 +196,16 @@ This is the largest and most complex handler. Split the class by concern.
   ontologies → first is used; verify this matches the current
   `seg_ontologies[0]` behavior in code (line 446).
 - `test_no_matching_ontology_uses_unconstrained_fallback` — manifest has
-  only landmarks ontology but WIP has only seg → seg written with
+  only landmarks ontology but staging has only seg → seg written with
   `ontology='unconstrained'`, `ontology_version=1`.
 
 ### 4.4 `_run_cleanup` — `TestCleanup`
 
-- `test_removes_existing_wip_dir` — dir exists → removed, response
+- `test_removes_existing_staging_dir` — dir exists → removed, response
   `status == 'ok'`.
-- `test_noop_when_wip_dir_missing` — dir doesn't exist → response still
+- `test_noop_when_staging_dir_missing` — dir doesn't exist → response still
   `status == 'ok'`, warning logged, no exception.
-- `test_refuses_to_remove_non_wip_path` — **security concern**:
+- `test_refuses_to_remove_non_staging_path` — **security concern**:
   current implementation removes *any* path passed in. Document this as
   a finding. If the worktree owner wants to add a safety check (e.g.,
   only remove paths matching `dt-*` or under `tempfile.gettempdir()`),
@@ -280,7 +280,7 @@ fixture. Mark slow if they add > 1s total.
   `voxhub-server list-stores <root>`, parse stdout, assert
   `protocol_version == 1`, `stores` is a list.
 - `test_prepare_pull_via_subprocess` — single store, verify returned JSON
-  has `wip_dir` and a valid temp path. Clean up the returned wip_dir.
+  has `staging_dir` and a valid temp path. Clean up the returned staging_dir.
 - `test_integrate_annotations_via_subprocess` — full round trip: stage →
   build annotation → integrate → verify zarr state. This is the one
   end-to-end test that exercises real argparse, real I/O, and the real
@@ -320,5 +320,5 @@ fixture. Mark slow if they add > 1s total.
    argument (currently hardcoded to `Path(tempfile.gettempdir())` at line
    641). Recommend the refactor in the worktree.
 4. **Cleanup safety check** — the current `_run_cleanup` does
-   `shutil.rmtree(wip_dir)` on whatever path is passed. Should this be
+   `shutil.rmtree(staging_dir)` on whatever path is passed. Should this be
    hardened to only delete `dt-*` paths? If yes, test enforces it.

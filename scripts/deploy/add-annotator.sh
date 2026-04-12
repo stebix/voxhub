@@ -124,5 +124,5 @@ echo "  Fingerprint: $FINGERPRINT"
 echo "  Date:        $DATE"
 echo
 echo "  The annotator can now connect with:"
-echo "    voxhub pull $VOXHUB_USER@<server-ip>:<zarr-root> ./local_wip"
+echo "    voxhub pull $VOXHUB_USER@<server-ip>:<zarr-root> ./local_staging"
 echo
