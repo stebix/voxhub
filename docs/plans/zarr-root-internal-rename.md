@@ -242,7 +242,7 @@ memory is acceptable. New flag is clearer.
 
 ---
 
-### PR 6 — Documentation prose cleanup
+### PR 6 — Documentation prose cleanup [DONE]
 
 **Scope:** lingering narrative mentions of `zarr_root` in testing and general
 docs. Not load-bearing; a cleanup pass.
