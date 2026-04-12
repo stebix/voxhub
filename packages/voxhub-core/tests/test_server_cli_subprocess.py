@@ -74,8 +74,8 @@ class TestEntryPoint:
 class TestCommandSmoke:
     """One happy-path test per subcommand via real subprocess."""
 
-    def test_list_stores(self, zarr_root_factory, server_config_env, subprocess_server):
-        root = zarr_root_factory(('alpha',))
+    def test_list_stores(self, stores_dir_factory, server_config_env, subprocess_server):
+        root = stores_dir_factory(('alpha',))
         server_config_env(root)
         result = subprocess_server('list-stores')
 
@@ -87,9 +87,9 @@ class TestCommandSmoke:
         assert payload['stores'][0]['name'] == 'alpha'
 
     def test_prepare_pull(
-        self, zarr_root_factory, server_config_env, subprocess_server, tmp_path
+        self, stores_dir_factory, server_config_env, subprocess_server, tmp_path
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_config_env(root)
         staging = tmp_path / 'subproc_staging'
         result = subprocess_server(
@@ -107,7 +107,7 @@ class TestCommandSmoke:
 
     def test_integrate_annotations_full_roundtrip(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_config_env,
         subprocess_server,
@@ -117,8 +117,8 @@ class TestCommandSmoke:
         This is the critical server-path smoke test that exercises real
         argparse, real I/O, and the installed entrypoint.
         """
-        zarr_root = zarr_root_factory(('alpha',))
-        server_config_env(zarr_root)
+        stores_dir = stores_dir_factory(('alpha',))
+        server_config_env(stores_dir)
         staging = staging_dir_with_manifest(store_names=['alpha'])
 
         result = subprocess_server(
@@ -137,7 +137,7 @@ class TestCommandSmoke:
         assert payload['stores']['alpha']['status'] == 'integrated'
 
         # Verify the zarr store actually gained an annotation on disk.
-        ann_root = zarr_root / 'alpha.zarr' / 'annotations'
+        ann_root = stores_dir / 'alpha.zarr' / 'annotations'
         assert ann_root.is_dir()
         annotator_dirs = [p for p in ann_root.iterdir() if p.is_dir()]
         assert len(annotator_dirs) == 1
@@ -178,9 +178,9 @@ class TestCommandSmoke:
         assert not old.exists()
 
     def test_validate_attributes(
-        self, zarr_root_factory, server_config_env, subprocess_server
+        self, stores_dir_factory, server_config_env, subprocess_server
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_config_env(root)
         result = subprocess_server('validate-attributes')
 
@@ -189,11 +189,11 @@ class TestCommandSmoke:
         assert payload['results']['alpha']['status'] == 'missing'
 
     def test_healthcheck_exit_code_on_degraded(
-        self, zarr_root_factory, server_config_env, subprocess_server
+        self, stores_dir_factory, server_config_env, subprocess_server
     ):
         # A corrupt store makes the ``_check_stores`` check fail, which
         # flips the overall status to ``degraded`` and returns exit 1.
-        root = zarr_root_factory(('broken',), corrupt=('broken',))
+        root = stores_dir_factory(('broken',), corrupt=('broken',))
         server_config_env(root)
         result = subprocess_server('healthcheck')
 
@@ -206,9 +206,9 @@ class TestProtocolContract:
     """Invariants that every subprocess response must satisfy."""
 
     def test_every_command_emits_protocol_version(
-        self, zarr_root_factory, server_config_env, subprocess_server, tmp_path
+        self, stores_dir_factory, server_config_env, subprocess_server, tmp_path
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_config_env(root)
 
         # list-stores
@@ -235,13 +235,13 @@ class TestProtocolContract:
         assert _parse_json_stdout(r5)['protocol_version'] == PROTOCOL_VERSION
 
     def test_error_envelope_structure(
-        self, zarr_root_factory, server_config_env, subprocess_server, tmp_path
+        self, stores_dir_factory, server_config_env, subprocess_server, tmp_path
     ):
         """A deliberately-failing invocation produces a structured
         ServerError envelope — never a raw traceback."""
         # Point at a valid empty root, then ask for an unknown store —
         # ``stage()`` raises FileNotFoundError → prepare_pull_failed envelope.
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_config_env(root)
         result = subprocess_server(
             'prepare-pull',
@@ -261,9 +261,9 @@ class TestProtocolContract:
         assert 'Traceback' not in result.stdout
 
     def test_stdout_is_single_json_object(
-        self, zarr_root_factory, server_config_env, subprocess_server
+        self, stores_dir_factory, server_config_env, subprocess_server
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_config_env(root)
         result = subprocess_server('list-stores')
 

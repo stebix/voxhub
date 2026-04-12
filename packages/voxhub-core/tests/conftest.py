@@ -78,11 +78,11 @@ def unconstrained_ontology():
     return load_ontology('unconstrained')
 
 
-# -- Zarr root / staging dir builders ---------------------------------------
+# -- Stores dir / staging dir builders --------------------------------------
 
 
 @pytest.fixture
-def zarr_root_factory(
+def stores_dir_factory(
     tmp_path: Path,
 ) -> Callable[..., Path]:
     """Build a ``stores/`` directory containing one or more zarr stores.
@@ -335,7 +335,7 @@ def provenance_jsonl_factory() -> Callable[..., Path]:
 def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
     """Launch N ``integrate-annotations`` subprocesses in parallel.
 
-    Each invocation is a dict with keys ``zarr_root``, ``staging_dir``,
+    Each invocation is a dict with keys ``stores_dir``, ``staging_dir``,
     ``annotator_id``, ``nano_id`` and optionally ``machine_id``, ``force``.
     Returns a list of result dicts preserving invocation order, each carrying
     ``returncode``, parsed JSON ``stdout`` (best-effort, may be ``None``),
@@ -352,10 +352,10 @@ def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
         procs: list[tuple[dict[str, Any], subprocess.Popen[str]]] = []
         for inv in invocations:
             # Each invocation gets its own TOML so concurrent tests that
-            # target different ``zarr_root``s don't collide.
+            # target different ``stores_dir``s don't collide.
             cfg_fd, cfg_path = _tempfile.mkstemp(suffix='.toml', prefix='voxhub-cfg-')
             with os.fdopen(cfg_fd, 'w') as fh:
-                fh.write(f"[storage]\nstores_dir = '{inv['zarr_root']}'\n")
+                fh.write(f"[storage]\nstores_dir = '{inv['stores_dir']}'\n")
             cmd = [
                 sys.executable,
                 '-m',

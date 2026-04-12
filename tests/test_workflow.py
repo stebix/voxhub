@@ -38,9 +38,9 @@ from voxhub_schema import (
 
 
 @pytest.fixture
-def zarr_root(tmp_path):
-    """Create a zarr root with one store."""
-    root = tmp_path / 'zarr_root'
+def stores_dir(tmp_path):
+    """Create a stores directory with one store."""
+    root = tmp_path / 'stores'
     root.mkdir()
     create_zarr_store(root / 'scan-001.zarr')
     return root
@@ -111,9 +111,9 @@ def _write_valid_lmk(store_dir):
 class TestSegmentationRoundTrip:
     """zarr → stage → annotate → preflight → integrate → verify."""
 
-    def test_full_cycle(self, zarr_root, staging_dir, inner_ear_ontology):
+    def test_full_cycle(self, stores_dir, staging_dir, inner_ear_ontology):
         # 1. Stage (simulate pull).
-        meta = stage(zarr_root, staging_dir, force=True)
+        meta = stage(stores_dir, staging_dir, force=True)
         assert 'scan-001' in meta
         entry = _manifest_entry_from_stage(meta['scan-001'])
 
@@ -129,7 +129,7 @@ class TestSegmentationRoundTrip:
         # 4. Integrate (server-side).
         result = integrate(
             staging_dir,
-            zarr_root,
+            stores_dir,
             annotator_id='alice',
             nano_id='abcd1234',
             ontology=inner_ear_ontology,
@@ -139,15 +139,15 @@ class TestSegmentationRoundTrip:
         )
 
         # 5. Verify annotation in zarr.
-        root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         ann_group = root['annotations']
         # Should have annotator-scoped path.
         assert 'alice-abcd1234' in list(ann_group.group_keys())
 
     def test_preflight_rejects_wrong_ontology_labels(
-        self, zarr_root, staging_dir, inner_ear_ontology
+        self, stores_dir, staging_dir, inner_ear_ontology
     ):
-        meta = stage(zarr_root, staging_dir, force=True)
+        meta = stage(stores_dir, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
 
         # Write seg with labels NOT in the ontology.
@@ -163,7 +163,7 @@ class TestSegmentationRoundTrip:
         error_text = ' '.join(i.message.lower() for i in errors)
         assert 'vestibule' in error_text or 'not defined' in error_text
 
-    def test_integration_blocked_by_shape_mismatch(self, zarr_root, tmp_path):
+    def test_integration_blocked_by_shape_mismatch(self, stores_dir, tmp_path):
         staging = tmp_path / 'staging_bad'
         staging.mkdir()
         store_dir = staging / 'scan-001'
@@ -177,7 +177,7 @@ class TestSegmentationRoundTrip:
         with pytest.raises(RuntimeError, match='Validation errors'):
             integrate(
                 staging,
-                zarr_root,
+                stores_dir,
                 annotator_id='alice',
                 nano_id='abcd1234',
             )
@@ -191,8 +191,8 @@ class TestSegmentationRoundTrip:
 class TestLandmarkRoundTrip:
     """zarr → stage → annotate landmarks → preflight → integrate → verify."""
 
-    def test_full_cycle(self, zarr_root, staging_dir, landmark_ontology):
-        meta = stage(zarr_root, staging_dir, force=True)
+    def test_full_cycle(self, stores_dir, staging_dir, landmark_ontology):
+        meta = stage(stores_dir, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
         entry = RemoteManifestEntry(
             status=entry.status,
@@ -213,7 +213,7 @@ class TestLandmarkRoundTrip:
 
         result = integrate(
             staging_dir,
-            zarr_root,
+            stores_dir,
             annotator_id='bob',
             nano_id='efgh5678',
             ontology=landmark_ontology,
@@ -222,11 +222,11 @@ class TestLandmarkRoundTrip:
             i.severity != 'error' for i in result.get('scan-001', [])
         )
 
-        root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         assert 'bob-efgh5678' in list(root['annotations'].group_keys())
 
-    def test_ras_landmarks_stored_as_lps(self, zarr_root, staging_dir):
-        stage(zarr_root, staging_dir, force=True)
+    def test_ras_landmarks_stored_as_lps(self, stores_dir, staging_dir):
+        stage(stores_dir, staging_dir, force=True)
         store_dir = staging_dir / 'scan-001'
 
         # Write landmarks in RAS.
@@ -236,12 +236,12 @@ class TestLandmarkRoundTrip:
 
         integrate(
             staging_dir,
-            zarr_root,
+            stores_dir,
             annotator_id='carol',
             nano_id='ijkl9012',
         )
 
-        root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         ann_group = root['annotations']['carol-ijkl9012']
         # Find the landmark array.
         for sub_key in ann_group.group_keys():
@@ -267,14 +267,14 @@ class TestLandmarkRoundTrip:
 class TestSpatialMetadataIntegrity:
     """DICOM attrs → zarr → staging → manifest — no drift."""
 
-    def test_metadata_chain_is_consistent(self, zarr_root, staging_dir):
+    def test_metadata_chain_is_consistent(self, stores_dir, staging_dir):
         # 1. Read attrs from zarr, compute spatial metadata.
-        root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         attrs = dict(root['raw']['full'].attrs)
         origin, dirs, spacing = extract_spatial_metadata(attrs)
 
         # 2. Stage and get metadata.
-        meta = stage(zarr_root, staging_dir, force=True)
+        meta = stage(stores_dir, staging_dir, force=True)
         stage_info = meta['scan-001']
 
         # 3. Verify staging output matches direct extraction.
@@ -286,9 +286,9 @@ class TestSpatialMetadataIntegrity:
         assert stage_info['shape'] == list(root['raw']['full'].shape)
 
     def test_corrupted_origin_caught_by_preflight(
-        self, zarr_root, staging_dir, inner_ear_ontology
+        self, stores_dir, staging_dir, inner_ear_ontology
     ):
-        meta = stage(zarr_root, staging_dir, force=True)
+        meta = stage(stores_dir, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
 
         store_dir = staging_dir / 'scan-001'
@@ -316,29 +316,29 @@ class TestSpatialMetadataIntegrity:
 class TestProvenanceCompleteness:
     """After integration + provenance recording, verify metadata."""
 
-    def _integrate_and_record(self, zarr_root, staging_dir, ontology):
+    def _integrate_and_record(self, stores_dir, staging_dir, ontology):
         """Run the full integrate → provenance pipeline, return annotation path."""
-        stage(zarr_root, staging_dir, force=True)
+        stage(stores_dir, staging_dir, force=True)
         store_dir = staging_dir / 'scan-001'
         _write_valid_seg(store_dir, ontology)
 
         integrate(
             staging_dir,
-            zarr_root,
+            stores_dir,
             annotator_id='alice',
             nano_id='abcd1234',
             ontology=ontology,
         )
 
         # Discover the annotation path that integrate() created.
-        root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         ann = root['annotations']['alice-abcd1234']
         instance_key = next(iter(ann.group_keys()))
         annotation_path = f'annotations/alice-abcd1234/{instance_key}/data'
 
         # Record provenance (server wrapper responsibility).
         record_provenance(
-            zarr_root,
+            stores_dir,
             'scan-001',
             annotation_path,
             annotator_id='alice',
@@ -354,13 +354,13 @@ class TestProvenanceCompleteness:
         return annotation_path
 
     def test_zarr_attrs_contain_all_provenance_fields(
-        self, zarr_root, staging_dir, inner_ear_ontology
+        self, stores_dir, staging_dir, inner_ear_ontology
     ):
         annotation_path = self._integrate_and_record(
-            zarr_root, staging_dir, inner_ear_ontology
+            stores_dir, staging_dir, inner_ear_ontology
         )
 
-        root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         parts = annotation_path.strip('/').split('/')
         node = root
         for part in parts:
@@ -386,13 +386,13 @@ class TestProvenanceCompleteness:
         assert attrs['pull_session_id'] == 'dt-pull-test'
 
     def test_provenance_jsonl_contains_matching_entry(
-        self, zarr_root, staging_dir, inner_ear_ontology
+        self, stores_dir, staging_dir, inner_ear_ontology
     ):
         annotation_path = self._integrate_and_record(
-            zarr_root, staging_dir, inner_ear_ontology
+            stores_dir, staging_dir, inner_ear_ontology
         )
 
-        jsonl_path = zarr_root / '.meta' / 'provenance.jsonl'
+        jsonl_path = stores_dir / '.meta' / 'provenance.jsonl'
         assert jsonl_path.exists()
 
         lines = jsonl_path.read_text().strip().split('\n')
@@ -414,15 +414,15 @@ class TestProvenanceCompleteness:
 class TestMultiAnnotatorIsolation:
     """Two annotators push to the same store without conflicts."""
 
-    def test_separate_annotation_paths(self, zarr_root, tmp_path):
+    def test_separate_annotation_paths(self, stores_dir, tmp_path):
         # Annotator 1.
         staging_1 = tmp_path / 'staging_alice'
         staging_1.mkdir()
-        stage(zarr_root, staging_1, force=True)
+        stage(stores_dir, staging_1, force=True)
         _write_valid_seg(staging_1 / 'scan-001', load_ontology('inner-ear-structures'))
         integrate(
             staging_1,
-            zarr_root,
+            stores_dir,
             annotator_id='alice',
             nano_id='aaaa1111',
             ontology=load_ontology('inner-ear-structures'),
@@ -431,45 +431,45 @@ class TestMultiAnnotatorIsolation:
         # Annotator 2.
         staging_2 = tmp_path / 'staging_bob'
         staging_2.mkdir()
-        stage(zarr_root, staging_2, force=True)
+        stage(stores_dir, staging_2, force=True)
         _write_valid_seg(staging_2 / 'scan-001', load_ontology('inner-ear-structures'))
         integrate(
             staging_2,
-            zarr_root,
+            stores_dir,
             annotator_id='bob',
             nano_id='bbbb2222',
             ontology=load_ontology('inner-ear-structures'),
         )
 
-        root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         annotator_dirs = set(root['annotations'].group_keys())
         assert 'alice-aaaa1111' in annotator_dirs
         assert 'bob-bbbb2222' in annotator_dirs
 
-    def test_independent_provenance_per_annotator(self, zarr_root, tmp_path):
+    def test_independent_provenance_per_annotator(self, stores_dir, tmp_path):
         ontology = load_ontology('inner-ear-structures')
 
         for name, nano in [('alice', 'aaaa1111'), ('bob', 'bbbb2222')]:
             staging = tmp_path / f'staging_{name}'
             staging.mkdir()
-            stage(zarr_root, staging, force=True)
+            stage(stores_dir, staging, force=True)
             _write_valid_seg(staging / 'scan-001', ontology)
             integrate(
                 staging,
-                zarr_root,
+                stores_dir,
                 annotator_id=name,
                 nano_id=nano,
                 ontology=ontology,
             )
 
             # Find annotation path.
-            root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
+            root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
             ann = root['annotations'][f'{name}-{nano}']
             instance_key = next(iter(ann.group_keys()))
             ann_path = f'annotations/{name}-{nano}/{instance_key}/data'
 
             record_provenance(
-                zarr_root,
+                stores_dir,
                 'scan-001',
                 ann_path,
                 annotator_id=name,
@@ -482,7 +482,7 @@ class TestMultiAnnotatorIsolation:
                 source_file='segmentation.seg.nrrd',
             )
 
-        jsonl = (zarr_root / '.meta' / 'provenance.jsonl').read_text().strip()
+        jsonl = (stores_dir / '.meta' / 'provenance.jsonl').read_text().strip()
         records = [json.loads(line) for line in jsonl.split('\n')]
         annotators = {r['annotator_id'] for r in records}
         assert annotators == {'alice', 'bob'}
@@ -497,10 +497,10 @@ class TestOntologyEnforcementE2E:
     """Ontology constraints enforced across the full pipeline."""
 
     def test_constrained_missing_required_label(
-        self, zarr_root, staging_dir, inner_ear_ontology
+        self, stores_dir, staging_dir, inner_ear_ontology
     ):
         """Constrained ontology requires cochlea+vestibule+semicircular_canals."""
-        meta = stage(zarr_root, staging_dir, force=True)
+        meta = stage(stores_dir, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
 
         store_dir = staging_dir / 'scan-001'
@@ -521,9 +521,9 @@ class TestOntologyEnforcementE2E:
         assert 'vestibule' in error_text or 'semicircular' in error_text
 
     def test_unconstrained_non_sequential_labels(
-        self, zarr_root, staging_dir, unconstrained_ontology
+        self, stores_dir, staging_dir, unconstrained_ontology
     ):
-        meta = stage(zarr_root, staging_dir, force=True)
+        meta = stage(stores_dir, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
         entry = RemoteManifestEntry(
             status=entry.status,
@@ -563,8 +563,8 @@ class TestOntologyEnforcementE2E:
 class TestManifestWorkflow:
     """Manifest lifecycle: stage → write → read → update."""
 
-    def test_manifest_round_trip_through_staging(self, zarr_root, staging_dir):
-        meta = stage(zarr_root, staging_dir, force=True)
+    def test_manifest_round_trip_through_staging(self, stores_dir, staging_dir):
+        meta = stage(stores_dir, staging_dir, force=True)
         info = meta['scan-001']
 
         manifest = RemoteManifest(
@@ -588,8 +588,8 @@ class TestManifestWorkflow:
         assert s.shape == list(SHAPE)
         assert s.raw_checksum.startswith('sha256:')
 
-    def test_manifest_status_lifecycle(self, zarr_root, staging_dir):
-        meta = stage(zarr_root, staging_dir, force=True)
+    def test_manifest_status_lifecycle(self, stores_dir, staging_dir):
+        meta = stage(stores_dir, staging_dir, force=True)
         info = meta['scan-001']
 
         manifest = RemoteManifest(

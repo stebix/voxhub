@@ -34,9 +34,9 @@ def _silent_console() -> Console:
     return Console(file=io.StringIO(), record=False, width=160)
 
 
-def _stage(zarr_root: Path, staging_dir: Path, **kwargs) -> dict:
+def _stage(stores_dir: Path, staging_dir: Path, **kwargs) -> dict:
     """Invoke ``stage()`` with a silent console."""
-    return stage(zarr_root, staging_dir, console=_silent_console(), **kwargs)
+    return stage(stores_dir, staging_dir, console=_silent_console(), **kwargs)
 
 
 def _strip_spatial_attrs(zarr_path: Path, keys: tuple[str, ...]) -> None:
@@ -56,10 +56,10 @@ def _strip_spatial_attrs(zarr_path: Path, keys: tuple[str, ...]) -> None:
 class TestExtractSpatialMetadata:
     """Covers voxhub_core.staging.extract_spatial_metadata."""
 
-    def test_canonical_axis_aligned_metadata(self, zarr_root_factory):
+    def test_canonical_axis_aligned_metadata(self, stores_dir_factory):
         """Identity-like orientation → origin/directions/spacing match the
         canonical values written by ``create_zarr_store``."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r')
         origin, directions, spacing = extract_spatial_metadata(dict(arr.attrs))
 
@@ -76,10 +76,10 @@ class TestExtractSpatialMetadata:
         np.testing.assert_allclose(directions, expected)
         assert spacing == [SPACING_MM[2], SPACING_MM[0], SPACING_MM[1]]
 
-    def test_oblique_orientation(self, zarr_root_factory):
+    def test_oblique_orientation(self, stores_dir_factory):
         """Non-identity ImageOrientationPatient → direction rows reflect the
         rotation."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         theta = np.pi / 6  # 30 deg rotation around slice axis
         iop = [np.cos(theta), np.sin(theta), 0.0, -np.sin(theta), np.cos(theta), 0.0]
         arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r+')
@@ -103,10 +103,10 @@ class TestExtractSpatialMetadata:
             iop[3:6],
         )
 
-    def test_anisotropic_spacing(self, zarr_root_factory):
+    def test_anisotropic_spacing(self, stores_dir_factory):
         """PixelSpacing ≠ computed_slice_spacing_mm → returned spacing_mm
         mixes row/col/slice correctly."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r+')
         arr.update_attributes(
             {
@@ -119,30 +119,30 @@ class TestExtractSpatialMetadata:
         # spacing_mm = [slice_spacing, row_spacing, col_spacing]
         assert spacing == [1.2, 0.3, 0.7]
 
-    def test_missing_image_position_patient_raises_keyerror(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_missing_image_position_patient_raises_keyerror(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['foo'])
         _strip_spatial_attrs(root / 'foo.zarr', ('ImagePositionPatient',))
         arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r')
         with pytest.raises(KeyError):
             extract_spatial_metadata(dict(arr.attrs))
 
-    def test_missing_pixel_spacing_raises_keyerror(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_missing_pixel_spacing_raises_keyerror(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['foo'])
         _strip_spatial_attrs(root / 'foo.zarr', ('PixelSpacing',))
         arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r')
         with pytest.raises(KeyError):
             extract_spatial_metadata(dict(arr.attrs))
 
-    def test_missing_computed_slice_spacing_raises_keyerror(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_missing_computed_slice_spacing_raises_keyerror(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['foo'])
         _strip_spatial_attrs(root / 'foo.zarr', ('computed_slice_spacing_mm',))
         arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r')
         with pytest.raises(KeyError):
             extract_spatial_metadata(dict(arr.attrs))
 
-    def test_returns_numpy_arrays_for_origin_and_directions(self, zarr_root_factory):
+    def test_returns_numpy_arrays_for_origin_and_directions(self, stores_dir_factory):
         """The function's contract is np.ndarray for origin and directions."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r')
         origin, directions, spacing = extract_spatial_metadata(dict(arr.attrs))
         assert isinstance(origin, np.ndarray)
@@ -159,15 +159,15 @@ class TestStageSingleStore:
     """Covers voxhub_core.staging.stage — single-store happy path."""
 
     def test_creates_staging_dir_with_store_subdirectory(
-        self, zarr_root_factory, tmp_path
+        self, stores_dir_factory, tmp_path
     ):
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         _stage(root, staging, store_names=['foo'])
         assert (staging / 'foo').is_dir()
 
-    def test_writes_raw_nrrd(self, zarr_root_factory, tmp_path):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_writes_raw_nrrd(self, stores_dir_factory, tmp_path):
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         _stage(root, staging, store_names=['foo'])
         nrrd_path = staging / 'foo' / 'raw.nrrd'
@@ -176,10 +176,10 @@ class TestStageSingleStore:
         assert data.size > 0
         assert header['space'] == 'left-posterior-superior'
 
-    def test_nrrd_data_matches_zarr_data(self, zarr_root_factory, tmp_path):
+    def test_nrrd_data_matches_zarr_data(self, stores_dir_factory, tmp_path):
         """nrrd.read on _write_nrrd_raw output returns the transpose of the
         source ZYX array (see axis-order note in test_staging.py)."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         _stage(root, staging, store_names=['foo'])
 
@@ -188,8 +188,8 @@ class TestStageSingleStore:
         read_back, _header = nrrd.read(str(staging / 'foo' / 'raw.nrrd'))
         np.testing.assert_array_equal(read_back, np.asarray(src).T)
 
-    def test_manifest_structure(self, zarr_root_factory, tmp_path):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_manifest_structure(self, stores_dir_factory, tmp_path):
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         manifest = _stage(root, staging, store_names=['foo'])
 
@@ -207,15 +207,15 @@ class TestStageSingleStore:
         assert entry['shape'] == list(SHAPE)
         assert entry['origin_lps'] == list(ORIGIN_LPS)
 
-    def test_raw_checksum_is_sha256_hex(self, zarr_root_factory, tmp_path):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_raw_checksum_is_sha256_hex(self, stores_dir_factory, tmp_path):
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         manifest = _stage(root, staging, store_names=['foo'])
         checksum = manifest['foo']['raw_checksum']
         assert _SHA256_HEX.match(checksum), checksum
 
-    def test_checksum_matches_actual_file_contents(self, zarr_root_factory, tmp_path):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_checksum_matches_actual_file_contents(self, stores_dir_factory, tmp_path):
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         manifest = _stage(root, staging, store_names=['foo'])
 
@@ -231,16 +231,16 @@ class TestStageSingleStore:
 class TestStageMultipleStores:
     """Multi-store filtering and selection."""
 
-    def test_stages_all_stores_when_names_none(self, zarr_root_factory, tmp_path):
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+    def test_stages_all_stores_when_names_none(self, stores_dir_factory, tmp_path):
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         staging = tmp_path / 'staging'
         manifest = _stage(root, staging, store_names=None)
         assert sorted(manifest) == ['a', 'b', 'c']
         for name in ('a', 'b', 'c'):
             assert (staging / name / 'raw.nrrd').is_file()
 
-    def test_stages_subset_when_names_provided(self, zarr_root_factory, tmp_path):
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+    def test_stages_subset_when_names_provided(self, stores_dir_factory, tmp_path):
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         staging = tmp_path / 'staging'
         manifest = _stage(root, staging, store_names=['a', 'c'])
         assert sorted(manifest) == ['a', 'c']
@@ -248,20 +248,20 @@ class TestStageMultipleStores:
         assert (staging / 'c').is_dir()
         assert not (staging / 'b').exists()
 
-    def test_nonexistent_store_name_raises(self, zarr_root_factory, tmp_path):
+    def test_nonexistent_store_name_raises(self, stores_dir_factory, tmp_path):
         """All requested names missing → FileNotFoundError.
 
         Pinned behavior per the current implementation: when name-filtering
         leaves zero stores, ``stage()`` raises, not silently-skips.
         """
-        root = zarr_root_factory(store_names=['a'])
+        root = stores_dir_factory(store_names=['a'])
         staging = tmp_path / 'staging'
         with pytest.raises(FileNotFoundError, match='No matching stores'):
             _stage(root, staging, store_names=['missing'])
 
-    def test_partial_name_match_stages_intersection(self, zarr_root_factory, tmp_path):
+    def test_partial_name_match_stages_intersection(self, stores_dir_factory, tmp_path):
         """Mix of valid and missing names → only valid ones are staged."""
-        root = zarr_root_factory(store_names=['a', 'b'])
+        root = stores_dir_factory(store_names=['a', 'b'])
         staging = tmp_path / 'staging'
         manifest = _stage(root, staging, store_names=['a', 'missing'])
         assert list(manifest) == ['a']
@@ -276,13 +276,13 @@ class TestStageMultipleStores:
 class TestStageCompressionFlag:
     """Covers the --compress flag in stage()."""
 
-    def test_compressed_nrrd_raw_block_is_gzipped(self, zarr_root_factory, tmp_path):
+    def test_compressed_nrrd_raw_block_is_gzipped(self, stores_dir_factory, tmp_path):
         """compress=True → the raw data block starts with gzip magic.
 
         NRRD files begin with an ASCII header; compression applies to the
         payload following the blank-line header terminator.
         """
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         _stage(root, staging, store_names=['foo'], compress=True)
 
@@ -292,11 +292,11 @@ class TestStageCompressionFlag:
         assert raw_block[:2] == b'\x1f\x8b', raw_block[:4]
 
     def test_compressed_and_uncompressed_data_equivalent(
-        self, zarr_root_factory, tmp_path
+        self, stores_dir_factory, tmp_path
     ):
         """Staging the same store compressed vs raw → identical data once
         decoded by nrrd.read."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         staging_raw = tmp_path / 'staging_raw'
         staging_gz = tmp_path / 'staging_gz'
         _stage(root, staging_raw, store_names=['foo'], compress=False)
@@ -315,8 +315,8 @@ class TestStageCompressionFlag:
 class TestStageForceAndErrors:
     """Covers force flag and error propagation."""
 
-    def test_refuses_to_overwrite_without_force(self, zarr_root_factory, tmp_path):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_refuses_to_overwrite_without_force(self, stores_dir_factory, tmp_path):
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         staging.mkdir()
         (staging / 'preexisting.txt').write_text('hi')
@@ -325,14 +325,14 @@ class TestStageForceAndErrors:
             _stage(root, staging, store_names=['foo'])
 
     def test_force_overwrites_existing_staging_contents(
-        self, zarr_root_factory, tmp_path
+        self, stores_dir_factory, tmp_path
     ):
         """force=True → stage succeeds even when staging_dir already exists.
 
         ``stage()`` does not currently *erase* old files on force — it just
         bypasses the existence check. This test pins that exact semantics.
         """
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'
         staging.mkdir()
         preexisting = staging / 'preexisting.txt'
@@ -343,11 +343,11 @@ class TestStageForceAndErrors:
         assert (staging / 'foo' / 'raw.nrrd').is_file()
         assert preexisting.exists()
 
-    def test_missing_zarr_root_raises(self, tmp_path):
+    def test_missing_stores_dir_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError, match='Stores directory not found'):
             _stage(tmp_path / 'missing', tmp_path / 'staging')
 
-    def test_empty_zarr_root_raises(self, tmp_path):
+    def test_empty_stores_dir_raises(self, tmp_path):
         """Directory exists but contains no .zarr stores → FileNotFoundError."""
         empty = tmp_path / 'empty'
         empty.mkdir()

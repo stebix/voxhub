@@ -49,25 +49,25 @@ _DATASET_ATTRS_PAYLOAD: dict[str, object] = {
 class TestDiscoverZarrStores:
     """Covers voxhub_core.catalog.discover_zarr_stores."""
 
-    def test_discovers_single_store_at_root(self, zarr_root_factory):
+    def test_discovers_single_store_at_root(self, stores_dir_factory):
         """One foo.zarr directly under the root → one ZarrEntry returned."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         entries = discover_zarr_stores(root)
         assert len(entries) == 1
         assert isinstance(entries[0], ZarrEntry)
         assert entries[0].path.name == 'foo.zarr'
 
-    def test_discovers_multiple_stores(self, zarr_root_factory):
+    def test_discovers_multiple_stores(self, stores_dir_factory):
         """Three stores → three entries, sorted by path deterministically."""
-        root = zarr_root_factory(store_names=['gamma', 'alpha', 'beta'])
+        root = stores_dir_factory(store_names=['gamma', 'alpha', 'beta'])
         entries = discover_zarr_stores(root)
         names = [e.path.name for e in entries]
         assert names == ['alpha.zarr', 'beta.zarr', 'gamma.zarr']
 
-    def test_discovers_nested_stores(self, zarr_root_factory):
+    def test_discovers_nested_stores(self, stores_dir_factory):
         """`.zarr` directories under subdirectories are discovered — pins
         down the recursive behavior of ``Path.rglob('*.zarr')``."""
-        root = zarr_root_factory(store_names=['flat'])
+        root = stores_dir_factory(store_names=['flat'])
         nested_parent = root / 'sub'
         nested_parent.mkdir()
         (root / 'flat.zarr').rename(nested_parent / 'nested.zarr')
@@ -108,17 +108,17 @@ class TestDiscoverZarrStores:
 class TestProbeZarrEntry:
     """Covers catalog._probe_zarr and ZarrEntry population."""
 
-    def test_probes_shape_and_dtype(self, zarr_root_factory):
+    def test_probes_shape_and_dtype(self, stores_dir_factory):
         """Valid store → entry.shape and entry.dtype populated from raw/full."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         [entry] = discover_zarr_stores(root)
         assert entry.shape == SHAPE
         assert entry.dtype == 'float32'
         assert entry.error is None
 
-    def test_probes_attributes_dict(self, zarr_root_factory):
+    def test_probes_attributes_dict(self, stores_dir_factory):
         """Entry.attributes carries the DICOM geometry attrs."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         [entry] = discover_zarr_stores(root)
         assert list(entry.attributes['ImagePositionPatient']) == ORIGIN_LPS
         assert list(entry.attributes['ImageOrientationPatient']) == [
@@ -135,10 +135,10 @@ class TestProbeZarrEntry:
         ]
         assert entry.attributes['computed_slice_spacing_mm'] == SPACING_MM[2]
 
-    def test_probes_source_and_series_directory(self, zarr_root_factory):
+    def test_probes_source_and_series_directory(self, stores_dir_factory):
         """When source_directory/series_directory attrs are present they are
         surfaced on the entry."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r+')
         arr.update_attributes(
             {
@@ -150,9 +150,9 @@ class TestProbeZarrEntry:
         assert entry.source_directory == '/data/dicom/patient_42'
         assert entry.series_directory == 'series_01'
 
-    def test_corrupted_store_records_error_not_raise(self, zarr_root_factory):
+    def test_corrupted_store_records_error_not_raise(self, stores_dir_factory):
         """Delete raw/full → entry.error populated, other fields None."""
-        root = zarr_root_factory(store_names=['broken'], corrupt=['broken'])
+        root = stores_dir_factory(store_names=['broken'], corrupt=['broken'])
         [entry] = discover_zarr_stores(root)
         assert entry.error is not None
         assert entry.shape is None
@@ -160,11 +160,11 @@ class TestProbeZarrEntry:
         assert entry.attributes == {}
         assert entry.annotations == []
 
-    def test_store_without_spatial_metadata_still_probes(self, zarr_root_factory):
+    def test_store_without_spatial_metadata_still_probes(self, stores_dir_factory):
         """raw/full present but spatial attrs missing → probe succeeds (attrs
         just come back empty). The catalog layer does not validate schema —
         only the server layer flags ``Missing spatial metadata``."""
-        root = zarr_root_factory(store_names=['bare'])
+        root = stores_dir_factory(store_names=['bare'])
         arr_path = root / 'bare.zarr' / 'raw' / 'full'
         meta = json.loads((arr_path / 'zarr.json').read_text())
         meta['attributes'] = {}
@@ -175,10 +175,10 @@ class TestProbeZarrEntry:
         assert entry.shape == SHAPE
         assert entry.attributes == {}
 
-    def test_dataset_attributes_populated_when_present(self, zarr_root_factory):
+    def test_dataset_attributes_populated_when_present(self, stores_dir_factory):
         """Root has dataset_attributes root attr → entry.dataset_attributes
         matches the payload."""
-        root = zarr_root_factory(
+        root = stores_dir_factory(
             store_names=['foo'],
             dataset_attributes={'foo': _DATASET_ATTRS_PAYLOAD},
         )
@@ -187,9 +187,9 @@ class TestProbeZarrEntry:
         assert entry.dataset_attributes.origin == 'Acme Hospital'
         assert entry.dataset_attributes.tags == {'study': 'cohort_a'}
 
-    def test_dataset_attributes_none_when_absent(self, zarr_root_factory):
+    def test_dataset_attributes_none_when_absent(self, stores_dir_factory):
         """No dataset attrs → entry.dataset_attributes is None."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         [entry] = discover_zarr_stores(root)
         assert entry.dataset_attributes is None
 
@@ -202,16 +202,16 @@ class TestProbeZarrEntry:
 class TestDiscoverAnnotations:
     """Covers catalog._discover_annotations (walks annotations/ hierarchy)."""
 
-    def test_no_annotations_group_returns_empty_list(self, zarr_root_factory):
+    def test_no_annotations_group_returns_empty_list(self, stores_dir_factory):
         """Store without annotations/ group → entry.annotations == []."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         [entry] = discover_zarr_stores(root)
         assert entry.annotations == []
 
-    def test_single_annotation_discovered(self, zarr_root_factory):
+    def test_single_annotation_discovered(self, stores_dir_factory):
         """One annotator with one instance → exactly one AnnotationEntry
         with the expected attrs."""
-        root = zarr_root_factory(
+        root = stores_dir_factory(
             store_names=['foo'],
             with_annotations=True,
         )
@@ -224,9 +224,9 @@ class TestDiscoverAnnotations:
         assert ann.ontology_version == 1
         assert ann.integrated_at == '2026-01-01T00:00:00+00:00'
 
-    def test_multiple_annotators_discovered(self, zarr_root_factory):
+    def test_multiple_annotators_discovered(self, stores_dir_factory):
         """Two annotator-scoped subgroups → both discovered."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         populate_store_annotation(
             root / 'foo.zarr',
             annotator_id='alice',
@@ -242,9 +242,9 @@ class TestDiscoverAnnotations:
         ids = sorted(a.annotator_id for a in entry.annotations)
         assert ids == ['alice', 'bob']
 
-    def test_multiple_instances_per_annotator(self, zarr_root_factory):
+    def test_multiple_instances_per_annotator(self, stores_dir_factory):
         """Same annotator has two instance directories → both discovered."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         populate_store_annotation(
             root / 'foo.zarr',
             annotator_id='alice',
@@ -263,11 +263,11 @@ class TestDiscoverAnnotations:
         assert paths[0] != paths[1]
         assert all('alice-aaa11111' in p for p in paths)
 
-    def test_annotation_missing_ontology_attr_graceful(self, zarr_root_factory):
+    def test_annotation_missing_ontology_attr_graceful(self, stores_dir_factory):
         """Annotation array exists but ontology attr missing → entry has
         empty-string ontology and 0 ontology_version (current defaults in
         ``_discover_annotations``)."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         populate_store_annotation(
             root / 'foo.zarr',
             omit_ontology_attr=True,
@@ -280,14 +280,14 @@ class TestDiscoverAnnotations:
         # Other metadata is still recovered.
         assert ann.annotator_id == 'alice'
 
-    def test_annotation_path_format_matches_convention(self, zarr_root_factory):
+    def test_annotation_path_format_matches_convention(self, stores_dir_factory):
         """Discovered path is ``annotations/<annotator>-<nano>/<instance>``.
 
         Note: ``_discover_annotations`` records the *group* path (one level
         above the `data` array), so the convention ends at the instance
         directory, not the data array.
         """
-        root = zarr_root_factory(
+        root = stores_dir_factory(
             store_names=['foo'],
             with_annotations=True,
         )
@@ -319,9 +319,9 @@ class TestCatalogRendering:
         assert isinstance(tree, Tree)
         assert tree.children == []
 
-    def test_build_tree_with_stores_and_annotations(self, zarr_root_factory):
+    def test_build_tree_with_stores_and_annotations(self, stores_dir_factory):
         """Populated root → Tree has one child per discovered store."""
-        root = zarr_root_factory(
+        root = stores_dir_factory(
             store_names=['a', 'b', 'c'],
             with_annotations=True,
         )
@@ -337,9 +337,9 @@ class TestCatalogRendering:
         assert table.row_count == 0
         del tmp_path
 
-    def test_build_summary_table_with_stores(self, zarr_root_factory):
+    def test_build_summary_table_with_stores(self, stores_dir_factory):
         """Populated root → Table has one row per store."""
-        root = zarr_root_factory(store_names=['a', 'b'])
+        root = stores_dir_factory(store_names=['a', 'b'])
         entries = discover_zarr_stores(root)
         table = build_summary_table(entries)
         assert isinstance(table, Table)
@@ -369,8 +369,8 @@ class TestCatalogEntrypoint:
         result = catalog(tmp_path, console=self._silent_console())
         assert result == []
 
-    def test_catalog_returns_entries_on_populated_root(self, zarr_root_factory):
+    def test_catalog_returns_entries_on_populated_root(self, stores_dir_factory):
         """``catalog()`` forwards the probed entries to the caller."""
-        root = zarr_root_factory(store_names=['a', 'b'])
+        root = stores_dir_factory(store_names=['a', 'b'])
         result = catalog(root, show_table=True, console=self._silent_console())
         assert [e.path.name for e in result] == ['a.zarr', 'b.zarr']

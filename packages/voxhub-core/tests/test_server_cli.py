@@ -34,9 +34,9 @@ class TestListStores:
     """Covers voxhub_core.server.cli._run_list_stores."""
 
     def test_lists_single_empty_store(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
@@ -53,9 +53,9 @@ class TestListStores:
         assert entry['dataset_attributes'] is None
 
     def test_lists_multiple_stores_sorted(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('charlie', 'alpha', 'bravo'))
+        root = stores_dir_factory(('charlie', 'alpha', 'bravo'))
         server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
@@ -66,9 +66,9 @@ class TestListStores:
         assert set(names) == {'alpha', 'bravo', 'charlie'}
 
     def test_lists_store_with_annotations(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
@@ -82,7 +82,7 @@ class TestListStores:
         assert ann['path'].startswith('annotations/alice-')
 
     def test_includes_dataset_attributes_when_present(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
         da = {
             'modality': 'MRI',
@@ -90,7 +90,7 @@ class TestListStores:
             'origin': 'synthetic',
             'tags': {'note': 'test'},
         }
-        root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
+        root = stores_dir_factory(('alpha',), dataset_attributes={'alpha': da})
         server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
@@ -100,14 +100,14 @@ class TestListStores:
         assert entry['dataset_attributes']['origin'] == 'synthetic'
 
     def test_protocol_version_present(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_list_stores(server_argv(stores_dir=root))
         assert parsed_stdout()['protocol_version'] == PROTOCOL_VERSION
 
-    def test_store_with_probe_error(self, zarr_root_factory, server_argv, parsed_stdout):
-        root = zarr_root_factory(('good', 'broken'), corrupt=('broken',))
+    def test_store_with_probe_error(self, stores_dir_factory, server_argv, parsed_stdout):
+        root = stores_dir_factory(('good', 'broken'), corrupt=('broken',))
         server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
@@ -120,9 +120,9 @@ class TestListStores:
         assert by_name['good']['shape'] == list(SHAPE)
 
     def test_store_missing_spatial_metadata(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         # Remove spatial attrs from raw/full by rewriting zarr.json.
         arr_path = root / 'alpha.zarr' / 'raw' / 'full'
         meta = json.loads((arr_path / 'zarr.json').read_text())
@@ -141,17 +141,17 @@ class TestListStores:
         # Annotations still reported — discovery is independent.
         assert len(entry['annotations']) == 1
 
-    def test_nonexistent_zarr_root(self, tmp_path, server_argv, parsed_stdout):
+    def test_nonexistent_stores_dir(self, tmp_path, server_argv, parsed_stdout):
         server_cli._run_list_stores(server_argv(stores_dir=tmp_path / 'does-not-exist'))
         payload = parsed_stdout()
         assert payload['stores'] == []
         assert payload['protocol_version'] == PROTOCOL_VERSION
 
-    def test_logs_duration_on_completion(self, zarr_root_factory, server_argv, caplog):
+    def test_logs_duration_on_completion(self, stores_dir_factory, server_argv, caplog):
         import logging
 
         caplog.set_level(logging.INFO, logger='voxhub_core.server.cli')
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_list_stores(server_argv(stores_dir=root))
 
         # structlog renders the event dict as the LogRecord's msg.
@@ -173,9 +173,9 @@ class TestPreparePull:
     """Covers voxhub_core.server.cli._run_prepare_pull."""
 
     def test_stages_single_store_to_tempdir(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
 
         payload = parsed_stdout()
@@ -194,9 +194,9 @@ class TestPreparePull:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
     def test_uses_explicit_staging_dir_when_provided(
-        self, zarr_root_factory, tmp_path, server_argv, parsed_stdout
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         explicit = tmp_path / 'explicit_staging'
         server_cli._run_prepare_pull(
             server_argv(stores_dir=root, stores=['alpha'], staging_dir=str(explicit))
@@ -207,8 +207,8 @@ class TestPreparePull:
         assert explicit.is_dir()
         assert not payload['staging_dir'].startswith(('/tmp/dt-pull', '/var/'))
 
-    def test_filters_stores_by_name(self, zarr_root_factory, server_argv, parsed_stdout):
-        root = zarr_root_factory(('alpha', 'bravo', 'charlie'))
+    def test_filters_stores_by_name(self, stores_dir_factory, server_argv, parsed_stdout):
+        root = stores_dir_factory(('alpha', 'bravo', 'charlie'))
         server_cli._run_prepare_pull(
             server_argv(stores_dir=root, stores=['alpha', 'charlie'])
         )
@@ -220,9 +220,9 @@ class TestPreparePull:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
     def test_records_expected_ontologies(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_prepare_pull(
             server_argv(
                 stores_dir=root,
@@ -241,9 +241,9 @@ class TestPreparePull:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
     def test_copies_existing_annotations_when_requested(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         # The populate_store_annotation helper uses deterministic nano_id/random.
         ann_rel = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12'
 
@@ -263,9 +263,9 @@ class TestPreparePull:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
     def test_compression_flag_propagates_to_stage(
-        self, zarr_root_factory, server_argv, parsed_stdout, monkeypatch
+        self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         captured: dict[str, object] = {}
 
         original_stage = server_cli.stage
@@ -286,9 +286,9 @@ class TestPreparePull:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
     def test_stage_failure_writes_error_envelope_and_exits(
-        self, zarr_root_factory, server_argv, parsed_stdout, monkeypatch
+        self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
 
         def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
             raise RuntimeError('staging blew up')
@@ -305,11 +305,11 @@ class TestPreparePull:
         assert 'staging blew up' in envelope['message']
         assert envelope['protocol_version'] == PROTOCOL_VERSION
 
-    def test_nonexistent_store_name(self, zarr_root_factory, server_argv, parsed_stdout):
+    def test_nonexistent_store_name(self, stores_dir_factory, server_argv, parsed_stdout):
         """Document current behavior: unknown --stores names are fatal —
         ``stage()`` raises FileNotFoundError and the handler surfaces a
         ``prepare_pull_failed`` error envelope with SystemExit(1)."""
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
 
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_prepare_pull(
@@ -323,9 +323,9 @@ class TestPreparePull:
         assert 'does-not-exist' in envelope['message']
 
     def test_protocol_version_present(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
         payload = parsed_stdout()
         try:
@@ -334,9 +334,9 @@ class TestPreparePull:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
     def test_staging_dir_is_string_not_path_object(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
         payload = parsed_stdout()
         try:
@@ -395,16 +395,16 @@ class TestIntegrateAnnotationsHappy:
 
     def test_integrates_segmentation_writes_to_annotator_scoped_path(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -415,18 +415,18 @@ class TestIntegrateAnnotationsHappy:
         assert ann['path'].startswith('annotations/alice-deadbeef/')
         assert ann['ontology'] == 'inner-ear-structures'
 
-        written = _written_annotations(zarr_root / 'alpha.zarr')
+        written = _written_annotations(stores_dir / 'alpha.zarr')
         assert len(written) == 1
         assert written[0].parent.name == 'alice-deadbeef'
 
     def test_integrates_landmarks_writes_to_annotator_scoped_path(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-landmarks'],
@@ -435,7 +435,7 @@ class TestIntegrateAnnotationsHappy:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -447,12 +447,12 @@ class TestIntegrateAnnotationsHappy:
 
     def test_integrates_both_seg_and_landmarks_in_single_call(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
@@ -461,31 +461,31 @@ class TestIntegrateAnnotationsHappy:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'integrated'
         ontologies = {a['ontology'] for a in store_result['annotations']}
         assert ontologies == {'inner-ear-structures', 'inner-ear-landmarks'}
-        assert len(_written_annotations(zarr_root / 'alpha.zarr')) == 2
+        assert len(_written_annotations(stores_dir / 'alpha.zarr')) == 2
 
     def test_provenance_recorded_on_success(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
         parsed_stdout()
 
-        jsonl_path = zarr_root / '.meta' / 'provenance.jsonl'
+        jsonl_path = stores_dir / '.meta' / 'provenance.jsonl'
         assert jsonl_path.is_file()
         lines = [
             json.loads(line)
@@ -499,7 +499,7 @@ class TestIntegrateAnnotationsHappy:
         assert record['annotator_id'] == 'alice'
         assert record['ontology'] == 'inner-ear-structures'
 
-        written = _written_annotations(zarr_root / 'alpha.zarr')[0]
+        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
         arr = zarr.open_array(written / 'data', mode='r')
         arr_attrs = dict(arr.attrs)
         assert arr_attrs['annotator_id'] == 'alice'
@@ -509,22 +509,22 @@ class TestIntegrateAnnotationsHappy:
 
     def test_uses_ontology_from_manifest_not_cli(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(
             store_names=['alpha'], ontologies=['inner-ear-structures']
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
         parsed_stdout()
 
-        written = _written_annotations(zarr_root / 'alpha.zarr')[0]
+        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
         arr = zarr.open_array(written / 'data', mode='r')
         assert dict(arr.attrs)['ontology'] == 'inner-ear-structures'
         # Instance dir prefix matches the ontology loaded from manifest.
@@ -532,12 +532,12 @@ class TestIntegrateAnnotationsHappy:
 
     def test_checksum_matches_accepted(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(store_names=['alpha'])
         seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
         correct_checksum = server_cli._compute_sha256(seg_file)
@@ -545,7 +545,7 @@ class TestIntegrateAnnotationsHappy:
         server_cli._run_integrate_annotations(
             _integrate_argv(
                 server_argv,
-                stores_dir=zarr_root,
+                stores_dir=stores_dir,
                 staging_dir=staging,
                 checksums=[f'{seg_file.name}:{correct_checksum}'],
             )
@@ -564,9 +564,9 @@ class TestIntegrateAnnotationsErrors:
     """Covers error/rejection paths in _run_integrate_annotations."""
 
     def test_missing_manifest_writes_error_envelope_and_exits(
-        self, zarr_root_factory, tmp_path, server_argv, parsed_stdout
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         # staging exists but lacks .voxhub_manifest.json.
         bare_staging = tmp_path / 'bare_staging'
         (bare_staging / 'alpha').mkdir(parents=True)
@@ -574,7 +574,7 @@ class TestIntegrateAnnotationsErrors:
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_integrate_annotations(
                 _integrate_argv(
-                    server_argv, stores_dir=zarr_root, staging_dir=bare_staging
+                    server_argv, stores_dir=stores_dir, staging_dir=bare_staging
                 )
             )
         assert excinfo.value.code == 1
@@ -585,12 +585,12 @@ class TestIntegrateAnnotationsErrors:
 
     def test_checksum_mismatch_writes_error_envelope_and_exits(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(store_names=['alpha'])
 
         bogus = f'sha256:{"0" * 64}'
@@ -598,7 +598,7 @@ class TestIntegrateAnnotationsErrors:
             server_cli._run_integrate_annotations(
                 _integrate_argv(
                     server_argv,
-                    stores_dir=zarr_root,
+                    stores_dir=stores_dir,
                     staging_dir=staging,
                     checksums=[f'segmentation.seg.nrrd:{bogus}'],
                 )
@@ -608,22 +608,22 @@ class TestIntegrateAnnotationsErrors:
         envelope = parsed_stdout()
         assert envelope['code'] == 'checksum_mismatch'
         # No annotation was written.
-        assert _written_annotations(zarr_root / 'alpha.zarr') == []
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
     def test_unknown_ontology_produces_warning_but_continues(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(
             store_names=['alpha'], ontologies=['does-not-exist']
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -631,17 +631,17 @@ class TestIntegrateAnnotationsErrors:
         assert any('does-not-exist' in w['message'] for w in warnings)
         assert store_result['status'] == 'integrated'
         # Falls back to unconstrained ontology name on write.
-        written = _written_annotations(zarr_root / 'alpha.zarr')[0]
+        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
         assert written.name.startswith('unconstrained-')
 
     def test_segmentation_validation_error_without_force_blocks_write(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         # Shape mismatch: seg is (5,5,5), manifest declares SHAPE=(10,12,14).
         staging = staging_dir_with_manifest(
             store_names=['alpha'],
@@ -650,23 +650,23 @@ class TestIntegrateAnnotationsErrors:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'failed'
-        assert _written_annotations(zarr_root / 'alpha.zarr') == []
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
         errors = [i for i in store_result['issues'] if i['severity'] == 'error']
         assert errors
 
     def test_force_allows_integration_despite_errors(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
@@ -675,28 +675,28 @@ class TestIntegrateAnnotationsErrors:
 
         server_cli._run_integrate_annotations(
             _integrate_argv(
-                server_argv, stores_dir=zarr_root, staging_dir=staging, force=True
+                server_argv, stores_dir=stores_dir, staging_dir=staging, force=True
             )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'integrated'
-        assert len(_written_annotations(zarr_root / 'alpha.zarr')) == 1
+        assert len(_written_annotations(stores_dir / 'alpha.zarr')) == 1
 
     def test_parse_error_recorded_in_issues(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha', 'bravo'))
+        stores_dir = stores_dir_factory(('alpha', 'bravo'))
         staging = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
         # Corrupt alpha's seg.nrrd.
         (staging / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -719,12 +719,12 @@ class TestIntegrateAnnotationsMultiStore:
 
     def test_partial_failure_per_store_isolated(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha', 'bravo'))
+        stores_dir = stores_dir_factory(('alpha', 'bravo'))
         staging = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
         # Bravo's seg has a shape mismatch.
         write_seg_nrrd(
@@ -734,27 +734,27 @@ class TestIntegrateAnnotationsMultiStore:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         payload = parsed_stdout()
         assert payload['stores']['alpha']['status'] == 'integrated'
         assert payload['stores']['bravo']['status'] == 'failed'
-        assert len(_written_annotations(zarr_root / 'alpha.zarr')) == 1
-        assert _written_annotations(zarr_root / 'bravo.zarr') == []
+        assert len(_written_annotations(stores_dir / 'alpha.zarr')) == 1
+        assert _written_annotations(stores_dir / 'bravo.zarr') == []
 
     def test_iteration_order_deterministic(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha', 'bravo', 'charlie'))
+        stores_dir = stores_dir_factory(('alpha', 'bravo', 'charlie'))
         staging = staging_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -762,19 +762,19 @@ class TestIntegrateAnnotationsMultiStore:
 
     def test_skips_hidden_directories(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(store_names=['alpha'])
         hidden = staging / '.hidden'
         hidden.mkdir()
         (hidden / 'segmentation.seg.nrrd').write_bytes(b'junk')
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -782,16 +782,16 @@ class TestIntegrateAnnotationsMultiStore:
 
     def test_skips_directories_without_matching_zarr_store(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(store_names=['alpha', 'orphan'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -809,12 +809,12 @@ class TestIntegrateAnnotationsOntology:
 
     def test_segmentation_ontology_resolution_filters_by_type(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
@@ -823,7 +823,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         annotations = parsed_stdout()['stores']['alpha']['annotations']
@@ -833,12 +833,12 @@ class TestIntegrateAnnotationsOntology:
 
     def test_first_matching_ontology_used(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         # Pin the documented behavior at server/cli.py:446 — the first
         # matching segmentation ontology wins.
         staging = staging_dir_with_manifest(
@@ -850,7 +850,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -858,12 +858,12 @@ class TestIntegrateAnnotationsOntology:
 
     def test_no_matching_ontology_uses_unconstrained_fallback(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         # Only a landmarks ontology declared, but staging ships a segmentation.
         staging = staging_dir_with_manifest(
             store_names=['alpha'],
@@ -873,7 +873,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -1060,9 +1060,9 @@ class TestValidateAttributes:
     """Covers voxhub_core.server.cli._run_validate_attributes."""
 
     def test_store_without_dataset_attributes_reports_missing(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_validate_attributes(server_argv(stores_dir=root))
 
         result = parsed_stdout()['results']['alpha']
@@ -1070,7 +1070,7 @@ class TestValidateAttributes:
         assert result['issues'] == []
 
     def test_store_with_valid_attributes_reports_ok(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
         # Declared voxel size matches the canonical SPACING_MM.
         da = {
@@ -1079,7 +1079,7 @@ class TestValidateAttributes:
             'origin': 'synthetic',
             'tags': {},
         }
-        root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
+        root = stores_dir_factory(('alpha',), dataset_attributes={'alpha': da})
         server_cli._run_validate_attributes(server_argv(stores_dir=root))
 
         result = parsed_stdout()['results']['alpha']
@@ -1087,7 +1087,7 @@ class TestValidateAttributes:
         assert result['issues'] == []
 
     def test_store_with_mismatched_voxel_size_reports_warning(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
         # Declare voxel size that disagrees with raw/full metadata.
         da = {
@@ -1096,7 +1096,7 @@ class TestValidateAttributes:
             'origin': 'synthetic',
             'tags': {},
         }
-        root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
+        root = stores_dir_factory(('alpha',), dataset_attributes={'alpha': da})
         server_cli._run_validate_attributes(server_argv(stores_dir=root))
 
         result = parsed_stdout()['results']['alpha']
@@ -1105,8 +1105,8 @@ class TestValidateAttributes:
         issue = result['issues'][0]
         assert {'field', 'declared', 'actual', 'message'} <= issue.keys()
 
-    def test_filters_stores_by_name(self, zarr_root_factory, server_argv, parsed_stdout):
-        root = zarr_root_factory(('alpha', 'bravo'))
+    def test_filters_stores_by_name(self, stores_dir_factory, server_argv, parsed_stdout):
+        root = stores_dir_factory(('alpha', 'bravo'))
         server_cli._run_validate_attributes(
             server_argv(stores_dir=root, stores=['alpha'])
         )
@@ -1115,9 +1115,9 @@ class TestValidateAttributes:
         assert list(payload['results']) == ['alpha']
 
     def test_protocol_version_present(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_validate_attributes(server_argv(stores_dir=root))
         assert parsed_stdout()['protocol_version'] == PROTOCOL_VERSION
 
@@ -1130,8 +1130,8 @@ class TestValidateAttributes:
 class TestHealthcheck:
     """Covers voxhub_core.server.cli._run_healthcheck and _check_* helpers."""
 
-    def test_healthy_all_green(self, zarr_root_factory, server_argv, parsed_stdout):
-        root = zarr_root_factory(('alpha',))
+    def test_healthy_all_green(self, stores_dir_factory, server_argv, parsed_stdout):
+        root = stores_dir_factory(('alpha',))
         server_cli._run_healthcheck(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
@@ -1157,9 +1157,9 @@ class TestHealthcheck:
         assert check['status'] == 'fail'
 
     def test_degraded_when_store_corrupted(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('good', 'broken'), corrupt=('broken',))
+        root = stores_dir_factory(('good', 'broken'), corrupt=('broken',))
         with pytest.raises(SystemExit):
             server_cli._run_healthcheck(server_argv(stores_dir=root))
 
@@ -1170,9 +1170,9 @@ class TestHealthcheck:
         assert 'broken' in stores_check['detail']
 
     def test_provenance_check_ok_when_file_missing(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_cli._run_healthcheck(server_argv(stores_dir=root))
 
         prov_check = next(
@@ -1182,9 +1182,9 @@ class TestHealthcheck:
         assert 'no provenance file' in prov_check['detail']
 
     def test_provenance_check_fails_on_malformed_jsonl(
-        self, zarr_root_factory, server_argv, parsed_stdout
+        self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         meta_dir = root / '.meta'
         meta_dir.mkdir()
         (meta_dir / 'provenance.jsonl').write_text('{"valid":true}\nNOT JSON\n')
@@ -1197,10 +1197,10 @@ class TestHealthcheck:
         )
         assert prov_check['status'] == 'fail'
 
-    def test_store_and_provenance_checks_skipped_when_zarr_root_fails(
+    def test_store_and_provenance_checks_skipped_when_stores_dir_fails(
         self, tmp_path, server_argv, parsed_stdout
     ):
-        # If zarr_root fails, store/provenance checks are not even run —
+        # If stores_dir fails, store/provenance checks are not even run —
         # they would crash on a nonexistent directory.
         missing = tmp_path / 'nonexistent'
         with pytest.raises(SystemExit):
@@ -1321,14 +1321,14 @@ class TestMainStoresDirResolution:
     def test_handler_receives_settings_stores_dir(
         self,
         subcommand,
-        zarr_root_factory,
+        stores_dir_factory,
         server_config_env,
         monkeypatch,
         tmp_path,
     ):
         """Every stores-dir command receives ``settings.storage.stores_dir``
         via ``args.stores_dir``."""
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_config_env(root)
 
         captured: dict[str, object] = {}
@@ -1366,14 +1366,14 @@ class TestMainStoresDirResolution:
 
     def test_positional_stores_dir_is_rejected_by_argparse(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         server_config_env,
         monkeypatch,
         capsys,
     ):
         """A caller passing a positional (legacy behaviour) gets an
         argparse error — the positional is gone from the subparsers."""
-        root = zarr_root_factory(('alpha',))
+        root = stores_dir_factory(('alpha',))
         server_config_env(root)
         monkeypatch.setattr(
             'sys.argv',

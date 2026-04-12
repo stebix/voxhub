@@ -322,9 +322,9 @@ class TestFindAnnotationFiles:
 class TestIntegrate:
     def _setup(self, tmp_path, *, seg=True, lmk=False, ontology=None):
         """Set up zarr store + staging directory for integration."""
-        zarr_root = tmp_path / 'zarr'
-        zarr_root.mkdir()
-        create_zarr_store(zarr_root / 'mystore.zarr')
+        stores_dir = tmp_path / 'zarr'
+        stores_dir.mkdir()
+        create_zarr_store(stores_dir / 'mystore.zarr')
 
         staging = tmp_path / 'staging'
         seg_lm = None
@@ -355,13 +355,13 @@ class TestIntegrate:
             lmk_points=lmk_pts,
             lmk_labels=lmk_labels,
         )
-        return zarr_root, staging
+        return stores_dir, staging
 
     def test_integrates_valid_segmentation(self, tmp_path, inner_ear_ontology):
-        zarr_root, staging = self._setup(tmp_path)
+        stores_dir, staging = self._setup(tmp_path)
         issues = integrate(
             staging,
-            zarr_root,
+            stores_dir,
             annotator_id='alice',
             nano_id='abc12345',
             ontology=inner_ear_ontology,
@@ -371,16 +371,16 @@ class TestIntegrate:
             assert _errors(store_issues) == []
 
         # Annotation was written.
-        root = zarr.open_group(zarr_root / 'mystore.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
         ann = root['annotations']
         # Should have alice-abc12345 group.
         assert 'alice-abc12345' in list(ann)
 
     def test_integrates_valid_landmarks(self, tmp_path, landmark_ontology):
-        zarr_root, staging = self._setup(tmp_path, seg=False, lmk=True)
+        stores_dir, staging = self._setup(tmp_path, seg=False, lmk=True)
         issues = integrate(
             staging,
-            zarr_root,
+            stores_dir,
             annotator_id='alice',
             nano_id='abc12345',
             ontology=landmark_ontology,
@@ -388,27 +388,27 @@ class TestIntegrate:
         for store_issues in issues.values():
             assert _errors(store_issues) == []
 
-        root = zarr.open_group(zarr_root / 'mystore.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
         assert 'alice-abc12345' in list(root['annotations'])
 
     def test_validate_only_does_not_write(self, tmp_path, inner_ear_ontology):
-        zarr_root, staging = self._setup(tmp_path)
+        stores_dir, staging = self._setup(tmp_path)
         integrate(
             staging,
-            zarr_root,
+            stores_dir,
             annotator_id='alice',
             nano_id='abc12345',
             ontology=inner_ear_ontology,
             validate_only=True,
         )
-        root = zarr.open_group(zarr_root / 'mystore.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
         assert 'annotations' not in list(root)
 
     def test_validation_errors_block_integration(self, tmp_path, inner_ear_ontology):
         """A seg with wrong shape should block integration."""
-        zarr_root = tmp_path / 'zarr'
-        zarr_root.mkdir()
-        create_zarr_store(zarr_root / 'mystore.zarr')
+        stores_dir = tmp_path / 'zarr'
+        stores_dir.mkdir()
+        create_zarr_store(stores_dir / 'mystore.zarr')
 
         staging = tmp_path / 'staging'
         wrong_shape = (8, 12, 14)
@@ -421,7 +421,7 @@ class TestIntegrate:
         with pytest.raises(RuntimeError, match='Validation errors'):
             integrate(
                 staging,
-                zarr_root,
+                stores_dir,
                 annotator_id='alice',
                 nano_id='abc12345',
                 ontology=inner_ear_ontology,
@@ -430,27 +430,27 @@ class TestIntegrate:
     def test_force_integrates_despite_warnings(self, tmp_path, inner_ear_ontology):
         """With force=True, stores without errors still get integrated
         even when other stores have errors."""
-        zarr_root, staging = self._setup(tmp_path)
+        stores_dir, staging = self._setup(tmp_path)
         integrate(
             staging,
-            zarr_root,
+            stores_dir,
             annotator_id='alice',
             nano_id='abc12345',
             ontology=inner_ear_ontology,
             force=True,
         )
         # Should still succeed.
-        root = zarr.open_group(zarr_root / 'mystore.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
         assert 'annotations' in list(root)
 
     def test_multi_annotator_isolation(self, tmp_path, inner_ear_ontology):
         """Two annotators integrating to the same store get separate paths."""
-        zarr_root, staging1 = self._setup(tmp_path)
+        stores_dir, staging1 = self._setup(tmp_path)
 
         # First annotator.
         integrate(
             staging1,
-            zarr_root,
+            stores_dir,
             annotator_id='alice',
             nano_id='aaa11111',
             ontology=inner_ear_ontology,
@@ -466,14 +466,14 @@ class TestIntegrate:
         )
         integrate(
             staging2,
-            zarr_root,
+            stores_dir,
             annotator_id='bob',
             nano_id='bbb22222',
             ontology=inner_ear_ontology,
             force=True,
         )
 
-        root = zarr.open_group(zarr_root / 'mystore.zarr', mode='r')
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
         annotators = list(root['annotations'])
         assert 'alice-aaa11111' in annotators
         assert 'bob-bbb22222' in annotators

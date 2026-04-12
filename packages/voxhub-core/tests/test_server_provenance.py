@@ -31,7 +31,7 @@ _DEFAULT_ANN_PATH = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab
 
 
 def _call_record_provenance(
-    zarr_root: Path,
+    stores_dir: Path,
     store_name: str = 'alpha',
     *,
     annotation_path: str = _DEFAULT_ANN_PATH,
@@ -46,7 +46,7 @@ def _call_record_provenance(
     issues: list[IssueRecord] | None = None,
 ) -> None:
     record_provenance(
-        zarr_root,
+        stores_dir,
         store_name,
         annotation_path,
         annotator_id=annotator_id,
@@ -91,8 +91,8 @@ class TestRecordProvenance:
         }
     )
 
-    def test_writes_zarr_array_attributes(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_writes_zarr_array_attributes(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root)
 
         arr = zarr.open_group(root / 'alpha.zarr', mode='r')[
@@ -109,8 +109,8 @@ class TestRecordProvenance:
         assert isinstance(attrs['integrated_at'], str)
         assert isinstance(attrs['source_nrrd_checksum'], str)
 
-    def test_appends_single_line_to_jsonl_index(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_appends_single_line_to_jsonl_index(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root)
 
         jsonl = root / '.meta' / 'provenance.jsonl'
@@ -135,8 +135,8 @@ class TestRecordProvenance:
         assert record['event'] == 'push'
         assert record['store'] == 'alpha'
 
-    def test_creates_meta_directory_if_missing(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_creates_meta_directory_if_missing(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         assert not (root / '.meta').exists()
 
         _call_record_provenance(root)
@@ -144,8 +144,8 @@ class TestRecordProvenance:
         assert (root / '.meta').is_dir()
         assert (root / '.meta' / 'provenance.jsonl').is_file()
 
-    def test_subsequent_calls_append_not_overwrite(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_subsequent_calls_append_not_overwrite(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root)
         _call_record_provenance(root, annotator_id='carol', nano_id='cafebabe')
 
@@ -155,8 +155,8 @@ class TestRecordProvenance:
         assert records[0]['annotator_id'] == 'bob'
         assert records[1]['annotator_id'] == 'carol'
 
-    def test_timestamp_is_iso_utc(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_timestamp_is_iso_utc(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root)
 
         arr = zarr.open_group(root / 'alpha.zarr', mode='r')[_DEFAULT_ANN_PATH]
@@ -165,15 +165,15 @@ class TestRecordProvenance:
         assert offset is not None
         assert offset.total_seconds() == 0
 
-    def test_issues_list_empty_when_none_passed(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_issues_list_empty_when_none_passed(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root, issues=None)
 
         record = _read_jsonl(root / '.meta' / 'provenance.jsonl')[0]
         assert record['issues'] == []
 
-    def test_issues_list_populated_when_warnings_passed(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_issues_list_populated_when_warnings_passed(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         issues = [
             IssueRecord(severity='warning', message='coarse voxel spacing'),
             IssueRecord(severity='warning', message='extra segment label'),
@@ -186,8 +186,8 @@ class TestRecordProvenance:
             {'severity': 'warning', 'message': 'extra segment label'},
         ]
 
-    def test_nested_annotation_path_traversal(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_nested_annotation_path_traversal(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root, annotation_path=_DEFAULT_ANN_PATH)
 
         # The deepest node (the data array) carries the provenance attrs.
@@ -200,8 +200,8 @@ class TestRecordProvenance:
         ]
         assert 'annotator_id' not in dict(instance_group.attrs)
 
-    def test_strips_leading_trailing_slash(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_strips_leading_trailing_slash(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root, annotation_path=f'/{_DEFAULT_ANN_PATH}/')
 
         arr = zarr.open_group(root / 'alpha.zarr', mode='r')[_DEFAULT_ANN_PATH]
@@ -216,8 +216,8 @@ class TestRecordProvenance:
 class TestRecordProvenanceDurability:
     """Covers fsync/flush behavior that makes the JSONL index durable."""
 
-    def test_fsync_called_on_jsonl_write(self, zarr_root_factory, monkeypatch):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_fsync_called_on_jsonl_write(self, stores_dir_factory, monkeypatch):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         calls: list[int] = []
         real_fsync = os.fsync
 
@@ -229,8 +229,8 @@ class TestRecordProvenanceDurability:
         _call_record_provenance(root)
         assert len(calls) == 1
 
-    def test_jsonl_flushed_before_function_returns(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_jsonl_flushed_before_function_returns(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root)
 
         # Fresh handle sees the newly-appended line immediately.
@@ -248,14 +248,14 @@ class TestRecordProvenanceDurability:
 class TestRecordProvenanceErrors:
     """Covers error propagation from record_provenance."""
 
-    def test_missing_zarr_store_raises(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_missing_zarr_store_raises(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
 
         with pytest.raises((FileNotFoundError, KeyError, ValueError)):
             _call_record_provenance(root, store_name='does-not-exist')
 
-    def test_missing_annotation_path_raises(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_missing_annotation_path_raises(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
 
         with pytest.raises(KeyError):
             _call_record_provenance(
@@ -266,8 +266,8 @@ class TestRecordProvenanceErrors:
         os.geteuid() == 0,  # type: ignore[attr-defined]
         reason='root bypasses chmod permissions',
     )
-    def test_readonly_meta_directory(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_readonly_meta_directory(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         meta_dir = root / '.meta'
         meta_dir.mkdir()
         meta_dir.chmod(0o555)
@@ -351,8 +351,8 @@ class TestValidateProvenanceJsonl:
         )
         assert validate_provenance_jsonl(path) == []
 
-    def test_utf8_handling(self, zarr_root_factory):
-        root = zarr_root_factory(('alpha',), with_annotations=True)
+    def test_utf8_handling(self, stores_dir_factory):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
         _call_record_provenance(root, annotator_id='müller-李')
 
         # json.dumps escapes non-ASCII by default, but the round-trip must

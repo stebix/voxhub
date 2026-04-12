@@ -91,8 +91,8 @@ def _populate_lmk(
 class TestProbeStoreAnnotations:
     """Covers voxhub_core.audit._probe_store_annotations."""
 
-    def test_store_with_segmentation_only(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_store_with_segmentation_only(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['foo'])
         _populate_seg(root / 'foo.zarr', segments=_seg(_FULL_SEG))
 
         [info] = _probe_store_annotations(root / 'foo.zarr')
@@ -102,8 +102,8 @@ class TestProbeStoreAnnotations:
         assert info.segment_map == {1: 'cochlea', 2: 'vestibule'}
         assert info.ontology == 'inner-ear-structures'
 
-    def test_store_with_landmarks_only(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_store_with_landmarks_only(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['foo'])
         _populate_lmk(
             root / 'foo.zarr',
             labels=['round_window', 'oval_window'],
@@ -114,8 +114,8 @@ class TestProbeStoreAnnotations:
         assert info.has_segmentation is False
         assert info.landmark_labels == ['round_window', 'oval_window']
 
-    def test_store_with_both(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_store_with_both(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['foo'])
         _populate_seg(root / 'foo.zarr', segments=_seg(_FULL_SEG))
         _populate_lmk(root / 'foo.zarr', labels=['round_window'])
 
@@ -125,8 +125,8 @@ class TestProbeStoreAnnotations:
         assert any(i.has_segmentation for i in infos)
         assert any(i.has_landmarks for i in infos)
 
-    def test_store_with_no_annotations_returns_empty(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['foo'])
+    def test_store_with_no_annotations_returns_empty(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['foo'])
         # No annotation populated → no info entries.
         assert _probe_store_annotations(root / 'foo.zarr') == []
 
@@ -142,9 +142,9 @@ class TestProbeStoreAnnotations:
         assert info.has_segmentation is False
         assert info.has_landmarks is False
 
-    def test_ontology_filter_excludes_mismatched_annotations(self, zarr_root_factory):
+    def test_ontology_filter_excludes_mismatched_annotations(self, stores_dir_factory):
         """An ontology filter drops annotations whose ontology differs."""
-        root = zarr_root_factory(store_names=['foo'])
+        root = stores_dir_factory(store_names=['foo'])
         _populate_seg(
             root / 'foo.zarr',
             segments=_seg(_FULL_SEG),
@@ -177,17 +177,17 @@ class TestSegmentationCoherence:
             infos.extend(_probe_store_annotations(store_path))
         return infos
 
-    def test_coherent_stores_no_issues(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+    def test_coherent_stores_no_issues(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         for name in ('a', 'b', 'c'):
             _populate_seg(root / f'{name}.zarr', segments=_seg(_FULL_SEG))
 
         assert _check_segmentation_coherence(self._probe_all(root)) == []
 
-    def test_missing_segment_flagged(self, zarr_root_factory):
+    def test_missing_segment_flagged(self, stores_dir_factory):
         """Store A has {cochlea}, B/C have {cochlea, vestibule} → A flagged
         as missing 'vestibule'."""
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         _populate_seg(root / 'a.zarr', segments=_seg(_PARTIAL_SEG))
         _populate_seg(root / 'b.zarr', segments=_seg(_FULL_SEG))
         _populate_seg(root / 'c.zarr', segments=_seg(_FULL_SEG))
@@ -200,10 +200,10 @@ class TestSegmentationCoherence:
         assert all(i.category == 'segmentation' for i in a_issues)
         assert any(i.severity == 'error' for i in a_issues)
 
-    def test_extra_segment_flagged(self, zarr_root_factory):
+    def test_extra_segment_flagged(self, stores_dir_factory):
         """Store A has an extra label not in the majority set → flagged as a
         warning."""
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         _populate_seg(root / 'a.zarr', segments=_seg(_EXTRA_SEG))
         _populate_seg(root / 'b.zarr', segments=_seg(_FULL_SEG))
         _populate_seg(root / 'c.zarr', segments=_seg(_FULL_SEG))
@@ -214,7 +214,7 @@ class TestSegmentationCoherence:
         assert 'non_standard_label' in extra[0].message
         assert extra[0].severity == 'warning'
 
-    def test_label_value_mismatch_flagged(self, zarr_root_factory):
+    def test_label_value_mismatch_flagged(self, stores_dir_factory):
         """Same *name set*, but label_values swapped → flagged.
 
         The ``_check_segmentation_coherence`` value-level check fires only
@@ -223,7 +223,7 @@ class TestSegmentationCoherence:
         that branch we keep the name sets equal (so neither 'Missing' nor
         'Extra' fires) and swap the label_value → name mapping.
         """
-        root = zarr_root_factory(store_names=['a', 'b'])
+        root = stores_dir_factory(store_names=['a', 'b'])
         _populate_seg(
             root / 'a.zarr',
             segments=_seg({'cochlea': 1, 'vestibule': 2}),
@@ -238,9 +238,9 @@ class TestSegmentationCoherence:
         assert mismatch, issues
         assert mismatch[0].severity == 'error'
 
-    def test_majority_set_used_as_reference(self, zarr_root_factory):
+    def test_majority_set_used_as_reference(self, stores_dir_factory):
         """Three stores with set X, one with set Y → Y is flagged, not X."""
-        root = zarr_root_factory(store_names=['a', 'b', 'c', 'd'])
+        root = stores_dir_factory(store_names=['a', 'b', 'c', 'd'])
         for name in ('a', 'b', 'c'):
             _populate_seg(root / f'{name}.zarr', segments=_seg(_FULL_SEG))
         _populate_seg(
@@ -253,20 +253,20 @@ class TestSegmentationCoherence:
         assert 'd' in flagged
         assert flagged.isdisjoint({'a', 'b', 'c'}), flagged
 
-    def test_single_seg_store_no_issues(self, zarr_root_factory):
+    def test_single_seg_store_no_issues(self, stores_dir_factory):
         """Only one store has a segmentation → no comparison, zero issues."""
-        root = zarr_root_factory(store_names=['a', 'b'])
+        root = stores_dir_factory(store_names=['a', 'b'])
         _populate_seg(root / 'a.zarr', segments=_seg(_FULL_SEG))
         # b has no annotations.
 
         assert _check_segmentation_coherence(self._probe_all(root)) == []
 
-    def test_tie_break_when_no_majority(self, zarr_root_factory):
+    def test_tie_break_when_no_majority(self, stores_dir_factory):
         """Two stores with set X, two with set Y → ``Counter.most_common``
         resolves ties by insertion order of the frozenset values, so the
         first-seen set becomes the reference and the other two stores are
         flagged. This pins that deterministic behavior."""
-        root = zarr_root_factory(store_names=['a', 'b', 'c', 'd'])
+        root = stores_dir_factory(store_names=['a', 'b', 'c', 'd'])
         _populate_seg(root / 'a.zarr', segments=_seg(_FULL_SEG))
         _populate_seg(root / 'b.zarr', segments=_seg(_FULL_SEG))
         _populate_seg(root / 'c.zarr', segments=_seg(_PARTIAL_SEG))
@@ -295,8 +295,8 @@ class TestLandmarkCoherence:
             infos.extend(_probe_store_annotations(store_path))
         return infos
 
-    def test_coherent_landmark_labels_no_issues(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+    def test_coherent_landmark_labels_no_issues(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         for name in ('a', 'b', 'c'):
             _populate_lmk(
                 root / f'{name}.zarr',
@@ -304,8 +304,8 @@ class TestLandmarkCoherence:
             )
         assert _check_landmark_coherence(self._probe_all(root)) == []
 
-    def test_missing_landmark_flagged(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+    def test_missing_landmark_flagged(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         _populate_lmk(root / 'a.zarr', labels=['round_window'])
         _populate_lmk(
             root / 'b.zarr',
@@ -322,8 +322,8 @@ class TestLandmarkCoherence:
         assert any('oval_window' in i.message for i in a_issues)
         assert all(i.category == 'landmarks' for i in a_issues)
 
-    def test_extra_landmark_flagged(self, zarr_root_factory):
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+    def test_extra_landmark_flagged(self, stores_dir_factory):
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         _populate_lmk(
             root / 'a.zarr',
             labels=['round_window', 'oval_window', 'bonus_point'],
@@ -352,14 +352,14 @@ class TestLandmarkCoherence:
 class TestAuditFiltering:
     """Covers the public audit() function's filter parameters."""
 
-    def test_ontology_filter_restricts_analysis(self, zarr_root_factory):
+    def test_ontology_filter_restricts_analysis(self, stores_dir_factory):
         """Stores without the target ontology are excluded from comparisons.
 
         Two stores get an inner-ear-landmarks annotation that disagrees on
         labels. If the audit is filtered to inner-ear-structures only, the
         landmark disagreement must not surface.
         """
-        root = zarr_root_factory(store_names=['a', 'b'])
+        root = stores_dir_factory(store_names=['a', 'b'])
         _populate_seg(root / 'a.zarr', segments=_seg(_FULL_SEG))
         _populate_seg(root / 'b.zarr', segments=_seg(_FULL_SEG))
         _populate_lmk(root / 'a.zarr', labels=['round_window'])
@@ -375,9 +375,9 @@ class TestAuditFiltering:
         )
         assert all(i.category != 'landmarks' for i in issues), issues
 
-    def test_store_names_filter(self, zarr_root_factory):
+    def test_store_names_filter(self, stores_dir_factory):
         """store_names filter → only named stores are included in analysis."""
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         _populate_seg(root / 'a.zarr', segments=_seg(_FULL_SEG))
         _populate_seg(root / 'b.zarr', segments=_seg(_FULL_SEG))
         # c disagrees — but is filtered out.
@@ -393,9 +393,9 @@ class TestAuditFiltering:
     def test_empty_root_returns_no_issues(self, tmp_path):
         assert audit(tmp_path, console=_silent_console()) == []
 
-    def test_single_store_returns_no_issues(self, zarr_root_factory):
+    def test_single_store_returns_no_issues(self, stores_dir_factory):
         """A single-store root has nothing to compare against → no issues."""
-        root = zarr_root_factory(store_names=['only'])
+        root = stores_dir_factory(store_names=['only'])
         _populate_seg(root / 'only.zarr', segments=_seg(_FULL_SEG))
         assert audit(root, console=_silent_console()) == []
 
@@ -412,9 +412,9 @@ class TestAuditRendering:
         """Empty root → audit() returns [] without raising."""
         assert audit(tmp_path, console=_silent_console()) == []
 
-    def test_audit_renders_populated_report_without_crash(self, zarr_root_factory):
+    def test_audit_renders_populated_report_without_crash(self, stores_dir_factory):
         """A populated, divergent root renders the issue table cleanly."""
-        root = zarr_root_factory(store_names=['a', 'b', 'c'])
+        root = stores_dir_factory(store_names=['a', 'b', 'c'])
         _populate_seg(root / 'a.zarr', segments=_seg(_PARTIAL_SEG))
         _populate_seg(root / 'b.zarr', segments=_seg(_FULL_SEG))
         _populate_seg(root / 'c.zarr', segments=_seg(_FULL_SEG))

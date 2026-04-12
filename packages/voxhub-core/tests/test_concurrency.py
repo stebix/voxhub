@@ -195,24 +195,24 @@ class TestConcurrentIntegrateSameStore:
 
     def test_two_concurrent_writes_to_same_store_serialize(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         concurrent_integrate_runner,
         tmp_path,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
         staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['alpha'])
 
         results = concurrent_integrate_runner(
             [
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_a,
                     'annotator_id': 'alice',
                     'nano_id': 'aaaa1111',
                 },
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_b,
                     'annotator_id': 'bob',
                     'nano_id': 'bbbb2222',
@@ -224,29 +224,29 @@ class TestConcurrentIntegrateSameStore:
 
         annotator_dirs = {
             p.name
-            for p in (zarr_root / 'alpha.zarr' / 'annotations').iterdir()
+            for p in (stores_dir / 'alpha.zarr' / 'annotations').iterdir()
             if p.is_dir()
         }
         assert 'alice-aaaa1111' in annotator_dirs
         assert 'bob-bbbb2222' in annotator_dirs
 
-        records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
+        records = _parse_jsonl(stores_dir / '.meta' / 'provenance.jsonl')
         assert len(records) == 2
         assert {r['annotator_id'] for r in records} == {'alice', 'bob'}
 
     def test_concurrent_writes_do_not_deadlock(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         concurrent_integrate_runner,
         tmp_path,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         invocations = []
         for i in range(5):
             staging = _build_staging(tmp_path / 'stagings', f'dt-pull-{i}', ['alpha'])
             invocations.append(
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging,
                     'annotator_id': f'user{i}',
                     'nano_id': f'nano{i:04d}',
@@ -260,12 +260,12 @@ class TestConcurrentIntegrateSameStore:
         assert all(r['returncode'] == 0 for r in results), [r['stderr'] for r in results]
         assert elapsed < 60.0, f'5 concurrent integrates took {elapsed:.1f}s'
 
-        records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
+        records = _parse_jsonl(stores_dir / '.meta' / 'provenance.jsonl')
         assert len(records) == 5
 
     def test_lock_contention_respects_timeout(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         server_argv,
         held_lock,
         tmp_path,
@@ -278,7 +278,7 @@ class TestConcurrentIntegrateSameStore:
         the lock timeout without needing an env-var knob in the CLI.  It
         still exercises the real ``_run_integrate_annotations`` code path.
         """
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging = _build_staging(tmp_path / 'stagings', 'dt-pull-contended', ['alpha'])
 
         def _short_lock(path: Path, *, timeout: float = 60.0) -> FileLock:
@@ -287,10 +287,10 @@ class TestConcurrentIntegrateSameStore:
 
         monkeypatch.setattr(server_cli, 'store_lock', _short_lock)
 
-        with held_lock(zarr_root / 'alpha.zarr'), pytest.raises(Timeout):
+        with held_lock(stores_dir / 'alpha.zarr'), pytest.raises(Timeout):
             server_cli._run_integrate_annotations(
                 server_argv(
-                    stores_dir=zarr_root,
+                    stores_dir=stores_dir,
                     staging_dir=str(staging),
                     annotator_id='alice',
                     nano_id='ccccdddd',
@@ -336,24 +336,24 @@ class TestConcurrentIntegrateDifferentStores:
 
     def test_two_different_stores_fully_parallel(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         concurrent_integrate_runner,
         tmp_path,
     ):
-        zarr_root = zarr_root_factory(('alpha', 'beta'))
+        stores_dir = stores_dir_factory(('alpha', 'beta'))
         staging_alpha = _build_staging(tmp_path / 'stagings', 'dt-pull-alpha', ['alpha'])
         staging_beta = _build_staging(tmp_path / 'stagings', 'dt-pull-beta', ['beta'])
 
         results = concurrent_integrate_runner(
             [
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_alpha,
                     'annotator_id': 'alice',
                     'nano_id': 'aaaa1111',
                 },
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_beta,
                     'annotator_id': 'bob',
                     'nano_id': 'bbbb2222',
@@ -362,7 +362,7 @@ class TestConcurrentIntegrateDifferentStores:
         )
 
         assert all(r['returncode'] == 0 for r in results), [r['stderr'] for r in results]
-        records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
+        records = _parse_jsonl(stores_dir / '.meta' / 'provenance.jsonl')
         assert {r['store'] for r in records} == {'alpha', 'beta'}
 
 
@@ -383,24 +383,24 @@ class TestConcurrentProvenanceAppend:
 
     def test_two_different_stores_append_single_jsonl_concurrently(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         concurrent_integrate_runner,
         tmp_path,
     ):
-        zarr_root = zarr_root_factory(('alpha', 'beta'))
+        stores_dir = stores_dir_factory(('alpha', 'beta'))
         staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
         staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['beta'])
 
         results = concurrent_integrate_runner(
             [
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_a,
                     'annotator_id': 'alice',
                     'nano_id': 'aaaa1111',
                 },
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_b,
                     'annotator_id': 'bob',
                     'nano_id': 'bbbb2222',
@@ -410,7 +410,7 @@ class TestConcurrentProvenanceAppend:
 
         assert all(r['returncode'] == 0 for r in results)
 
-        records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
+        records = _parse_jsonl(stores_dir / '.meta' / 'provenance.jsonl')
         assert len(records) == 2
         for rec in records:
             assert isinstance(rec, dict)
@@ -418,18 +418,18 @@ class TestConcurrentProvenanceAppend:
 
     def test_high_concurrency_jsonl_integrity(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
     ):
         """10 concurrent appends directly via record_provenance (distinct
         stores, so store_lock does not serialize them).  Small records fit
         under PIPE_BUF — the POSIX O_APPEND guarantee should hold."""
         store_names = [f'store{i:02d}' for i in range(10)]
-        zarr_root = zarr_root_factory(tuple(store_names), with_annotations=True)
+        stores_dir = stores_dir_factory(tuple(store_names), with_annotations=True)
 
         ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
         targets = [
             {
-                'stores_dir': zarr_root,
+                'stores_dir': stores_dir,
                 'store_name': name,
                 'annotation_path': ann_path,
                 'annotator_id': f'annot{i:02d}',
@@ -446,7 +446,7 @@ class TestConcurrentProvenanceAppend:
         exit_codes = _run_workers_parallel(targets)
         assert all(code == 0 for code in exit_codes), exit_codes
 
-        records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
+        records = _parse_jsonl(stores_dir / '.meta' / 'provenance.jsonl')
         assert len(records) == 10
         # Each record's (annotator_id, pull_session_id) pair is unique by
         # construction; the record must parse and preserve that identity.
@@ -455,7 +455,7 @@ class TestConcurrentProvenanceAppend:
 
     def test_large_jsonl_record_still_atomic(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
     ):
         """Craft records well beyond PIPE_BUF (200 issues @ ~120 bytes each
         ≈ 24 KB per line) and append 4 concurrently.
@@ -466,7 +466,7 @@ class TestConcurrentProvenanceAppend:
         A failure motivates adding an explicit ``meta_lock``.
         """
         store_names = [f'large{i:02d}' for i in range(4)]
-        zarr_root = zarr_root_factory(tuple(store_names), with_annotations=True)
+        stores_dir = stores_dir_factory(tuple(store_names), with_annotations=True)
 
         ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
 
@@ -481,7 +481,7 @@ class TestConcurrentProvenanceAppend:
 
         targets = [
             {
-                'stores_dir': zarr_root,
+                'stores_dir': stores_dir,
                 'store_name': name,
                 'annotation_path': ann_path,
                 'annotator_id': f'big{i}',
@@ -499,7 +499,7 @@ class TestConcurrentProvenanceAppend:
         exit_codes = _run_workers_parallel(targets, timeout=120.0)
         assert all(code == 0 for code in exit_codes), exit_codes
 
-        jsonl_path = zarr_root / '.meta' / 'provenance.jsonl'
+        jsonl_path = stores_dir / '.meta' / 'provenance.jsonl'
         raw_lines = [
             ln for ln in jsonl_path.read_text(encoding='utf-8').splitlines() if ln.strip()
         ]
@@ -516,18 +516,18 @@ class TestConcurrentProvenanceAppend:
 
     def test_jsonl_append_lock_contention_stress(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
     ):
         """Regression canary: 100 short concurrent appends.  Not a strict
         correctness test — small records stay under PIPE_BUF and should
         be safe.  Runs as a sanity probe under ``pytest.mark.slow``."""
         store_names = [f'stress{i:03d}' for i in range(100)]
-        zarr_root = zarr_root_factory(tuple(store_names), with_annotations=True)
+        stores_dir = stores_dir_factory(tuple(store_names), with_annotations=True)
 
         ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
         targets = [
             {
-                'stores_dir': zarr_root,
+                'stores_dir': stores_dir,
                 'store_name': name,
                 'annotation_path': ann_path,
                 'annotator_id': f'stress{i:03d}',
@@ -544,7 +544,7 @@ class TestConcurrentProvenanceAppend:
         exit_codes = _run_workers_parallel(targets, timeout=180.0)
         assert all(code == 0 for code in exit_codes), exit_codes
 
-        records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
+        records = _parse_jsonl(stores_dir / '.meta' / 'provenance.jsonl')
         assert len(records) == 100
 
 
@@ -560,24 +560,24 @@ class TestAnnotatorIsolation:
 
     def test_concurrent_multi_annotator_isolation(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         concurrent_integrate_runner,
         tmp_path,
     ):
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
         staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['alpha'])
 
         results = concurrent_integrate_runner(
             [
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_a,
                     'annotator_id': 'alice',
                     'nano_id': 'aaaa1111',
                 },
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_b,
                     'annotator_id': 'bob',
                     'nano_id': 'bbbb2222',
@@ -586,7 +586,7 @@ class TestAnnotatorIsolation:
         )
         assert all(r['returncode'] == 0 for r in results)
 
-        ann_root = zarr_root / 'alpha.zarr' / 'annotations'
+        ann_root = stores_dir / 'alpha.zarr' / 'annotations'
         alice_dir = ann_root / 'alice-aaaa1111'
         bob_dir = ann_root / 'bob-bbbb2222'
         alice_instances = [p for p in alice_dir.iterdir() if p.is_dir()]
@@ -596,7 +596,7 @@ class TestAnnotatorIsolation:
 
         # JSONL records confirm annotator isolation (each annotator only
         # appears in their own record, never attributed to the other).
-        records = _parse_jsonl(zarr_root / '.meta' / 'provenance.jsonl')
+        records = _parse_jsonl(stores_dir / '.meta' / 'provenance.jsonl')
         alice_records = [r for r in records if r['annotator_id'] == 'alice']
         bob_records = [r for r in records if r['annotator_id'] == 'bob']
         assert len(alice_records) == 1
@@ -608,7 +608,7 @@ class TestAnnotatorIsolation:
 
     def test_same_annotator_two_pushes_different_instances(
         self,
-        zarr_root_factory,
+        stores_dir_factory,
         concurrent_integrate_runner,
         tmp_path,
     ):
@@ -616,20 +616,20 @@ class TestAnnotatorIsolation:
         each push creates a fresh instance directory (because
         ``instance_dir`` embeds a fresh random suffix per run), so both
         coexist under ``annotations/<annotator>-<nano>/``."""
-        zarr_root = zarr_root_factory(('alpha',))
+        stores_dir = stores_dir_factory(('alpha',))
         staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-same-a', ['alpha'])
         staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-same-b', ['alpha'])
 
         results = concurrent_integrate_runner(
             [
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_a,
                     'annotator_id': 'alice',
                     'nano_id': 'samesame',
                 },
                 {
-                    'zarr_root': zarr_root,
+                    'stores_dir': stores_dir,
                     'staging_dir': staging_b,
                     'annotator_id': 'alice',
                     'nano_id': 'samesame',
@@ -638,7 +638,7 @@ class TestAnnotatorIsolation:
         )
         assert all(r['returncode'] == 0 for r in results)
 
-        ann_root = zarr_root / 'alpha.zarr' / 'annotations'
+        ann_root = stores_dir / 'alpha.zarr' / 'annotations'
         annotator_dirs = [p for p in ann_root.iterdir() if p.is_dir()]
         assert len(annotator_dirs) == 1
         assert annotator_dirs[0].name == 'alice-samesame'
