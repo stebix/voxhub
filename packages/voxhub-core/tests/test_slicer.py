@@ -1,5 +1,8 @@
 """Tests for Slicer format parsers and writers."""
 
+import json
+
+import nrrd
 import numpy as np
 import pytest
 from _core_helpers import ORIGIN_LPS, SHAPE, SPACE_DIRECTIONS
@@ -7,6 +10,9 @@ from _core_helpers import write_mrk_json as _write_mrk
 from _core_helpers import write_seg_nrrd as _write_seg
 
 from voxhub_core.slicer import (
+    MrkJsonParseError,
+    SegNrrdParseError,
+    SlicerParseError,
     build_seg_nrrd_header,
     parse_mrk_json,
     parse_seg_nrrd,
@@ -147,8 +153,215 @@ class TestBuildSegNrrdHeader:
                 'color': (1.0, 0.0, 0.0),
             },
         ]
-        header = build_seg_nrrd_header(SHAPE, origin, dirs, segments, lm)
+        header = build_seg_nrrd_header(origin, dirs, segments, lm)
         assert header['space'] == 'left-posterior-superior'
         assert 'Segment0_Name' in header
         assert header['Segment0_Name'] == 'cochlea'
         assert 'Segment0_LabelValue' in header
+
+
+# ===================================================================
+# DEFENSIVE PARSING: SEG NRRD FAILURE PATHS
+# ===================================================================
+
+
+def _write_raw_seg_nrrd(path, label_map, header):
+    """Low-level seg.nrrd writer that lets tests produce malformed headers."""
+    nrrd.write(str(path), label_map, header)
+    return path
+
+
+class TestParseSegNrrdErrors:
+    def test_exception_hierarchy(self):
+        assert issubclass(SegNrrdParseError, SlicerParseError)
+        assert issubclass(SlicerParseError, ValueError)
+
+    def test_corrupt_file_raises(self, tmp_path):
+        path = tmp_path / 'bad.seg.nrrd'
+        path.write_bytes(b'not an nrrd file')
+        with pytest.raises(SegNrrdParseError, match='failed to read NRRD'):
+            parse_seg_nrrd(path)
+
+    def test_non_integer_label_map_raises(self, tmp_path):
+        lm = np.zeros(SHAPE, dtype=np.float32)
+        path = _write_seg(tmp_path / 'test.seg.nrrd', lm, [])
+        with pytest.raises(SegNrrdParseError, match='integer dtype'):
+            parse_seg_nrrd(path)
+
+    def test_missing_label_value_raises(self, tmp_path):
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        header = {
+            'space': 'left-posterior-superior',
+            'space origin': ORIGIN_LPS,
+            'space directions': SPACE_DIRECTIONS,
+            'kinds': ['domain', 'domain', 'domain'],
+            'Segment0_ID': 's0',
+            'Segment0_Name': 'region',
+            'Segment0_Color': '0.5 0.5 0.5',
+            # LabelValue intentionally omitted
+        }
+        path = _write_raw_seg_nrrd(tmp_path / 'test.seg.nrrd', lm, header)
+        with pytest.raises(SegNrrdParseError, match='Segment0_LabelValue') as exc:
+            parse_seg_nrrd(path)
+        assert exc.value.field == 'Segment0_LabelValue'
+        assert exc.value.path == path
+
+    def test_non_integer_label_value_raises(self, tmp_path):
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        header = {
+            'space': 'left-posterior-superior',
+            'space origin': ORIGIN_LPS,
+            'space directions': SPACE_DIRECTIONS,
+            'kinds': ['domain', 'domain', 'domain'],
+            'Segment0_ID': 's0',
+            'Segment0_Name': 'region',
+            'Segment0_Color': '0.5 0.5 0.5',
+            'Segment0_LabelValue': 'not-a-number',
+        }
+        path = _write_raw_seg_nrrd(tmp_path / 'test.seg.nrrd', lm, header)
+        with pytest.raises(SegNrrdParseError, match='not an integer'):
+            parse_seg_nrrd(path)
+
+    def test_missing_color_raises(self, tmp_path):
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        header = {
+            'space': 'left-posterior-superior',
+            'space origin': ORIGIN_LPS,
+            'space directions': SPACE_DIRECTIONS,
+            'kinds': ['domain', 'domain', 'domain'],
+            'Segment0_ID': 's0',
+            'Segment0_Name': 'region',
+            'Segment0_LabelValue': '1',
+            # Color intentionally omitted
+        }
+        path = _write_raw_seg_nrrd(tmp_path / 'test.seg.nrrd', lm, header)
+        with pytest.raises(SegNrrdParseError, match='Segment0_Color'):
+            parse_seg_nrrd(path)
+
+    def test_malformed_color_raises(self, tmp_path):
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        segments = [
+            {'id': 's0', 'name': 'region', 'label_value': 1, 'color': '1 0'},
+        ]
+        path = _write_seg(tmp_path / 'test.seg.nrrd', lm, segments)
+        with pytest.raises(SegNrrdParseError, match='3 components'):
+            parse_seg_nrrd(path)
+
+
+# ===================================================================
+# DEFENSIVE PARSING: MRK JSON FAILURE PATHS
+# ===================================================================
+
+
+class TestParseMrkJsonErrors:
+    def test_exception_hierarchy(self):
+        assert issubclass(MrkJsonParseError, SlicerParseError)
+        assert issubclass(SlicerParseError, ValueError)
+
+    def test_malformed_json_raises(self, tmp_path):
+        path = tmp_path / 'bad.mrk.json'
+        path.write_text('{not valid json')
+        with pytest.raises(MrkJsonParseError, match='invalid JSON'):
+            parse_mrk_json(path)
+
+    def test_non_dict_root_raises(self, tmp_path):
+        path = tmp_path / 'bad.mrk.json'
+        path.write_text('[1, 2, 3]')
+        with pytest.raises(MrkJsonParseError, match='must be an object'):
+            parse_mrk_json(path)
+
+    def test_invalid_coord_system_raises(self, tmp_path):
+        path = tmp_path / 'bad.mrk.json'
+        path.write_text(
+            json.dumps(
+                {
+                    'markups': [
+                        {
+                            'coordinateSystem': 'XYZ',
+                            'controlPoints': [],
+                        }
+                    ]
+                }
+            )
+        )
+        with pytest.raises(MrkJsonParseError, match=r'LPS.*RAS') as exc:
+            parse_mrk_json(path)
+        assert exc.value.field == 'coordinateSystem'
+
+    def test_missing_coord_system_raises(self, tmp_path):
+        path = tmp_path / 'bad.mrk.json'
+        path.write_text(
+            json.dumps({'markups': [{'controlPoints': []}]})
+        )
+        with pytest.raises(MrkJsonParseError, match='coordinateSystem'):
+            parse_mrk_json(path)
+
+    def test_position_wrong_length_raises(self, tmp_path):
+        path = tmp_path / 'bad.mrk.json'
+        path.write_text(
+            json.dumps(
+                {
+                    'markups': [
+                        {
+                            'coordinateSystem': 'LPS',
+                            'controlPoints': [
+                                {'label': 'a', 'position': [1.0, 2.0]}
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+        with pytest.raises(MrkJsonParseError, match='3-element') as exc:
+            parse_mrk_json(path)
+        assert exc.value.field == 'controlPoints[0].position'
+
+    def test_position_non_numeric_raises(self, tmp_path):
+        path = tmp_path / 'bad.mrk.json'
+        path.write_text(
+            json.dumps(
+                {
+                    'markups': [
+                        {
+                            'coordinateSystem': 'LPS',
+                            'controlPoints': [
+                                {'label': 'a', 'position': [1.0, 2.0, 'oops']}
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+        with pytest.raises(MrkJsonParseError, match='non-numeric'):
+            parse_mrk_json(path)
+
+    def test_missing_label_raises(self, tmp_path):
+        path = tmp_path / 'bad.mrk.json'
+        path.write_text(
+            json.dumps(
+                {
+                    'markups': [
+                        {
+                            'coordinateSystem': 'LPS',
+                            'controlPoints': [
+                                {'position': [1.0, 2.0, 3.0]}
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+        with pytest.raises(MrkJsonParseError, match="'label'"):
+            parse_mrk_json(path)
+
+    def test_exception_carries_context(self, tmp_path):
+        path = tmp_path / 'bad.mrk.json'
+        path.write_text('{"no_markups": true}')
+        with pytest.raises(MrkJsonParseError) as exc:
+            parse_mrk_json(path)
+        assert exc.value.path == path
+        assert exc.value.reason  # non-empty
