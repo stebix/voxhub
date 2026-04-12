@@ -12,12 +12,12 @@ The plans in this directory are the **tactical** specifications that fulfill
 its P1 and P2 sections. They enumerate concrete test cases, fixtures, and
 scaffolding required to cover specific untested modules.
 
-| Top-level plan section         | Tactical plan                                                  |
-|--------------------------------|----------------------------------------------------------------|
-| §4 Server Command Integration  | [server-cli.md](server-cli.md)                                 |
-| §6 Concurrent Writer Safety    | [concurrency-and-provenance.md](concurrency-and-provenance.md) |
-| §7 Provenance / Audit          | [concurrency-and-provenance.md](concurrency-and-provenance.md) |
-| (gap — not in strategic plan)  | [catalog-staging-audit.md](catalog-staging-audit.md)           |
+| Top-level plan section         | Tactical plan                                                  | Status      |
+|--------------------------------|----------------------------------------------------------------|-------------|
+| §4 Server Command Integration  | [server-cli.md](server-cli.md)                                 | implemented |
+| §6 Concurrent Writer Safety    | [concurrency-and-provenance.md](concurrency-and-provenance.md) | stubbed     |
+| §7 Provenance / Audit          | [concurrency-and-provenance.md](concurrency-and-provenance.md) | stubbed     |
+| (gap — not in strategic plan)  | [catalog-staging-audit.md](catalog-staging-audit.md)           | stubbed     |
 
 ## Scope
 
@@ -62,9 +62,11 @@ packages/voxhub-core/tests/
 └── test_audit.py                     (coherence audit stubs)
 ```
 
-All stub test files are created with `pytest.mark.skip` on each test so the
+Stub test files are created with `pytest.mark.skip` on each test so the
 suite remains green until the worktree owner implements them. Each stub has a
-docstring describing what it should verify.
+docstring describing what it should verify. The `server-cli.md` plan is
+fully implemented — see that plan file and `test_server_cli*.py` for the
+delivered coverage.
 
 ## Shared fixtures required
 

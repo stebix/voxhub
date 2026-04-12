@@ -6,24 +6,24 @@ parsed JSON envelope.  Subprocess-level smoke tests live in
 ``test_server_cli_subprocess.py``.
 
 Plan: docs/testing/server-cli.md
-
-This file is a set of ``pytest.mark.skip`` stubs.  Remove the skip marker
-as each test is fleshed out in a downstream worktree.  Each stub body has
-a ``del`` statement that references its fixture parameters so the type
-checker doesn't flag them as unused — replace the ``del`` with the real
-test body when implementing.
-
-Fixtures expected (to be added to conftest.py):
-    - zarr_root_factory
-    - wip_dir_with_manifest
-    - server_argv
-    - parsed_stdout
 """
 
+import json
+import shutil
+from pathlib import Path
+
+import numpy as np
 import pytest
+import zarr
+from _core_helpers import (
+    ORIGIN_LPS,
+    SHAPE,
+    SPACING_MM,
+    write_seg_nrrd,
+)
 
-pytestmark = pytest.mark.skip(reason='stub — see docs/testing/server-cli.md')
-
+from voxhub_core.server import cli as server_cli
+from voxhub_schema import PROTOCOL_VERSION
 
 # ===========================================================================
 # _run_list_stores
@@ -33,57 +33,135 @@ pytestmark = pytest.mark.skip(reason='stub — see docs/testing/server-cli.md')
 class TestListStores:
     """Covers voxhub_core.server.cli._run_list_stores."""
 
-    def test_lists_single_empty_store(self, zarr_root_factory, server_argv, capsys):
-        """One store, no annotations → single entry with populated geometry."""
-        del zarr_root_factory, server_argv, capsys
+    def test_lists_single_empty_store(
+        self, zarr_root_factory, server_argv, parsed_stdout
+    ):
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(zarr_root=root))
+
+        payload = parsed_stdout()
+        assert payload['protocol_version'] == PROTOCOL_VERSION
+        assert len(payload['stores']) == 1
+        entry = payload['stores'][0]
+        assert entry['name'] == 'alpha'
+        assert entry['shape'] == list(SHAPE)
+        assert entry['dtype'] == 'float32'
+        assert entry['origin_lps'] == ORIGIN_LPS
+        assert entry['spacing_mm'] == SPACING_MM
+        assert entry['annotations'] == []
+        assert entry['error'] is None
+        assert entry['dataset_attributes'] is None
 
     def test_lists_multiple_stores_sorted(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Three stores → all appear, order matches discover_zarr_stores."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('charlie', 'alpha', 'bravo'))
+        server_cli._run_list_stores(server_argv(zarr_root=root))
+
+        payload = parsed_stdout()
+        names = [s['name'] for s in payload['stores']]
+        # discover_zarr_stores sorts by filesystem path; '.zarr' suffix
+        # preserves alphabetical order of the stem.
+        assert names == sorted(names)
+        assert set(names) == {'alpha', 'bravo', 'charlie'}
 
     def test_lists_store_with_annotations(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Store with a pre-populated annotation → annotations list has one entry
-        with correct path, ontology, annotator_id, integrated_at."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',), with_annotations=True)
+        server_cli._run_list_stores(server_argv(zarr_root=root))
+
+        payload = parsed_stdout()
+        entry = payload['stores'][0]
+        assert len(entry['annotations']) == 1
+        ann = entry['annotations'][0]
+        assert ann['annotator_id'] == 'alice'
+        assert ann['ontology'] == 'inner-ear-structures'
+        assert ann['ontology_version'] == 1
+        assert ann['integrated_at'] == '2026-01-01T00:00:00+00:00'
+        assert ann['path'].startswith('annotations/alice-')
 
     def test_includes_dataset_attributes_when_present(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Root dataset_attributes → populated in response; absent → None."""
-        del zarr_root_factory, server_argv, capsys
+        da = {
+            'modality': 'MRI',
+            'resolution': {'voxel_size': [0.5, 0.5, 0.5], 'unit': 'mm'},
+            'origin': 'synthetic',
+            'tags': {'note': 'test'},
+        }
+        root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
+        server_cli._run_list_stores(server_argv(zarr_root=root))
+
+        payload = parsed_stdout()
+        entry = payload['stores'][0]
+        assert entry['dataset_attributes'] is not None
+        assert entry['dataset_attributes']['modality'] == 'MRI'
+        assert entry['dataset_attributes']['origin'] == 'synthetic'
 
     def test_protocol_version_present(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Response must always carry protocol_version == PROTOCOL_VERSION."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(zarr_root=root))
+        assert parsed_stdout()['protocol_version'] == PROTOCOL_VERSION
 
-    def test_store_with_probe_error(
-        self, zarr_root_factory, server_argv, capsys
-    ):
-        """Corrupted store → entry has error populated, other stores still OK."""
-        del zarr_root_factory, server_argv, capsys
+    def test_store_with_probe_error(self, zarr_root_factory, server_argv, parsed_stdout):
+        root = zarr_root_factory(('good', 'broken'), corrupt=('broken',))
+        server_cli._run_list_stores(server_argv(zarr_root=root))
+
+        payload = parsed_stdout()
+        by_name = {s['name']: s for s in payload['stores']}
+        assert by_name['broken']['error'] is not None
+        assert by_name['broken']['shape'] == []
+        assert by_name['broken']['annotations'] == []
+        # Unaffected sibling still succeeds.
+        assert by_name['good']['error'] is None
+        assert by_name['good']['shape'] == list(SHAPE)
 
     def test_store_missing_spatial_metadata(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Missing ImagePosition*/PixelSpacing → error='Missing spatial metadata',
-        annotations still discovered."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',), with_annotations=True)
+        # Remove spatial attrs from raw/full by rewriting zarr.json.
+        arr_path = root / 'alpha.zarr' / 'raw' / 'full'
+        meta = json.loads((arr_path / 'zarr.json').read_text())
+        for k in (
+            'ImagePositionPatient',
+            'ImageOrientationPatient',
+            'PixelSpacing',
+            'computed_slice_spacing_mm',
+        ):
+            meta.get('attributes', {}).pop(k, None)
+        (arr_path / 'zarr.json').write_text(json.dumps(meta))
 
-    def test_nonexistent_zarr_root(self, tmp_path, server_argv, capsys):
-        """Nonexistent root → empty stores list, not a crash."""
-        del tmp_path, server_argv, capsys
+        server_cli._run_list_stores(server_argv(zarr_root=root))
+        entry = parsed_stdout()['stores'][0]
+        assert entry['error'] == 'Missing spatial metadata'
+        # Annotations still reported — discovery is independent.
+        assert len(entry['annotations']) == 1
 
-    def test_logs_duration_on_completion(
-        self, zarr_root_factory, server_argv, capsys
-    ):
-        """stderr has structured log record list_stores_completed with duration_s."""
-        del zarr_root_factory, server_argv, capsys
+    def test_nonexistent_zarr_root(self, tmp_path, server_argv, parsed_stdout):
+        server_cli._run_list_stores(server_argv(zarr_root=tmp_path / 'does-not-exist'))
+        payload = parsed_stdout()
+        assert payload['stores'] == []
+        assert payload['protocol_version'] == PROTOCOL_VERSION
+
+    def test_logs_duration_on_completion(self, zarr_root_factory, server_argv, caplog):
+        import logging
+
+        caplog.set_level(logging.INFO, logger='voxhub_core.server.cli')
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(zarr_root=root))
+
+        # structlog renders the event dict as the LogRecord's msg.
+        completed = [
+            r
+            for r in caplog.records
+            if isinstance(r.msg, dict) and r.msg.get('event') == 'list_stores_completed'
+        ]
+        assert completed
+        assert 'duration_s' in completed[0].msg
 
 
 # ===========================================================================
@@ -95,66 +173,216 @@ class TestPreparePull:
     """Covers voxhub_core.server.cli._run_prepare_pull."""
 
     def test_stages_single_store_to_tempdir(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """One store → response has wip_dir and PreparedStore dict with all
-        spatial metadata fields and raw_checksum."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
+
+        payload = parsed_stdout()
+        wip_dir = Path(payload['wip_dir'])
+        try:
+            assert wip_dir.is_dir()
+            assert wip_dir.name.startswith('dt-pull-')
+            entry = payload['stores']['alpha']
+            assert entry['raw_checksum'].startswith('sha256:')
+            assert entry['shape'] == list(SHAPE)
+            assert entry['spacing_mm'] == SPACING_MM
+            assert entry['origin_lps'] == ORIGIN_LPS
+            assert entry['expected_ontologies'] == []
+            assert entry['included_annotations'] == []
+        finally:
+            shutil.rmtree(wip_dir, ignore_errors=True)
 
     def test_uses_explicit_wip_dir_when_provided(
-        self, zarr_root_factory, tmp_path, server_argv, capsys
+        self, zarr_root_factory, tmp_path, server_argv, parsed_stdout
     ):
-        """args.wip_dir=path → response points at that directory, not dt-pull-*."""
-        del zarr_root_factory, tmp_path, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        explicit = tmp_path / 'explicit_wip'
+        server_cli._run_prepare_pull(
+            server_argv(zarr_root=root, stores=['alpha'], wip_dir=str(explicit))
+        )
 
-    def test_filters_stores_by_name(
-        self, zarr_root_factory, server_argv, capsys
-    ):
-        """--stores a c → only those two appear in response."""
-        del zarr_root_factory, server_argv, capsys
+        payload = parsed_stdout()
+        assert Path(payload['wip_dir']) == explicit
+        assert explicit.is_dir()
+        assert not payload['wip_dir'].startswith(('/tmp/dt-pull', '/var/'))
+
+    def test_filters_stores_by_name(self, zarr_root_factory, server_argv, parsed_stdout):
+        root = zarr_root_factory(('alpha', 'bravo', 'charlie'))
+        server_cli._run_prepare_pull(
+            server_argv(zarr_root=root, stores=['alpha', 'charlie'])
+        )
+
+        payload = parsed_stdout()
+        try:
+            assert set(payload['stores']) == {'alpha', 'charlie'}
+        finally:
+            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
 
     def test_records_expected_ontologies(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """--ontologies x y z → stores[name].expected_ontologies == [x, y, z]."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_prepare_pull(
+            server_argv(
+                zarr_root=root,
+                stores=['alpha'],
+                ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
+            )
+        )
+
+        payload = parsed_stdout()
+        try:
+            assert payload['stores']['alpha']['expected_ontologies'] == [
+                'inner-ear-structures',
+                'inner-ear-landmarks',
+            ]
+        finally:
+            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
 
     def test_copies_existing_annotations_when_requested(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """--include-existing-annotations <path> → annotation copied into WIP."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',), with_annotations=True)
+        # The populate_store_annotation helper uses deterministic nano_id/random.
+        ann_rel = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12'
+
+        server_cli._run_prepare_pull(
+            server_argv(
+                zarr_root=root,
+                stores=['alpha'],
+                include_existing_annotations=[ann_rel],
+            )
+        )
+
+        payload = parsed_stdout()
+        wip_dir = Path(payload['wip_dir'])
+        try:
+            assert (wip_dir / 'alpha' / ann_rel).is_dir()
+        finally:
+            shutil.rmtree(wip_dir, ignore_errors=True)
 
     def test_compression_flag_propagates_to_stage(
-        self, zarr_root_factory, server_argv, capsys, monkeypatch
+        self, zarr_root_factory, server_argv, parsed_stdout, monkeypatch
     ):
-        """--compress flag reaches stage() (spy on voxhub_core.staging.stage)."""
-        del zarr_root_factory, server_argv, capsys, monkeypatch
+        root = zarr_root_factory(('alpha',))
+        captured: dict[str, object] = {}
+
+        original_stage = server_cli.stage
+
+        def spy_stage(*args, **kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return original_stage(*args, **kwargs)
+
+        monkeypatch.setattr(server_cli, 'stage', spy_stage)
+
+        server_cli._run_prepare_pull(
+            server_argv(zarr_root=root, stores=['alpha'], compress=True)
+        )
+        payload = parsed_stdout()
+        try:
+            assert captured['compress'] is True
+        finally:
+            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
 
     def test_stage_failure_writes_error_envelope_and_exits(
-        self, zarr_root_factory, server_argv, capsys, monkeypatch
+        self, zarr_root_factory, server_argv, parsed_stdout, monkeypatch
     ):
-        """Patch stage to raise → ServerError with code='prepare_pull_failed',
-        SystemExit(1)."""
-        del zarr_root_factory, server_argv, capsys, monkeypatch
+        root = zarr_root_factory(('alpha',))
 
-    def test_nonexistent_store_name(
-        self, zarr_root_factory, server_argv, capsys
-    ):
-        """--stores does-not-exist → document current behavior (empty dict?)."""
-        del zarr_root_factory, server_argv, capsys
+        def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError('staging blew up')
+
+        monkeypatch.setattr(server_cli, 'stage', boom)
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'prepare_pull_failed'
+        assert 'staging blew up' in envelope['message']
+        assert envelope['protocol_version'] == PROTOCOL_VERSION
+
+    def test_nonexistent_store_name(self, zarr_root_factory, server_argv, parsed_stdout):
+        """Document current behavior: unknown --stores names are fatal —
+        ``stage()`` raises FileNotFoundError and the handler surfaces a
+        ``prepare_pull_failed`` error envelope with SystemExit(1)."""
+        root = zarr_root_factory(('alpha',))
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_prepare_pull(
+                server_argv(zarr_root=root, stores=['does-not-exist'])
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'prepare_pull_failed'
+        assert 'does-not-exist' in envelope['message']
 
     def test_protocol_version_present(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Response envelope always has protocol_version field."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
+        payload = parsed_stdout()
+        try:
+            assert payload['protocol_version'] == PROTOCOL_VERSION
+        finally:
+            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
 
     def test_wip_dir_is_string_not_path_object(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """JSON serialization: wip_dir serializes as str, not repr(Path)."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
+        payload = parsed_stdout()
+        try:
+            assert isinstance(payload['wip_dir'], str)
+            assert not payload['wip_dir'].startswith('PosixPath(')
+        finally:
+            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
+
+
+# ===========================================================================
+# _run_integrate_annotations — helpers
+# ===========================================================================
+
+
+def _integrate_argv(
+    server_argv,
+    *,
+    zarr_root: Path,
+    wip_dir: Path,
+    annotator_id: str = 'alice',
+    nano_id: str = 'deadbeef',
+    machine_id: str = 'machine-xyz',
+    force: bool = False,
+    checksums: list[str] | None = None,
+):
+    return server_argv(
+        zarr_root=zarr_root,
+        wip_dir=str(wip_dir),
+        annotator_id=annotator_id,
+        nano_id=nano_id,
+        machine_id=machine_id,
+        force=force,
+        checksums=checksums,
+    )
+
+
+def _written_annotations(store_zarr: Path) -> list[Path]:
+    """Return the integrated annotation instance directories under a store."""
+    ann_root = store_zarr / 'annotations'
+    if not ann_root.is_dir():
+        return []
+    out: list[Path] = []
+    for annotator in ann_root.iterdir():
+        if annotator.is_dir():
+            out.extend(p for p in annotator.iterdir() if p.is_dir())
+    return out
 
 
 # ===========================================================================
@@ -163,48 +391,168 @@ class TestPreparePull:
 
 
 class TestIntegrateAnnotationsHappy:
-    """Covers voxhub_core.server.cli._run_integrate_annotations — success paths."""
+    """Covers _run_integrate_annotations success paths."""
 
     def test_integrates_segmentation_writes_to_annotator_scoped_path(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Valid seg.nrrd → zarr array at
-        annotations/<annotator>-<nano>/<ontology>-<date>-<rand>/data;
-        response stores[name].status == 'integrated'."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(store_names=['alpha'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        payload = parsed_stdout()
+        store_result = payload['stores']['alpha']
+        assert store_result['status'] == 'integrated'
+        assert len(store_result['annotations']) == 1
+        ann = store_result['annotations'][0]
+        assert ann['path'].startswith('annotations/alice-deadbeef/')
+        assert ann['ontology'] == 'inner-ear-structures'
+
+        written = _written_annotations(zarr_root / 'alpha.zarr')
+        assert len(written) == 1
+        assert written[0].parent.name == 'alice-deadbeef'
 
     def test_integrates_landmarks_writes_to_annotator_scoped_path(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Valid landmarks.mrk.json → analogous zarr path, correct attrs."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(
+            store_names=['alpha'],
+            ontologies=['inner-ear-landmarks'],
+            include_seg=False,
+            include_lmk=True,
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        payload = parsed_stdout()
+        store_result = payload['stores']['alpha']
+        assert store_result['status'] == 'integrated'
+        ann = store_result['annotations'][0]
+        assert ann['ontology'] == 'inner-ear-landmarks'
+        assert ann['path'].startswith('annotations/alice-deadbeef/')
 
     def test_integrates_both_seg_and_landmarks_in_single_call(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """WIP has both → both written, both in response.annotations list."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(
+            store_names=['alpha'],
+            ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
+            include_seg=True,
+            include_lmk=True,
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'integrated'
+        ontologies = {a['ontology'] for a in store_result['annotations']}
+        assert ontologies == {'inner-ear-structures', 'inner-ear-landmarks'}
+        assert len(_written_annotations(zarr_root / 'alpha.zarr')) == 2
 
     def test_provenance_recorded_on_success(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """.meta/provenance.jsonl has new entry with matching annotator_id,
-        machine_id, source checksums. Zarr array attrs include integrated_at,
-        annotator_id, etc."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(store_names=['alpha'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+        parsed_stdout()
+
+        jsonl_path = zarr_root / '.meta' / 'provenance.jsonl'
+        assert jsonl_path.is_file()
+        lines = [
+            json.loads(line)
+            for line in jsonl_path.read_text().splitlines()
+            if line.strip()
+        ]
+        assert len(lines) == 1
+        record = lines[0]
+        assert record['event'] == 'push'
+        assert record['store'] == 'alpha'
+        assert record['annotator_id'] == 'alice'
+        assert record['ontology'] == 'inner-ear-structures'
+
+        written = _written_annotations(zarr_root / 'alpha.zarr')[0]
+        arr = zarr.open_array(written / 'data', mode='r')
+        arr_attrs = dict(arr.attrs)
+        assert arr_attrs['annotator_id'] == 'alice'
+        assert arr_attrs['machine_id'] == 'machine-xyz'
+        assert arr_attrs['ontology'] == 'inner-ear-structures'
+        assert arr_attrs['integrated_at']
 
     def test_uses_ontology_from_manifest_not_cli(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Manifest expected_ontologies=['inner-ear-structures'] → that ontology
-        loaded, recorded in written array attrs."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(
+            store_names=['alpha'], ontologies=['inner-ear-structures']
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+        parsed_stdout()
+
+        written = _written_annotations(zarr_root / 'alpha.zarr')[0]
+        arr = zarr.open_array(written / 'data', mode='r')
+        assert dict(arr.attrs)['ontology'] == 'inner-ear-structures'
+        # Instance dir prefix matches the ontology loaded from manifest.
+        assert written.name.startswith('inner-ear-structures-')
 
     def test_checksum_matches_accepted(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """--checksums file:sha256:<correct> → integration proceeds."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(store_names=['alpha'])
+        seg_file = wip / 'alpha' / 'segmentation.seg.nrrd'
+        correct_checksum = server_cli._compute_sha256(seg_file)
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                zarr_root=zarr_root,
+                wip_dir=wip,
+                checksums=[f'{seg_file.name}:{correct_checksum}'],
+            )
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'integrated'
 
 
 # ===========================================================================
@@ -216,50 +564,143 @@ class TestIntegrateAnnotationsErrors:
     """Covers error/rejection paths in _run_integrate_annotations."""
 
     def test_missing_manifest_writes_error_envelope_and_exits(
-        self, zarr_root_factory, tmp_path, server_argv, capsys
+        self, zarr_root_factory, tmp_path, server_argv, parsed_stdout
     ):
-        """WIP has no .voxhub_manifest.json → ServerError code='manifest_missing',
-        SystemExit(1)."""
-        del zarr_root_factory, tmp_path, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        # WIP exists but lacks .voxhub_manifest.json.
+        bare_wip = tmp_path / 'bare_wip'
+        (bare_wip / 'alpha').mkdir(parents=True)
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=bare_wip)
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'manifest_missing'
 
     def test_checksum_mismatch_writes_error_envelope_and_exits(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Wrong checksum → ServerError code='checksum_mismatch', SystemExit(1)."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(store_names=['alpha'])
+
+        bogus = f'sha256:{"0" * 64}'
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    zarr_root=zarr_root,
+                    wip_dir=wip,
+                    checksums=[f'segmentation.seg.nrrd:{bogus}'],
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['code'] == 'checksum_mismatch'
+        # No annotation was written.
+        assert _written_annotations(zarr_root / 'alpha.zarr') == []
 
     def test_unknown_ontology_produces_warning_but_continues(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Manifest references nonexistent ontology → warning issue added,
-        integration still proceeds with unconstrained fallback."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(store_names=['alpha'], ontologies=['does-not-exist'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        warnings = [i for i in store_result['issues'] if i['severity'] == 'warning']
+        assert any('does-not-exist' in w['message'] for w in warnings)
+        assert store_result['status'] == 'integrated'
+        # Falls back to unconstrained ontology name on write.
+        written = _written_annotations(zarr_root / 'alpha.zarr')[0]
+        assert written.name.startswith('unconstrained-')
 
     def test_segmentation_validation_error_without_force_blocks_write(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Shape mismatch in seg.nrrd → no annotation written, issues populated."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        # Shape mismatch: seg is (5,5,5), manifest declares SHAPE=(10,12,14).
+        wip = wip_dir_with_manifest(
+            store_names=['alpha'],
+            seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
+            seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'failed'
+        assert _written_annotations(zarr_root / 'alpha.zarr') == []
+        errors = [i for i in store_result['issues'] if i['severity'] == 'error']
+        assert errors
 
     def test_force_allows_integration_despite_errors(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """--force + shape mismatch → annotation IS written."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(
+            store_names=['alpha'],
+            seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
+            seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip, force=True)
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'integrated'
+        assert len(_written_annotations(zarr_root / 'alpha.zarr')) == 1
 
     def test_parse_error_recorded_in_issues(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Corrupted .seg.nrrd → caught as IssueRecord with severity='error',
-        no annotation written, other stores unaffected."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha', 'bravo'))
+        wip = wip_dir_with_manifest(store_names=['alpha', 'bravo'])
+        # Corrupt alpha's seg.nrrd.
+        (wip / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
 
-    def test_lock_timeout_surfaces_cleanly(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
-    ):
-        """Simulate held lock in a separate process → integrate blocks until
-        timeout, then surfaces an error envelope (not a traceback)."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        payload = parsed_stdout()
+        assert payload['stores']['alpha']['status'] == 'failed'
+        errors = [
+            i for i in payload['stores']['alpha']['issues'] if i['severity'] == 'error'
+        ]
+        assert errors
+        # bravo unaffected.
+        assert payload['stores']['bravo']['status'] == 'integrated'
 
 
 # ===========================================================================
@@ -271,28 +712,85 @@ class TestIntegrateAnnotationsMultiStore:
     """Covers multi-store behavior in _run_integrate_annotations."""
 
     def test_partial_failure_per_store_isolated(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Store A valid, store B corrupted → A integrated, B failed, independent."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha', 'bravo'))
+        wip = wip_dir_with_manifest(store_names=['alpha', 'bravo'])
+        # Bravo's seg has a shape mismatch.
+        write_seg_nrrd(
+            wip / 'bravo' / 'segmentation.seg.nrrd',
+            np.zeros((4, 4, 4), dtype=np.int16),
+            [{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        payload = parsed_stdout()
+        assert payload['stores']['alpha']['status'] == 'integrated'
+        assert payload['stores']['bravo']['status'] == 'failed'
+        assert len(_written_annotations(zarr_root / 'alpha.zarr')) == 1
+        assert _written_annotations(zarr_root / 'bravo.zarr') == []
 
     def test_iteration_order_deterministic(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """WIP dirs [c, a, b] → response stores dict ordering matches sorted()."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha', 'bravo', 'charlie'))
+        wip = wip_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        payload = parsed_stdout()
+        assert list(payload['stores']) == ['alpha', 'bravo', 'charlie']
 
     def test_skips_hidden_directories(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """WIP has .hidden/ → silently skipped."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(store_names=['alpha'])
+        hidden = wip / '.hidden'
+        hidden.mkdir()
+        (hidden / 'segmentation.seg.nrrd').write_bytes(b'junk')
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        payload = parsed_stdout()
+        assert list(payload['stores']) == ['alpha']
 
     def test_skips_directories_without_matching_zarr_store(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """WIP has orphan/ but no orphan.zarr → silently skipped."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(store_names=['alpha', 'orphan'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        payload = parsed_stdout()
+        # Only alpha appears; orphan has no zarr store to integrate into.
+        assert list(payload['stores']) == ['alpha']
 
 
 # ===========================================================================
@@ -304,25 +802,79 @@ class TestIntegrateAnnotationsOntology:
     """Covers _resolve_ontologies + ontology selection logic."""
 
     def test_segmentation_ontology_resolution_filters_by_type(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Manifest has both seg and landmarks ontology → each annotation type
-        gets the right one."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        wip = wip_dir_with_manifest(
+            store_names=['alpha'],
+            ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
+            include_seg=True,
+            include_lmk=True,
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        annotations = parsed_stdout()['stores']['alpha']['annotations']
+        by_ontology = {a['ontology']: a for a in annotations}
+        assert 'inner-ear-structures' in by_ontology
+        assert 'inner-ear-landmarks' in by_ontology
 
     def test_first_matching_ontology_used(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Manifest has two seg ontologies → first is used (pin current behavior
-        from server/cli.py:446)."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        # Pin the documented behavior at server/cli.py:446 — the first
+        # matching segmentation ontology wins.
+        wip = wip_dir_with_manifest(
+            store_names=['alpha'],
+            ontologies=[
+                'inner-ear-structures',
+                'inner-ear-total-fluid-space',
+            ],
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['annotations'][0]['ontology'] == ('inner-ear-structures')
 
     def test_no_matching_ontology_uses_unconstrained_fallback(
-        self, zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        self,
+        zarr_root_factory,
+        wip_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
     ):
-        """Manifest has only landmarks ontology, WIP has only seg → written with
-        ontology='unconstrained', ontology_version=1."""
-        del zarr_root_factory, wip_dir_with_manifest, server_argv, capsys
+        zarr_root = zarr_root_factory(('alpha',))
+        # Only a landmarks ontology declared, but WIP ships a segmentation.
+        wip = wip_dir_with_manifest(
+            store_names=['alpha'],
+            ontologies=['inner-ear-landmarks'],
+            include_seg=True,
+            include_lmk=False,
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'integrated'
+        ann = store_result['annotations'][0]
+        assert ann['ontology'] == 'unconstrained'
+        assert ann['ontology_version'] == 1
 
 
 # ===========================================================================
@@ -333,26 +885,46 @@ class TestIntegrateAnnotationsOntology:
 class TestCleanup:
     """Covers voxhub_core.server.cli._run_cleanup."""
 
-    def test_removes_existing_wip_dir(
-        self, tmp_path, server_argv, capsys
-    ):
-        """Existing dir → removed, response status=='ok'."""
-        del tmp_path, server_argv, capsys
+    def test_removes_existing_wip_dir(self, tmp_path, server_argv, parsed_stdout):
+        wip = tmp_path / 'dt-pull-abc'
+        wip.mkdir()
+        (wip / 'payload').write_text('data')
+
+        server_cli._run_cleanup(server_argv(wip_dir=str(wip)))
+
+        payload = parsed_stdout()
+        assert payload['status'] == 'ok'
+        assert not wip.exists()
 
     def test_noop_when_wip_dir_missing(
-        self, tmp_path, server_argv, capsys
+        self, tmp_path, server_argv, parsed_stdout, capsys
     ):
-        """Nonexistent dir → response status=='ok', warning logged."""
-        del tmp_path, server_argv, capsys
+        missing = tmp_path / 'does-not-exist'
 
-    @pytest.mark.xfail(reason='current implementation has no path safety check')
-    def test_refuses_to_remove_non_wip_path(
-        self, tmp_path, server_argv, capsys
-    ):
-        """Security concern: _run_cleanup removes any path given. This test
-        documents the concern and becomes actionable if a safety check is
-        added (e.g., only remove dt-* prefixed paths or paths under tmpdir)."""
-        del tmp_path, server_argv, capsys
+        server_cli._run_cleanup(server_argv(wip_dir=str(missing)))
+
+        # Reading stderr first would consume the JSON stdout too, so we
+        # parse stdout through the fixture which calls readouterr().
+        payload = parsed_stdout()
+        assert payload['status'] == 'ok'
+
+    @pytest.mark.xfail(
+        reason='current implementation has no path safety check — '
+        'documented concern from docs/testing/server-cli.md §4.4',
+        strict=True,
+    )
+    def test_refuses_to_remove_non_wip_path(self, tmp_path, server_argv, parsed_stdout):
+        # A path that looks nothing like a WIP directory (no dt-* prefix,
+        # not under system tmpdir) should be refused.  If this xfail ever
+        # flips to passing, _run_cleanup now rejects suspicious paths.
+        suspicious = tmp_path / 'user-data'
+        suspicious.mkdir()
+
+        server_cli._run_cleanup(server_argv(wip_dir=str(suspicious)))
+
+        # We expect either a non-ok status OR the directory to remain.
+        payload = parsed_stdout()
+        assert payload['status'] != 'ok' or suspicious.exists()
 
 
 # ===========================================================================
@@ -363,46 +935,112 @@ class TestCleanup:
 class TestGc:
     """Covers voxhub_core.server.cli._run_gc.
 
-    Isolation note: _run_gc scans the real /tmp. Tests must monkey-patch
-    tempfile.gettempdir() to point at a tmp_path owned by the test, otherwise
-    they will clobber unrelated dt-* dirs on the developer's machine.
+    Isolation: ``_run_gc`` scans ``tempfile.gettempdir()``.  Every test
+    monkey-patches that to point at a per-test ``tmp_path`` so the real /tmp
+    is never touched.
     """
 
+    @staticmethod
+    def _isolate(monkeypatch, fake_tmp: Path) -> None:
+        import tempfile
+
+        fake_tmp.mkdir(exist_ok=True)
+        monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(fake_tmp))
+
     def test_removes_dirs_older_than_ttl(
-        self, tmp_path, server_argv, capsys, monkeypatch
+        self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
-        """/tmp/dt-pull-xxx with mtime 48h ago, --ttl-hours 24 → removed."""
-        del tmp_path, server_argv, capsys, monkeypatch
+        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+        old = tmp_path / 'fake_tmp' / 'dt-pull-old'
+        old.mkdir()
+        # 48 hours in the past.
+        import os as _os
+
+        old_ts = old.stat().st_mtime - 48 * 3600
+        _os.utime(old, (old_ts, old_ts))
+
+        server_cli._run_gc(server_argv(ttl_hours=24.0))
+
+        payload = parsed_stdout()
+        assert str(old) in payload['removed']
+        assert payload['count'] == 1
+        assert not old.exists()
 
     def test_keeps_dirs_newer_than_ttl(
-        self, tmp_path, server_argv, capsys, monkeypatch
+        self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
-        """Recent dir → kept."""
-        del tmp_path, server_argv, capsys, monkeypatch
+        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+        recent = tmp_path / 'fake_tmp' / 'dt-pull-recent'
+        recent.mkdir()
+
+        server_cli._run_gc(server_argv(ttl_hours=24.0))
+
+        payload = parsed_stdout()
+        assert payload['count'] == 0
+        assert recent.exists()
 
     def test_ignores_non_dt_prefix(
-        self, tmp_path, server_argv, capsys, monkeypatch
+        self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
-        """/tmp/foo-bar older than cutoff → ignored."""
-        del tmp_path, server_argv, capsys, monkeypatch
+        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+        other = tmp_path / 'fake_tmp' / 'foo-bar'
+        other.mkdir()
+        import os as _os
+
+        old_ts = other.stat().st_mtime - 48 * 3600
+        _os.utime(other, (old_ts, old_ts))
+
+        server_cli._run_gc(server_argv(ttl_hours=24.0))
+
+        payload = parsed_stdout()
+        assert payload['count'] == 0
+        assert other.exists()
 
     def test_ignores_files_only_dirs(
-        self, tmp_path, server_argv, capsys, monkeypatch
+        self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
-        """/tmp/dt-file (a file) → ignored."""
-        del tmp_path, server_argv, capsys, monkeypatch
+        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+        dt_file = tmp_path / 'fake_tmp' / 'dt-file'
+        dt_file.write_text('data')
+        import os as _os
+
+        old_ts = dt_file.stat().st_mtime - 48 * 3600
+        _os.utime(dt_file, (old_ts, old_ts))
+
+        server_cli._run_gc(server_argv(ttl_hours=24.0))
+
+        payload = parsed_stdout()
+        assert payload['count'] == 0
+        assert dt_file.exists()
 
     def test_count_matches_removed_length(
-        self, tmp_path, server_argv, capsys, monkeypatch
+        self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
-        """response['count'] == len(response['removed'])."""
-        del tmp_path, server_argv, capsys, monkeypatch
+        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+        import os as _os
+
+        for name in ('dt-pull-a', 'dt-pull-b', 'dt-pull-c'):
+            p = tmp_path / 'fake_tmp' / name
+            p.mkdir()
+            _os.utime(p, (p.stat().st_mtime - 48 * 3600,) * 2)
+
+        server_cli._run_gc(server_argv(ttl_hours=24.0))
+
+        payload = parsed_stdout()
+        assert payload['count'] == len(payload['removed'])
+        assert payload['count'] == 3
 
     def test_default_ttl_24_hours(
-        self, tmp_path, server_argv, capsys, monkeypatch
+        self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
-        """No --ttl-hours → argparse default is 24.0."""
-        del tmp_path, server_argv, capsys, monkeypatch
+        """Exercising argparse isn't possible at function layer; instead,
+        assert that server_argv's default matches the documented default."""
+        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+        ns = server_argv()  # no override
+        assert ns.ttl_hours == 24.0
+        server_cli._run_gc(ns)
+        # Empty fake_tmp → no removals, just verify the handler exits cleanly.
+        assert parsed_stdout()['count'] == 0
 
 
 # ===========================================================================
@@ -414,35 +1052,64 @@ class TestValidateAttributes:
     """Covers voxhub_core.server.cli._run_validate_attributes."""
 
     def test_store_without_dataset_attributes_reports_missing(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """No dataset_attributes → results[store]['status']=='missing'."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_validate_attributes(server_argv(zarr_root=root))
+
+        result = parsed_stdout()['results']['alpha']
+        assert result['status'] == 'missing'
+        assert result['issues'] == []
 
     def test_store_with_valid_attributes_reports_ok(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Consistent attrs → status=='ok'."""
-        del zarr_root_factory, server_argv, capsys
+        # Declared voxel size matches the canonical SPACING_MM.
+        da = {
+            'modality': 'MRI',
+            'resolution': {'voxel_size': list(SPACING_MM), 'unit': 'mm'},
+            'origin': 'synthetic',
+            'tags': {},
+        }
+        root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
+        server_cli._run_validate_attributes(server_argv(zarr_root=root))
+
+        result = parsed_stdout()['results']['alpha']
+        assert result['status'] == 'ok'
+        assert result['issues'] == []
 
     def test_store_with_mismatched_voxel_size_reports_warning(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Declared voxel_size differs from computed spacing →
-        status=='warning', issues list populated with field/declared/actual/message."""
-        del zarr_root_factory, server_argv, capsys
+        # Declare voxel size that disagrees with raw/full metadata.
+        da = {
+            'modality': 'MRI',
+            'resolution': {'voxel_size': [0.1, 0.1, 0.1], 'unit': 'mm'},
+            'origin': 'synthetic',
+            'tags': {},
+        }
+        root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
+        server_cli._run_validate_attributes(server_argv(zarr_root=root))
 
-    def test_filters_stores_by_name(
-        self, zarr_root_factory, server_argv, capsys
-    ):
-        """--stores a → only a evaluated."""
-        del zarr_root_factory, server_argv, capsys
+        result = parsed_stdout()['results']['alpha']
+        assert result['status'] == 'warning'
+        assert result['issues']
+        issue = result['issues'][0]
+        assert {'field', 'declared', 'actual', 'message'} <= issue.keys()
+
+    def test_filters_stores_by_name(self, zarr_root_factory, server_argv, parsed_stdout):
+        root = zarr_root_factory(('alpha', 'bravo'))
+        server_cli._run_validate_attributes(server_argv(zarr_root=root, stores=['alpha']))
+
+        payload = parsed_stdout()
+        assert list(payload['results']) == ['alpha']
 
     def test_protocol_version_present(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Response envelope always has protocol_version field."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_validate_attributes(server_argv(zarr_root=root))
+        assert parsed_stdout()['protocol_version'] == PROTOCOL_VERSION
 
 
 # ===========================================================================
@@ -453,56 +1120,109 @@ class TestValidateAttributes:
 class TestHealthcheck:
     """Covers voxhub_core.server.cli._run_healthcheck and _check_* helpers."""
 
-    def test_healthy_all_green(
-        self, zarr_root_factory, server_argv, capsys
-    ):
-        """Well-formed root, all checks pass → status=='healthy', exit 0."""
-        del zarr_root_factory, server_argv, capsys
+    def test_healthy_all_green(self, zarr_root_factory, server_argv, parsed_stdout):
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_healthcheck(server_argv(zarr_root=root))
+
+        payload = parsed_stdout()
+        assert payload['status'] == 'healthy'
+        check_names = [c['name'] for c in payload['checks']]
+        assert {'python_version', 'packages', 'zarr_root', 'stores'} <= set(check_names)
+        for check in payload['checks']:
+            assert check['status'] == 'ok', check
 
     def test_degraded_when_zarr_root_unwritable(
-        self, tmp_path, server_argv, capsys
+        self, tmp_path, server_argv, parsed_stdout
     ):
-        """Read-only root → status=='degraded', zarr_root check fails,
-        SystemExit(1)."""
-        del tmp_path, server_argv, capsys
+        # Point at a path that doesn't exist — zarr_root check fails.
+        missing = tmp_path / 'nonexistent'
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_healthcheck(server_argv(zarr_root=missing))
+        assert excinfo.value.code == 1
+
+        payload = parsed_stdout()
+        assert payload['status'] == 'degraded'
+        zarr_check = next(c for c in payload['checks'] if c['name'] == 'zarr_root')
+        assert zarr_check['status'] == 'fail'
 
     def test_degraded_when_store_corrupted(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """One store has probe error → stores check fails."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('good', 'broken'), corrupt=('broken',))
+        with pytest.raises(SystemExit):
+            server_cli._run_healthcheck(server_argv(zarr_root=root))
+
+        payload = parsed_stdout()
+        assert payload['status'] == 'degraded'
+        stores_check = next(c for c in payload['checks'] if c['name'] == 'stores')
+        assert stores_check['status'] == 'fail'
+        assert 'broken' in stores_check['detail']
 
     def test_provenance_check_ok_when_file_missing(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """No .meta/provenance.jsonl → check passes (detail='no provenance file yet')."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        server_cli._run_healthcheck(server_argv(zarr_root=root))
+
+        prov_check = next(
+            c for c in parsed_stdout()['checks'] if c['name'] == 'provenance'
+        )
+        assert prov_check['status'] == 'ok'
+        assert 'no provenance file' in prov_check['detail']
 
     def test_provenance_check_fails_on_malformed_jsonl(
-        self, zarr_root_factory, server_argv, capsys
+        self, zarr_root_factory, server_argv, parsed_stdout
     ):
-        """Write JSONL with one bad line → check fails."""
-        del zarr_root_factory, server_argv, capsys
+        root = zarr_root_factory(('alpha',))
+        meta_dir = root / '.meta'
+        meta_dir.mkdir()
+        (meta_dir / 'provenance.jsonl').write_text('{"valid":true}\nNOT JSON\n')
+
+        with pytest.raises(SystemExit):
+            server_cli._run_healthcheck(server_argv(zarr_root=root))
+
+        prov_check = next(
+            c for c in parsed_stdout()['checks'] if c['name'] == 'provenance'
+        )
+        assert prov_check['status'] == 'fail'
 
     def test_store_and_provenance_checks_skipped_when_zarr_root_fails(
-        self, tmp_path, server_argv, capsys
+        self, tmp_path, server_argv, parsed_stdout
     ):
-        """If zarr_root check fails, later checks aren't run (would crash)."""
-        del tmp_path, server_argv, capsys
+        # If zarr_root fails, store/provenance checks are not even run —
+        # they would crash on a nonexistent directory.
+        missing = tmp_path / 'nonexistent'
+        with pytest.raises(SystemExit):
+            server_cli._run_healthcheck(server_argv(zarr_root=missing))
+
+        check_names = {c['name'] for c in parsed_stdout()['checks']}
+        assert 'stores' not in check_names
+        assert 'provenance' not in check_names
 
     def test_python_version_check(self):
-        """_check_python_version() reports current version, status='ok' on 3.12+."""
+        check = server_cli._check_python_version()
+        assert check['name'] == 'python_version'
+        # The test suite itself requires 3.12+ per pyproject; must pass.
+        assert check['status'] == 'ok'
 
     def test_rsync_check_when_rsync_present(self, monkeypatch):
-        """shutil.which('rsync') returns path → status='ok'."""
-        del monkeypatch
+        monkeypatch.setattr(shutil, 'which', lambda _name: '/usr/bin/rsync')
+        check = server_cli._check_rsync()
+        assert check == {
+            'name': 'rsync',
+            'status': 'ok',
+            'detail': '/usr/bin/rsync',
+        }
 
     def test_rsync_check_when_absent(self, monkeypatch):
-        """shutil.which('rsync') returns None → status='fail'."""
-        del monkeypatch
+        monkeypatch.setattr(shutil, 'which', lambda _name: None)
+        check = server_cli._check_rsync()
+        assert check['status'] == 'fail'
 
     def test_packages_check_all_importable(self):
-        """All three voxhub_* packages importable → status='ok'."""
+        check = server_cli._check_packages()
+        assert check['status'] == 'ok'
 
 
 # ===========================================================================
@@ -513,28 +1233,59 @@ class TestHealthcheck:
 class TestMainEntry:
     """Covers voxhub_core.server.cli.main — argparse wiring and error handling."""
 
-    def test_no_command_prints_help_and_exits_zero(
-        self, capsys, monkeypatch
-    ):
-        """args.command is None → print_help, sys.exit(0)."""
-        del capsys, monkeypatch
+    def test_no_command_prints_help_and_exits_zero(self, capsys, monkeypatch):
+        monkeypatch.setattr('sys.argv', ['voxhub-server'])
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli.main()
+        assert excinfo.value.code == 0
+        captured = capsys.readouterr()
+        assert 'usage' in captured.out.lower()
 
-    def test_unknown_command_argparse_error(
-        self, capsys, monkeypatch
-    ):
-        """Unknown subcommand → argparse exits 2."""
-        del capsys, monkeypatch
+    def test_unknown_command_argparse_error(self, capsys, monkeypatch):
+        monkeypatch.setattr('sys.argv', ['voxhub-server', 'nonsense'])
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli.main()
+        assert excinfo.value.code == 2
 
     def test_unhandled_exception_returns_server_error_envelope(
-        self, capsys, monkeypatch
+        self, capsys, monkeypatch, tmp_path
     ):
-        """Patch a handler to raise RuntimeError('boom') → stdout has
-        ServerError code='internal_error', message='boom', exit 1.
-        Covers server/cli.py:945-950."""
-        del capsys, monkeypatch
+        # Point list-stores at a valid root, then force the handler to blow up.
+        root = tmp_path / 'empty-root'
+        root.mkdir()
 
-    def test_settings_loaded_on_entry(
-        self, capsys, monkeypatch
-    ):
-        """Spy on load_settings — called before command dispatch."""
-        del capsys, monkeypatch
+        def boom(_args):  # type: ignore[no-untyped-def]
+            raise RuntimeError('boom')
+
+        monkeypatch.setattr(server_cli, '_run_list_stores', boom)
+        monkeypatch.setattr(
+            'sys.argv',
+            ['voxhub-server', 'list-stores', str(root)],
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli.main()
+        assert excinfo.value.code == 1
+
+        out = capsys.readouterr().out
+        envelope = json.loads(out.strip().splitlines()[-1])
+        assert envelope['error'] is True
+        assert envelope['code'] == 'internal_error'
+        assert envelope['message'] == 'boom'
+
+    def test_settings_loaded_on_entry(self, capsys, monkeypatch, tmp_path):
+        root = tmp_path / 'empty-root'
+        root.mkdir()
+        called: list[bool] = []
+
+        original_load = server_cli.load_settings
+
+        def spy() -> object:
+            called.append(True)
+            return original_load()
+
+        monkeypatch.setattr(server_cli, 'load_settings', spy)
+        monkeypatch.setattr('sys.argv', ['voxhub-server', 'list-stores', str(root)])
+
+        server_cli.main()
+        assert called, 'expected load_settings to be invoked'

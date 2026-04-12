@@ -949,3 +949,7 @@ def main() -> None:
         log.error('unhandled_exception', error=str(exc), exc_info=True)
         _write_error('internal_error', str(exc))
         sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

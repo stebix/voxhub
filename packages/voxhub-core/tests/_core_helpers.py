@@ -1,11 +1,15 @@
 """Test helpers for voxhub-core — builder functions for test data."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import nrrd
 import numpy as np
 import zarr
+
+from voxhub_schema.manifest import RemoteManifest, RemoteManifestEntry
 
 # Canonical small volume geometry used across tests.
 SHAPE: tuple[int, int, int] = (10, 12, 14)
@@ -38,6 +42,7 @@ def create_zarr_store(
             'ImageOrientationPatient': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             'PixelSpacing': [SPACING_MM[0], SPACING_MM[1]],
             'computed_slice_spacing_mm': SPACING_MM[2],
+            'spacing_mm': list(SPACING_MM),
         }
     )
     return store_path
@@ -96,6 +101,37 @@ def write_mrk_json(
     return path
 
 
+# -- Canonical annotation payloads ------------------------------------------
+
+_DEFAULT_SEG_SEGMENTS: list[dict[str, object]] = [
+    {'id': 's0', 'name': 'cochlea', 'label_value': 1, 'color': '1 0 0'},
+    {'id': 's1', 'name': 'vestibule', 'label_value': 2, 'color': '0 1 0'},
+    {
+        'id': 's2',
+        'name': 'semicircular_canals',
+        'label_value': 3,
+        'color': '0 0 1',
+    },
+]
+
+
+def default_seg_label_map() -> np.ndarray:
+    """A canonical label map aligned with the inner-ear ontology (labels 1-3)."""
+    lm = np.zeros(SHAPE, dtype=np.int16)
+    lm[0, 0, 0] = 1
+    lm[1, 1, 1] = 2
+    lm[2, 2, 2] = 3
+    return lm
+
+
+def default_lmk_points() -> list[list[float]]:
+    return [[-4.0, -5.0, -6.0], [-3.0, -4.0, -5.0], [-2.0, -3.0, -4.0]]
+
+
+def default_lmk_labels() -> list[str]:
+    return ['round_window', 'oval_window', 'cochlear_apex']
+
+
 def build_wip_dir(
     root: Path,
     store_name: str,
@@ -126,3 +162,129 @@ def build_wip_dir(
         )
 
     return root
+
+
+def build_wip_dir_entries(
+    store_dir: Path,
+    *,
+    include_seg: bool = True,
+    include_lmk: bool = False,
+    seg_label_map: np.ndarray | None = None,
+    seg_segments: list[dict[str, object]] | None = None,
+    lmk_points: list[list[float]] | None = None,
+    lmk_labels: list[str] | None = None,
+    lmk_coordinate_system: str = 'LPS',
+) -> Path:
+    """Populate a per-store subdirectory inside a WIP dir with defaults.
+
+    Unlike ``build_wip_dir`` this takes the per-store path directly, so it
+    composes cleanly with multi-store fixtures.
+    """
+    store_dir.mkdir(parents=True, exist_ok=True)
+
+    if include_seg:
+        label_map = (
+            seg_label_map if seg_label_map is not None else default_seg_label_map()
+        )
+        segments = seg_segments if seg_segments is not None else _DEFAULT_SEG_SEGMENTS
+        write_seg_nrrd(
+            store_dir / 'segmentation.seg.nrrd',
+            label_map,
+            segments,
+        )
+
+    if include_lmk:
+        points = lmk_points if lmk_points is not None else default_lmk_points()
+        labels = lmk_labels if lmk_labels is not None else default_lmk_labels()
+        write_mrk_json(
+            store_dir / 'landmarks.mrk.json',
+            points,
+            labels,
+            lmk_coordinate_system,
+        )
+
+    return store_dir
+
+
+# -- Manifest + annotation helpers -------------------------------------------
+
+
+def write_remote_manifest(
+    wip_dir: Path,
+    *,
+    store_names: list[str],
+    expected_ontologies: list[str] | None = None,
+    included_annotations: list[str] | None = None,
+    pull_session_id: str = 'dt-pull-test-session',
+    server_host: str = 'test.example.com',
+    server_zarr_root: str = '/srv/voxhub',
+    protocol_version: int = 1,
+) -> Path:
+    """Write a ``.voxhub_manifest.json`` covering the given stores.
+
+    Returns the WIP directory.
+    """
+    wip_dir.mkdir(parents=True, exist_ok=True)
+    stores = {
+        name: RemoteManifestEntry(
+            status='pulled',
+            raw_checksum=f'sha256:{"0" * 64}',
+            shape=list(SHAPE),
+            spacing_mm=list(SPACING_MM),
+            origin_lps=list(ORIGIN_LPS),
+            space_directions=[list(row) for row in SPACE_DIRECTIONS],
+            expected_ontologies=list(expected_ontologies or []),
+            included_annotations=list(included_annotations or []),
+        )
+        for name in store_names
+    }
+    manifest = RemoteManifest(
+        server_host=server_host,
+        server_zarr_root=server_zarr_root,
+        protocol_version=protocol_version,
+        pull_session_id=pull_session_id,
+        pulled_at=datetime.now(UTC).isoformat(),
+        stores=stores,
+    )
+    manifest.write(wip_dir)
+    return wip_dir
+
+
+def populate_store_annotation(
+    zarr_path: Path,
+    *,
+    annotator_id: str = 'alice',
+    nano_id: str = 'xyz45678',
+    ontology: str = 'inner-ear-structures',
+    ontology_version: int = 1,
+    date_str: str = '20260101',
+    short_random: str = 'ab12',
+    integrated_at: str = '2026-01-01T00:00:00+00:00',
+    kind: str = 'segmentation',
+) -> str:
+    """Attach a synthetic annotation to an existing zarr store.
+
+    Writes a small array at
+    ``annotations/<annotator_id>-<nano_id>/<ontology>-<date>-<rand>/data``
+    with canonical provenance attrs.  Returns the annotation path.
+    """
+    annotator_dir = f'{annotator_id}-{nano_id}'
+    instance_dir = f'{ontology}-{date_str}-{short_random}'
+    ann_path = f'annotations/{annotator_dir}/{instance_dir}'
+
+    root = zarr.open_group(zarr_path, mode='r+')
+    arr = root.create_array(
+        f'{ann_path}/data',
+        data=np.zeros(SHAPE, dtype=np.int16),
+        overwrite=True,
+    )
+    attrs_payload: dict[str, Any] = {
+        'annotator_id': annotator_id,
+        'nano_id': nano_id,
+        'ontology': ontology,
+        'ontology_version': ontology_version,
+        'integrated_at': integrated_at,
+        'kind': kind,
+    }
+    arr.update_attributes(attrs_payload)
+    return ann_path
