@@ -49,7 +49,7 @@ later PRs depend on earlier ones landing but not on specific line numbers.
 
 ---
 
-### PR 3 — Core library API rename
+### PR 3 — Core library API rename [DONE]
 
 **Scope:** `voxhub-core` library modules + the developer-facing `voxhub-core/cli.py`.
 
@@ -125,7 +125,7 @@ via kwarg-rename (mostly single-line edits).
 
 ---
 
-### PR 4 — Test infrastructure rename
+### PR 4 — Test infrastructure rename [DONE]
 
 **Scope:** rename every test-only identifier that uses `zarr_root`. No source
 changes.
