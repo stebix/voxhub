@@ -17,7 +17,7 @@ scaffolding required to cover specific untested modules.
 | §4 Server Command Integration  | [server-cli.md](server-cli.md)                                 | implemented |
 | §6 Concurrent Writer Safety    | [concurrency-and-provenance.md](concurrency-and-provenance.md) | implemented |
 | §7 Provenance / Audit          | [concurrency-and-provenance.md](concurrency-and-provenance.md) | implemented |
-| (gap — not in strategic plan)  | [catalog-staging-audit.md](catalog-staging-audit.md)           | stubbed     |
+| (gap — not in strategic plan)  | [catalog-staging-audit.md](catalog-staging-audit.md)           | implemented |
 
 ## Scope
 
@@ -62,12 +62,14 @@ packages/voxhub-core/tests/
 └── test_audit.py                     (coherence audit stubs)
 ```
 
-Stub test files are created with `pytest.mark.skip` on each test so the
-suite remains green until the worktree owner implements them. Each stub has a
-docstring describing what it should verify. The `server-cli.md` and
-`concurrency-and-provenance.md` plans are fully implemented — see those plan
-files and `test_server_cli*.py` / `test_server_provenance.py` /
-`test_concurrency.py` for the delivered coverage.
+All three tactical plans are now fully implemented. See the plan files and
+the corresponding test modules for the delivered coverage:
+
+- `server-cli.md` → `test_server_cli.py`, `test_server_cli_subprocess.py`
+- `concurrency-and-provenance.md` → `test_server_provenance.py`,
+  `test_concurrency.py`
+- `catalog-staging-audit.md` → `test_catalog.py`, `test_staging_e2e.py`,
+  `test_audit.py`
 
 ## Shared fixtures required
 

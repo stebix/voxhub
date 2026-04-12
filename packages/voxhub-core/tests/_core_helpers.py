@@ -261,12 +261,28 @@ def populate_store_annotation(
     short_random: str = 'ab12',
     integrated_at: str = '2026-01-01T00:00:00+00:00',
     kind: str = 'segmentation',
+    segments: list[dict[str, Any]] | None = None,
+    labels: list[str] | None = None,
+    omit_ontology_attr: bool = False,
 ) -> str:
     """Attach a synthetic annotation to an existing zarr store.
 
     Writes a small array at
     ``annotations/<annotator_id>-<nano_id>/<ontology>-<date>-<rand>/data``
     with canonical provenance attrs.  Returns the annotation path.
+
+    Parameters
+    ----------
+    segments : list[dict] | None
+        Segment records (``label_value``, ``name``, ...) written into the
+        array's ``segments`` attribute so downstream audit code sees a
+        segmentation annotation.
+    labels : list[str] | None
+        Landmark labels written into the array's ``labels`` attribute so
+        downstream audit code sees a landmark annotation.
+    omit_ontology_attr : bool
+        If True, skip writing the ``ontology`` / ``ontology_version`` attrs
+        to simulate a malformed legacy annotation.
     """
     annotator_dir = f'{annotator_id}-{nano_id}'
     instance_dir = f'{ontology}-{date_str}-{short_random}'
@@ -281,10 +297,15 @@ def populate_store_annotation(
     attrs_payload: dict[str, Any] = {
         'annotator_id': annotator_id,
         'nano_id': nano_id,
-        'ontology': ontology,
-        'ontology_version': ontology_version,
         'integrated_at': integrated_at,
         'kind': kind,
     }
+    if not omit_ontology_attr:
+        attrs_payload['ontology'] = ontology
+        attrs_payload['ontology_version'] = ontology_version
+    if segments is not None:
+        attrs_payload['segments'] = segments
+    if labels is not None:
+        attrs_payload['labels'] = labels
     arr.update_attributes(attrs_payload)
     return ann_path
