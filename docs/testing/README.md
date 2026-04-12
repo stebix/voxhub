@@ -15,8 +15,8 @@ scaffolding required to cover specific untested modules.
 | Top-level plan section         | Tactical plan                                                  | Status      |
 |--------------------------------|----------------------------------------------------------------|-------------|
 | §4 Server Command Integration  | [server-cli.md](server-cli.md)                                 | implemented |
-| §6 Concurrent Writer Safety    | [concurrency-and-provenance.md](concurrency-and-provenance.md) | stubbed     |
-| §7 Provenance / Audit          | [concurrency-and-provenance.md](concurrency-and-provenance.md) | stubbed     |
+| §6 Concurrent Writer Safety    | [concurrency-and-provenance.md](concurrency-and-provenance.md) | implemented |
+| §7 Provenance / Audit          | [concurrency-and-provenance.md](concurrency-and-provenance.md) | implemented |
 | (gap — not in strategic plan)  | [catalog-staging-audit.md](catalog-staging-audit.md)           | stubbed     |
 
 ## Scope
@@ -64,9 +64,10 @@ packages/voxhub-core/tests/
 
 Stub test files are created with `pytest.mark.skip` on each test so the
 suite remains green until the worktree owner implements them. Each stub has a
-docstring describing what it should verify. The `server-cli.md` plan is
-fully implemented — see that plan file and `test_server_cli*.py` for the
-delivered coverage.
+docstring describing what it should verify. The `server-cli.md` and
+`concurrency-and-provenance.md` plans are fully implemented — see those plan
+files and `test_server_cli*.py` / `test_server_provenance.py` /
+`test_concurrency.py` for the delivered coverage.
 
 ## Shared fixtures required
 

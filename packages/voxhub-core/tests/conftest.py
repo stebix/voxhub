@@ -2,10 +2,12 @@
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 import subprocess
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -249,3 +251,158 @@ def subprocess_server() -> Callable[..., subprocess.CompletedProcess[str]]:
         )
 
     return _run
+
+
+# -- Provenance / concurrency fixtures ---------------------------------------
+
+
+@pytest.fixture
+def provenance_jsonl_factory() -> Callable[..., Path]:
+    """Write a provenance JSONL file at ``path`` from ``entries``.
+
+    Each entry may be either a ``dict`` (serialised to JSON) or a raw string
+    (written verbatim; useful for injecting malformed lines).
+    """
+
+    def _build(path: Path, *, entries: Iterable[dict[str, Any] | str]) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            for entry in entries:
+                if isinstance(entry, dict):
+                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+                else:
+                    f.write(entry + ('\n' if not entry.endswith('\n') else ''))
+        return path
+
+    return _build
+
+
+@pytest.fixture
+def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
+    """Launch N ``integrate-annotations`` subprocesses in parallel.
+
+    Each invocation is a dict with keys ``zarr_root``, ``wip_dir``,
+    ``annotator_id``, ``nano_id`` and optionally ``machine_id``, ``force``.
+    Returns a list of result dicts preserving invocation order, each carrying
+    ``returncode``, parsed JSON ``stdout`` (best-effort, may be ``None``),
+    ``raw_stdout``, ``stderr`` and the original ``invocation`` dict.
+    """
+
+    def _run(
+        invocations: list[dict[str, Any]],
+        *,
+        timeout: float = 120.0,
+    ) -> list[dict[str, Any]]:
+        procs: list[tuple[dict[str, Any], subprocess.Popen[str]]] = []
+        for inv in invocations:
+            cmd = [
+                sys.executable,
+                '-m',
+                'voxhub_core.server.cli',
+                'integrate-annotations',
+                str(inv['zarr_root']),
+                str(inv['wip_dir']),
+                '--annotator-id',
+                inv['annotator_id'],
+                '--machine-id',
+                inv.get('machine_id', 'machine-abc'),
+                '--nano-id',
+                inv['nano_id'],
+            ]
+            if inv.get('force'):
+                cmd.append('--force')
+            full_env = os.environ.copy()
+            if inv.get('env'):
+                full_env.update(inv['env'])
+            p = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=full_env,
+            )
+            procs.append((inv, p))
+
+        results: list[dict[str, Any]] = []
+        for inv, p in procs:
+            out, err = p.communicate(timeout=timeout)
+            lines = [ln for ln in out.splitlines() if ln.strip()]
+            parsed: dict[str, Any] | None = None
+            if lines:
+                try:
+                    parsed = json.loads(lines[-1])
+                except json.JSONDecodeError:
+                    parsed = None
+            results.append(
+                {
+                    'returncode': p.returncode,
+                    'stdout': parsed,
+                    'raw_stdout': out,
+                    'stderr': err,
+                    'invocation': inv,
+                }
+            )
+        return results
+
+    return _run
+
+
+def _hold_lock_child(
+    zarr_path_str: str,
+    acquired: Any,
+    release: Any,
+    acquire_timeout: float,
+) -> None:
+    """Forked child entry point: acquire store_lock, signal, hold until release."""
+    from voxhub_core.server.locks import store_lock
+
+    with store_lock(Path(zarr_path_str), timeout=acquire_timeout):
+        acquired.set()
+        # Wait generously; parent signals release via event.
+        release.wait(timeout=max(acquire_timeout * 4, 60.0))
+
+
+@pytest.fixture
+def held_lock() -> Callable[..., Any]:
+    """Context manager that holds a ``store_lock`` on a zarr path via a child.
+
+    Usage::
+
+        with held_lock(zarr_path):
+            ...  # lock is held by a separate process for the duration
+
+    Uses the ``fork`` start method (Linux only — matches the deployment
+    target per CLAUDE.md) so the worker can invoke ``store_lock`` without
+    module-pickling gymnastics.
+    """
+
+    @contextmanager
+    def _held(
+        zarr_path: Path,
+        *,
+        acquire_timeout: float = 30.0,
+    ) -> Iterator[None]:
+        ctx = mp.get_context('fork')
+        acquired = ctx.Event()
+        release = ctx.Event()
+        proc = ctx.Process(
+            target=_hold_lock_child,
+            args=(str(zarr_path), acquired, release, acquire_timeout),
+        )
+        proc.start()
+        try:
+            if not acquired.wait(timeout=acquire_timeout):
+                proc.terminate()
+                raise RuntimeError(
+                    f'held_lock child did not acquire the lock within '
+                    f'{acquire_timeout}s'
+                )
+            yield
+        finally:
+            release.set()
+            proc.join(timeout=10.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5.0)
+
+    return _held
