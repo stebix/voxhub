@@ -5,6 +5,11 @@ and assert on the parsed JSON stdout.  They validate argparse wiring and
 the real end-to-end binary contract; bulk logic coverage lives in
 ``test_server_cli.py`` (function-level tests).
 
+``VOXHUB_SERVER_CONFIG`` is inherited from the parent process via the
+``subprocess_server`` fixture (see ``_default_server_config`` autouse in
+``conftest.py``).  Tests that need a specific ``stores_dir`` use the
+``server_config_env`` fixture to point the config at their own root.
+
 Plan: docs/testing/server-cli.md §5
 """
 
@@ -69,9 +74,10 @@ class TestEntryPoint:
 class TestCommandSmoke:
     """One happy-path test per subcommand via real subprocess."""
 
-    def test_list_stores(self, zarr_root_factory, subprocess_server):
+    def test_list_stores(self, zarr_root_factory, server_config_env, subprocess_server):
         root = zarr_root_factory(('alpha',))
-        result = subprocess_server('list-stores', str(root))
+        server_config_env(root)
+        result = subprocess_server('list-stores')
 
         assert result.returncode == 0, result.stderr
         payload = _parse_json_stdout(result)
@@ -80,12 +86,14 @@ class TestCommandSmoke:
         assert len(payload['stores']) == 1
         assert payload['stores'][0]['name'] == 'alpha'
 
-    def test_prepare_pull(self, zarr_root_factory, subprocess_server, tmp_path):
+    def test_prepare_pull(
+        self, zarr_root_factory, server_config_env, subprocess_server, tmp_path
+    ):
         root = zarr_root_factory(('alpha',))
+        server_config_env(root)
         staging = tmp_path / 'subproc_staging'
         result = subprocess_server(
             'prepare-pull',
-            str(root),
             '--stores',
             'alpha',
             '--staging-dir',
@@ -101,6 +109,7 @@ class TestCommandSmoke:
         self,
         zarr_root_factory,
         staging_dir_with_manifest,
+        server_config_env,
         subprocess_server,
     ):
         """End-to-end: stage → build annotation → integrate → verify.
@@ -109,11 +118,11 @@ class TestCommandSmoke:
         argparse, real I/O, and the installed entrypoint.
         """
         zarr_root = zarr_root_factory(('alpha',))
+        server_config_env(zarr_root)
         staging = staging_dir_with_manifest(store_names=['alpha'])
 
         result = subprocess_server(
             'integrate-annotations',
-            str(zarr_root),
             str(staging),
             '--annotator-id',
             'alice',
@@ -168,17 +177,25 @@ class TestCommandSmoke:
         assert payload['count'] == 1
         assert not old.exists()
 
-    def test_validate_attributes(self, zarr_root_factory, subprocess_server):
+    def test_validate_attributes(
+        self, zarr_root_factory, server_config_env, subprocess_server
+    ):
         root = zarr_root_factory(('alpha',))
-        result = subprocess_server('validate-attributes', str(root))
+        server_config_env(root)
+        result = subprocess_server('validate-attributes')
 
         assert result.returncode == 0, result.stderr
         payload = _parse_json_stdout(result)
         assert payload['results']['alpha']['status'] == 'missing'
 
-    def test_healthcheck_exit_code_on_degraded(self, tmp_path, subprocess_server):
-        missing = tmp_path / 'nonexistent'
-        result = subprocess_server('healthcheck', str(missing))
+    def test_healthcheck_exit_code_on_degraded(
+        self, zarr_root_factory, server_config_env, subprocess_server
+    ):
+        # A corrupt store makes the ``_check_stores`` check fail, which
+        # flips the overall status to ``degraded`` and returns exit 1.
+        root = zarr_root_factory(('broken',), corrupt=('broken',))
+        server_config_env(root)
+        result = subprocess_server('healthcheck')
 
         assert result.returncode == 1
         payload = _parse_json_stdout(result)
@@ -189,20 +206,21 @@ class TestProtocolContract:
     """Invariants that every subprocess response must satisfy."""
 
     def test_every_command_emits_protocol_version(
-        self, zarr_root_factory, subprocess_server, tmp_path
+        self, zarr_root_factory, server_config_env, subprocess_server, tmp_path
     ):
         root = zarr_root_factory(('alpha',))
+        server_config_env(root)
 
         # list-stores
-        r1 = subprocess_server('list-stores', str(root))
+        r1 = subprocess_server('list-stores')
         assert _parse_json_stdout(r1)['protocol_version'] == PROTOCOL_VERSION
 
         # validate-attributes
-        r2 = subprocess_server('validate-attributes', str(root))
+        r2 = subprocess_server('validate-attributes')
         assert _parse_json_stdout(r2)['protocol_version'] == PROTOCOL_VERSION
 
         # healthcheck (healthy)
-        r3 = subprocess_server('healthcheck', str(root))
+        r3 = subprocess_server('healthcheck')
         assert r3.returncode == 0
         assert _parse_json_stdout(r3)['protocol_version'] == PROTOCOL_VERSION
 
@@ -216,15 +234,19 @@ class TestProtocolContract:
         r5 = subprocess_server('gc', env={'TMPDIR': str(fake_tmp)})
         assert _parse_json_stdout(r5)['protocol_version'] == PROTOCOL_VERSION
 
-    def test_error_envelope_structure(self, tmp_path, subprocess_server):
+    def test_error_envelope_structure(
+        self, zarr_root_factory, server_config_env, subprocess_server, tmp_path
+    ):
         """A deliberately-failing invocation produces a structured
         ServerError envelope — never a raw traceback."""
-        # prepare-pull against a non-existent zarr root triggers stage()
-        # FileNotFoundError → prepare_pull_failed envelope.
-        missing_root = tmp_path / 'no-such-root'
+        # Point at a valid empty root, then ask for an unknown store —
+        # ``stage()`` raises FileNotFoundError → prepare_pull_failed envelope.
+        root = zarr_root_factory(('alpha',))
+        server_config_env(root)
         result = subprocess_server(
             'prepare-pull',
-            str(missing_root),
+            '--stores',
+            'does-not-exist',
             '--staging-dir',
             str(tmp_path / 'staging'),
         )
@@ -238,11 +260,63 @@ class TestProtocolContract:
         # No traceback leaked onto stdout.
         assert 'Traceback' not in result.stdout
 
-    def test_stdout_is_single_json_object(self, zarr_root_factory, subprocess_server):
+    def test_stdout_is_single_json_object(
+        self, zarr_root_factory, server_config_env, subprocess_server
+    ):
         root = zarr_root_factory(('alpha',))
-        result = subprocess_server('list-stores', str(root))
+        server_config_env(root)
+        result = subprocess_server('list-stores')
 
         lines = [line for line in result.stdout.splitlines() if line.strip()]
         assert len(lines) == 1, f'expected single JSON line, got: {result.stdout!r}'
         parsed = json.loads(lines[0])
         assert isinstance(parsed, dict)
+
+
+class TestStoresDirFromSettings:
+    """PR 1: server reads ``stores_dir`` exclusively from TOML settings.
+
+    Cold-invocation safety: missing or invalid settings must produce a
+    structured ``storage_misconfigured`` envelope — never a traceback.
+    """
+
+    def test_missing_config_file_fails_cleanly(self, subprocess_server, tmp_path):
+        result = subprocess_server(
+            'list-stores',
+            env={'VOXHUB_SERVER_CONFIG': str(tmp_path / 'no-such.toml')},
+        )
+
+        assert result.returncode == 1
+        payload = _parse_json_stdout(result)
+        assert payload['error'] is True
+        assert payload['code'] == 'storage_misconfigured'
+        assert 'Traceback' not in result.stdout
+
+    def test_invalid_stores_dir_in_toml_fails_cleanly(self, subprocess_server, tmp_path):
+        missing = tmp_path / 'missing-dir'
+        config = tmp_path / 'server.toml'
+        config.write_text(f"[storage]\nstores_dir = '{missing}'\n")
+
+        result = subprocess_server(
+            'list-stores',
+            env={'VOXHUB_SERVER_CONFIG': str(config)},
+        )
+
+        assert result.returncode == 1
+        payload = _parse_json_stdout(result)
+        assert payload['error'] is True
+        assert payload['code'] == 'storage_misconfigured'
+
+    def test_missing_storage_section_fails_cleanly(self, subprocess_server, tmp_path):
+        config = tmp_path / 'server.toml'
+        config.write_text('[logging]\nstderr_level = "ERROR"\n')
+
+        result = subprocess_server(
+            'list-stores',
+            env={'VOXHUB_SERVER_CONFIG': str(config)},
+        )
+
+        assert result.returncode == 1
+        payload = _parse_json_stdout(result)
+        assert payload['error'] is True
+        assert payload['code'] == 'storage_misconfigured'

@@ -44,7 +44,7 @@ from voxhub_core.server.provenance import (
     record_provenance,
     validate_provenance_jsonl,
 )
-from voxhub_core.server.settings import load_settings
+from voxhub_core.server.settings import SettingsError, load_settings
 from voxhub_core.staging import extract_spatial_metadata, stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
@@ -98,10 +98,10 @@ def _run_list_stores(args: argparse.Namespace) -> None:
     log = get_logger(command='list-stores')
     t0 = time.monotonic()
 
-    zarr_root = Path(args.zarr_root)
-    log.info('list_stores_started', zarr_root=str(zarr_root))
+    stores_dir = Path(args.zarr_root)
+    log.info('list_stores_started', zarr_root=str(stores_dir))
 
-    entries = discover_zarr_stores(zarr_root)
+    entries = discover_zarr_stores(stores_dir)
 
     stores: list[dict[str, Any]] = []
     for entry in entries:
@@ -192,7 +192,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     log = get_logger(command='prepare-pull')
     t0 = time.monotonic()
 
-    zarr_root = Path(args.zarr_root)
+    stores_dir = Path(args.zarr_root)
     store_names = args.stores
     ontologies = args.ontologies or []
     compress = args.compress
@@ -200,7 +200,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
 
     log.info(
         'prepare_pull_started',
-        zarr_root=str(zarr_root),
+        zarr_root=str(stores_dir),
         stores=store_names,
         ontologies=ontologies,
     )
@@ -219,7 +219,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     try:
         console = Console(stderr=True, quiet=True)
         store_metadata = stage(
-            zarr_root,
+            stores_dir,
             staging_dir,
             store_names=store_names,
             compress=compress,
@@ -234,7 +234,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     # Copy existing annotations if requested.
     for ann_path in include_annotations:
         for store_name in store_metadata:
-            zarr_path = zarr_root / f'{store_name}.zarr'
+            zarr_path = stores_dir / f'{store_name}.zarr'
             src = zarr_path / ann_path
             if src.exists():
                 dst = staging_dir / store_name / ann_path
@@ -327,7 +327,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     log = get_logger(command='integrate-annotations')
     t0 = time.monotonic()
 
-    zarr_root = Path(args.zarr_root)
+    stores_dir = Path(args.zarr_root)
     staging_dir = Path(args.staging_dir)
     annotator_id = args.annotator_id
     machine_id = args.machine_id
@@ -337,7 +337,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
     log.info(
         'integrate_started',
-        zarr_root=str(zarr_root),
+        zarr_root=str(stores_dir),
         staging_dir=str(staging_dir),
         annotator_id=annotator_id,
     )
@@ -382,7 +382,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
             continue
 
         store_name = store_dir.name
-        zarr_path = zarr_root / f'{store_name}.zarr'
+        zarr_path = stores_dir / f'{store_name}.zarr'
 
         if not zarr_path.is_dir():
             continue
@@ -478,7 +478,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
                         seg_checksum = _compute_sha256(seg_file)
                         record_provenance(
-                            zarr_root,
+                            stores_dir,
                             store_name,
                             seg_path,
                             annotator_id=annotator_id,
@@ -550,7 +550,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
                         lmk_checksum = _compute_sha256(lmk_file)
                         record_provenance(
-                            zarr_root,
+                            stores_dir,
                             store_name,
                             lmk_path,
                             annotator_id=annotator_id,
@@ -674,16 +674,16 @@ def _run_validate_attributes(args: argparse.Namespace) -> None:
     log = get_logger(command='validate-attributes')
     t0 = time.monotonic()
 
-    zarr_root = Path(args.zarr_root)
+    stores_dir = Path(args.zarr_root)
     selected_stores: list[str] | None = args.stores
 
     log.info(
         'validate_attributes_started',
-        zarr_root=str(zarr_root),
+        zarr_root=str(stores_dir),
         stores=selected_stores,
     )
 
-    entries = discover_zarr_stores(zarr_root)
+    entries = discover_zarr_stores(stores_dir)
 
     results: dict[str, dict[str, Any]] = {}
     for entry in entries:
@@ -837,20 +837,20 @@ def _run_healthcheck(args: argparse.Namespace) -> None:
     log = get_logger(command='healthcheck')
     t0 = time.monotonic()
 
-    zarr_root = Path(args.zarr_root)
-    log.info('healthcheck_started', zarr_root=str(zarr_root))
+    stores_dir = Path(args.zarr_root)
+    log.info('healthcheck_started', zarr_root=str(stores_dir))
 
     checks = [
         _check_python_version(),
         _check_packages(),
         _check_rsync(),
-        _check_zarr_root(zarr_root),
+        _check_zarr_root(stores_dir),
     ]
 
-    # Only run store/provenance checks if zarr_root is accessible.
+    # Only run store/provenance checks if stores_dir is accessible.
     if checks[-1]['status'] == 'ok':
-        checks.append(_check_stores(zarr_root))
-        checks.append(_check_provenance(zarr_root))
+        checks.append(_check_stores(stores_dir))
+        checks.append(_check_provenance(stores_dir))
 
     any_failed = any(c['status'] == 'fail' for c in checks)
     status = 'degraded' if any_failed else 'healthy'
@@ -880,7 +880,11 @@ def _run_healthcheck(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """Entry point for the ``voxhub-server`` CLI."""
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except SettingsError as exc:
+        _write_error('storage_misconfigured', str(exc))
+        sys.exit(1)
     configure_logging(settings.logging)
 
     parser = argparse.ArgumentParser(
@@ -891,12 +895,10 @@ def main() -> None:
 
     # list-stores
     ls = subparsers.add_parser('list-stores')
-    ls.add_argument('zarr_root')
     ls.set_defaults(func=_run_list_stores)
 
     # prepare-pull
     pp = subparsers.add_parser('prepare-pull')
-    pp.add_argument('zarr_root')
     pp.add_argument('--stores', nargs='*')
     pp.add_argument('--ontologies', nargs='*')
     pp.add_argument('--staging-dir', default=None)
@@ -906,7 +908,6 @@ def main() -> None:
 
     # integrate-annotations
     ia = subparsers.add_parser('integrate-annotations')
-    ia.add_argument('zarr_root')
     ia.add_argument('staging_dir')
     ia.add_argument('--annotator-id', required=True)
     ia.add_argument('--machine-id', required=True)
@@ -927,13 +928,11 @@ def main() -> None:
 
     # validate-attributes
     va = subparsers.add_parser('validate-attributes')
-    va.add_argument('zarr_root')
     va.add_argument('--stores', nargs='*')
     va.set_defaults(func=_run_validate_attributes)
 
     # healthcheck
     hc = subparsers.add_parser('healthcheck')
-    hc.add_argument('zarr_root')
     hc.set_defaults(func=_run_healthcheck)
 
     args = parser.parse_args()
@@ -941,6 +940,10 @@ def main() -> None:
     if args.command is None:
         parser.print_help()
         sys.exit(0)
+
+    # Handlers read ``args.zarr_root`` — will be renamed to ``args.stores_dir``
+    # in PR 2 once the protocol rename lands.
+    args.zarr_root = str(settings.storage.stores_dir)
 
     try:
         args.func(args)

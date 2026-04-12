@@ -36,6 +36,30 @@ def _configure_server_logging() -> None:
     configure_logging()
 
 
+@pytest.fixture(autouse=True)
+def _default_server_config(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Provide a minimal ``VOXHUB_SERVER_CONFIG`` for every test.
+
+    ``load_settings()`` is strict: missing config, missing ``[storage]``,
+    or an invalid ``stores_dir`` raises ``SettingsError``.  Most tests
+    exercise handlers / subprocesses that call ``load_settings()``
+    indirectly — they don't care about the concrete path.  This fixture
+    ensures those tests see a valid config by default.
+
+    Tests that need to drive specific storage behaviour use the
+    ``server_config_env`` fixture (or their own monkeypatch.setenv)
+    after this one to override the default.
+    """
+    stores_dir = tmp_path_factory.mktemp('_default_stores')
+    config_path = tmp_path_factory.mktemp('_default_server_cfg') / 'server.toml'
+    config_path.write_text(f"[storage]\nstores_dir = '{stores_dir}'\n")
+    monkeypatch.setenv('VOXHUB_SERVER_CONFIG', str(config_path))
+    return config_path
+
+
 # -- Ontology fixtures -------------------------------------------------------
 
 
@@ -152,6 +176,35 @@ def staging_dir_with_manifest(
             expected_ontologies=list(ontologies),
         )
         return staging_dir
+
+    return _build
+
+
+# -- Server config env -------------------------------------------------------
+
+
+@pytest.fixture
+def server_config_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., Path]:
+    """Write a temporary ``server.toml`` with ``[storage].stores_dir`` and
+    point ``VOXHUB_SERVER_CONFIG`` at it.
+
+    Returns a callable ``(stores_dir: Path, *, extra: str = '') -> Path``
+    that writes the TOML and returns its path.  ``extra`` is appended
+    verbatim (useful for injecting additional sections or malformed TOML
+    in error-path tests).
+    """
+
+    def _build(stores_dir: Path, *, extra: str = '') -> Path:
+        config_path = tmp_path / 'server.toml'
+        body = f"[storage]\nstores_dir = '{stores_dir}'\n"
+        if extra:
+            body = body + extra if extra.startswith('\n') else body + '\n' + extra
+        config_path.write_text(body)
+        monkeypatch.setenv('VOXHUB_SERVER_CONFIG', str(config_path))
+        return config_path
 
     return _build
 
@@ -288,6 +341,8 @@ def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
     ``raw_stdout``, ``stderr`` and the original ``invocation`` dict.
     """
 
+    import tempfile as _tempfile
+
     def _run(
         invocations: list[dict[str, Any]],
         *,
@@ -295,12 +350,16 @@ def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
     ) -> list[dict[str, Any]]:
         procs: list[tuple[dict[str, Any], subprocess.Popen[str]]] = []
         for inv in invocations:
+            # Each invocation gets its own TOML so concurrent tests that
+            # target different ``zarr_root``s don't collide.
+            cfg_fd, cfg_path = _tempfile.mkstemp(suffix='.toml', prefix='voxhub-cfg-')
+            with os.fdopen(cfg_fd, 'w') as fh:
+                fh.write(f"[storage]\nstores_dir = '{inv['zarr_root']}'\n")
             cmd = [
                 sys.executable,
                 '-m',
                 'voxhub_core.server.cli',
                 'integrate-annotations',
-                str(inv['zarr_root']),
                 str(inv['staging_dir']),
                 '--annotator-id',
                 inv['annotator_id'],
@@ -312,6 +371,7 @@ def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
             if inv.get('force'):
                 cmd.append('--force')
             full_env = os.environ.copy()
+            full_env['VOXHUB_SERVER_CONFIG'] = cfg_path
             if inv.get('env'):
                 full_env.update(inv['env'])
             p = subprocess.Popen(

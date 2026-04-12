@@ -1256,20 +1256,15 @@ class TestMainEntry:
         assert excinfo.value.code == 2
 
     def test_unhandled_exception_returns_server_error_envelope(
-        self, capsys, monkeypatch, tmp_path
+        self, capsys, monkeypatch
     ):
-        # Point list-stores at a valid root, then force the handler to blow up.
-        root = tmp_path / 'empty-root'
-        root.mkdir()
-
+        # The autouse ``_default_server_config`` fixture provides a valid
+        # VOXHUB_SERVER_CONFIG; force the list-stores handler to blow up.
         def boom(_args):  # type: ignore[no-untyped-def]
             raise RuntimeError('boom')
 
         monkeypatch.setattr(server_cli, '_run_list_stores', boom)
-        monkeypatch.setattr(
-            'sys.argv',
-            ['voxhub-server', 'list-stores', str(root)],
-        )
+        monkeypatch.setattr('sys.argv', ['voxhub-server', 'list-stores'])
 
         with pytest.raises(SystemExit) as excinfo:
             server_cli.main()
@@ -1281,9 +1276,7 @@ class TestMainEntry:
         assert envelope['code'] == 'internal_error'
         assert envelope['message'] == 'boom'
 
-    def test_settings_loaded_on_entry(self, capsys, monkeypatch, tmp_path):
-        root = tmp_path / 'empty-root'
-        root.mkdir()
+    def test_settings_loaded_on_entry(self, capsys, monkeypatch):
         called: list[bool] = []
 
         original_load = server_cli.load_settings
@@ -1293,7 +1286,182 @@ class TestMainEntry:
             return original_load()
 
         monkeypatch.setattr(server_cli, 'load_settings', spy)
-        monkeypatch.setattr('sys.argv', ['voxhub-server', 'list-stores', str(root)])
+        # Stub the handler so we only exercise the pre-handler plumbing.
+        monkeypatch.setattr(server_cli, '_run_list_stores', lambda _args: None)
+        monkeypatch.setattr('sys.argv', ['voxhub-server', 'list-stores'])
 
         server_cli.main()
         assert called, 'expected load_settings to be invoked'
+
+
+# ===========================================================================
+# main() — settings-path stores_dir resolution
+# ===========================================================================
+
+
+class TestMainStoresDirResolution:
+    """Covers main()'s resolution of ``stores_dir`` from ``[storage]`` settings.
+
+    PR 1 semantics: ``stores_dir`` comes exclusively from
+    ``settings.storage.stores_dir``.  There is no positional override and
+    no silent default — any missing / invalid configuration is a hard
+    failure with a structured ``storage_misconfigured`` envelope.
+    """
+
+    @pytest.mark.parametrize(
+        'subcommand',
+        [
+            'list-stores',
+            'prepare-pull',
+            'integrate-annotations',
+            'validate-attributes',
+            'healthcheck',
+        ],
+    )
+    def test_handler_receives_settings_stores_dir(
+        self,
+        subcommand,
+        zarr_root_factory,
+        server_config_env,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Every stores-dir command receives ``settings.storage.stores_dir``
+        via ``args.zarr_root``."""
+        root = zarr_root_factory(('alpha',))
+        server_config_env(root)
+
+        captured: dict[str, object] = {}
+
+        def spy(args):  # type: ignore[no-untyped-def]
+            captured['zarr_root'] = args.zarr_root
+
+        for name in (
+            '_run_list_stores',
+            '_run_prepare_pull',
+            '_run_integrate_annotations',
+            '_run_validate_attributes',
+            '_run_healthcheck',
+        ):
+            monkeypatch.setattr(server_cli, name, spy)
+
+        argv = ['voxhub-server', subcommand]
+        if subcommand == 'integrate-annotations':
+            argv += [
+                str(tmp_path / 'staging'),
+                '--annotator-id',
+                'alice',
+                '--machine-id',
+                'm',
+                '--nano-id',
+                'abcd1234',
+            ]
+        elif subcommand == 'prepare-pull':
+            argv += ['--stores', 'alpha']
+
+        monkeypatch.setattr('sys.argv', argv)
+        server_cli.main()
+
+        assert captured['zarr_root'] == str(root)
+
+    def test_positional_zarr_root_is_rejected_by_argparse(
+        self,
+        zarr_root_factory,
+        server_config_env,
+        monkeypatch,
+        capsys,
+    ):
+        """A caller passing a positional (legacy behaviour) gets an
+        argparse error — the positional is gone from the subparsers."""
+        root = zarr_root_factory(('alpha',))
+        server_config_env(root)
+        monkeypatch.setattr(
+            'sys.argv',
+            ['voxhub-server', 'list-stores', str(root)],
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli.main()
+        assert excinfo.value.code == 2
+        assert 'unrecognized arguments' in capsys.readouterr().err.lower()
+
+    def test_missing_config_file_emits_storage_misconfigured(
+        self,
+        monkeypatch,
+        capsys,
+        tmp_path,
+    ):
+        """No config file → structured ``storage_misconfigured`` envelope."""
+        monkeypatch.setenv('VOXHUB_SERVER_CONFIG', str(tmp_path / 'no-such.toml'))
+        monkeypatch.setattr('sys.argv', ['voxhub-server', 'list-stores'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli.main()
+        assert excinfo.value.code == 1
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope['error'] is True
+        assert envelope['code'] == 'storage_misconfigured'
+
+    def test_invalid_storage_toml_emits_storage_misconfigured(
+        self,
+        monkeypatch,
+        capsys,
+        tmp_path,
+    ):
+        """A ``[storage].stores_dir`` that points at a non-directory fails
+        at settings-load time with a structured envelope."""
+        bad_dir = tmp_path / 'does-not-exist'
+        config_path = tmp_path / 'server.toml'
+        config_path.write_text(f"[storage]\nstores_dir = '{bad_dir}'\n")
+        monkeypatch.setenv('VOXHUB_SERVER_CONFIG', str(config_path))
+        monkeypatch.setattr('sys.argv', ['voxhub-server', 'list-stores'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli.main()
+        assert excinfo.value.code == 1
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope['error'] is True
+        assert envelope['code'] == 'storage_misconfigured'
+        assert str(bad_dir) in envelope['message']
+
+    def test_missing_stores_dir_key_emits_storage_misconfigured(
+        self,
+        monkeypatch,
+        capsys,
+        tmp_path,
+    ):
+        """A ``[storage]`` section without a ``stores_dir`` key is rejected."""
+        config_path = tmp_path / 'server.toml'
+        config_path.write_text('[storage]\n')
+        monkeypatch.setenv('VOXHUB_SERVER_CONFIG', str(config_path))
+        monkeypatch.setattr('sys.argv', ['voxhub-server', 'list-stores'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli.main()
+        assert excinfo.value.code == 1
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope['error'] is True
+        assert envelope['code'] == 'storage_misconfigured'
+
+    def test_missing_storage_section_emits_storage_misconfigured(
+        self,
+        monkeypatch,
+        capsys,
+        tmp_path,
+    ):
+        """A config file without a ``[storage]`` section at all is rejected
+        — settings are strict, not best-effort."""
+        config_path = tmp_path / 'server.toml'
+        config_path.write_text('[logging]\nstderr_level = "ERROR"\n')
+        monkeypatch.setenv('VOXHUB_SERVER_CONFIG', str(config_path))
+        monkeypatch.setattr('sys.argv', ['voxhub-server', 'list-stores'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli.main()
+        assert excinfo.value.code == 1
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope['error'] is True
+        assert envelope['code'] == 'storage_misconfigured'
