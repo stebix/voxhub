@@ -190,7 +190,7 @@ test suite.
 
 ---
 
-### PR 5 — Deploy scripts rename
+### PR 5 — Deploy scripts rename [DONE]
 
 **Scope:** operator-facing installer flags and shell variables.
 
