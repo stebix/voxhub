@@ -30,7 +30,17 @@ class ProtocolMismatchError(RemoteError):
 
 @attrs.define
 class SshTarget:
-    """Parsed SSH target from ``user@host:/zarr_root`` notation.
+    """Parsed SSH target from ``user@host`` notation.
+
+    The server owns its stores directory path (via
+    ``[storage].stores_dir`` in the server TOML config) and the client
+    no longer supplies it.  Accepted forms:
+
+    * ``user@host``
+    * ``host`` (user defaults to the local OS user)
+
+    A trailing ``:/path`` is rejected — it's a relic of the old
+    protocol and signals a caller that hasn't been updated.
 
     Parameters
     ----------
@@ -38,25 +48,22 @@ class SshTarget:
         SSH username.
     host : str
         SSH hostname.
-    zarr_root : str
-        Remote path to the zarr root directory.
     port : int | None
         SSH port override.
     """
 
     user: str
     host: str
-    zarr_root: str
     port: int | None = None
 
     @classmethod
     def parse(cls, target: str) -> Self:
-        """Parse a target string like ``user@host:/path``.
+        """Parse a target string like ``user@host`` or ``host``.
 
         Parameters
         ----------
         target : str
-            SSH target string.
+            SSH target string (no trailing ``:/path``).
 
         Returns
         -------
@@ -65,21 +72,28 @@ class SshTarget:
         Raises
         ------
         ValueError
-            If the string cannot be parsed.
+            If the string cannot be parsed or still carries a trailing
+            path component.
         """
-        if ':' not in target:
-            msg = f"Invalid SSH target '{target}'. Expected format: user@host:/zarr_root"
+        if ':' in target:
+            msg = (
+                f"Invalid SSH target '{target}'. Expected 'user@host' "
+                f'or just host — the server reads its stores directory '
+                f'from its own configuration.'
+            )
             raise ValueError(msg)
 
-        host_part, zarr_root = target.rsplit(':', 1)
-
-        if '@' in host_part:
-            user, host = host_part.split('@', 1)
+        if '@' in target:
+            user, host = target.split('@', 1)
         else:
             user = getpass.getuser()
-            host = host_part
+            host = target
 
-        return cls(user=user, host=host, zarr_root=zarr_root)
+        if not host:
+            msg = f"Invalid SSH target '{target}': host is empty."
+            raise ValueError(msg)
+
+        return cls(user=user, host=host)
 
     @property
     def ssh_destination(self) -> str:

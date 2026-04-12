@@ -7,6 +7,13 @@
 #
 # Only allows the explicit set of voxhub-server subcommands that annotators
 # need.  Everything else is rejected with a structured JSON error on stderr.
+#
+# Server configuration: ``voxhub-server`` reads its stores directory
+# from ``[storage].stores_dir`` in the TOML config referenced by
+# VOXHUB_SERVER_CONFIG (or ``~/.config/voxhub/server.toml``).  Clients
+# no longer send a path over the wire — the server is authoritative.
+# Export VOXHUB_SERVER_CONFIG in the voxhub user's environment (e.g.
+# ``/etc/voxhub/server.toml``) before this wrapper executes.
 
 set -euo pipefail
 

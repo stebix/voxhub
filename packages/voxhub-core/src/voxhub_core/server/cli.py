@@ -98,8 +98,8 @@ def _run_list_stores(args: argparse.Namespace) -> None:
     log = get_logger(command='list-stores')
     t0 = time.monotonic()
 
-    stores_dir = Path(args.zarr_root)
-    log.info('list_stores_started', zarr_root=str(stores_dir))
+    stores_dir = Path(args.stores_dir)
+    log.info('list_stores_started', stores_dir=str(stores_dir))
 
     entries = discover_zarr_stores(stores_dir)
 
@@ -192,7 +192,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     log = get_logger(command='prepare-pull')
     t0 = time.monotonic()
 
-    stores_dir = Path(args.zarr_root)
+    stores_dir = Path(args.stores_dir)
     store_names = args.stores
     ontologies = args.ontologies or []
     compress = args.compress
@@ -200,7 +200,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
 
     log.info(
         'prepare_pull_started',
-        zarr_root=str(stores_dir),
+        stores_dir=str(stores_dir),
         stores=store_names,
         ontologies=ontologies,
     )
@@ -269,6 +269,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         {
             'protocol_version': PROTOCOL_VERSION,
             'staging_dir': str(staging_dir),
+            'server_stores_dir': str(stores_dir),
             'stores': stores_response,
         }
     )
@@ -327,7 +328,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     log = get_logger(command='integrate-annotations')
     t0 = time.monotonic()
 
-    stores_dir = Path(args.zarr_root)
+    stores_dir = Path(args.stores_dir)
     staging_dir = Path(args.staging_dir)
     annotator_id = args.annotator_id
     machine_id = args.machine_id
@@ -337,7 +338,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
     log.info(
         'integrate_started',
-        zarr_root=str(stores_dir),
+        stores_dir=str(stores_dir),
         staging_dir=str(staging_dir),
         annotator_id=annotator_id,
     )
@@ -674,12 +675,12 @@ def _run_validate_attributes(args: argparse.Namespace) -> None:
     log = get_logger(command='validate-attributes')
     t0 = time.monotonic()
 
-    stores_dir = Path(args.zarr_root)
+    stores_dir = Path(args.stores_dir)
     selected_stores: list[str] | None = args.stores
 
     log.info(
         'validate_attributes_started',
-        zarr_root=str(stores_dir),
+        stores_dir=str(stores_dir),
         stores=selected_stores,
     )
 
@@ -772,26 +773,26 @@ def _check_rsync() -> dict[str, str]:
     return {'name': 'rsync', 'status': 'fail', 'detail': 'not found on PATH'}
 
 
-def _check_zarr_root(zarr_root: Path) -> dict[str, str]:
-    """Check that the zarr root directory exists and is writable."""
-    if not zarr_root.is_dir():
+def _check_stores_dir(stores_dir: Path) -> dict[str, str]:
+    """Check that the stores directory exists and is writable."""
+    if not stores_dir.is_dir():
         return {
-            'name': 'zarr_root',
+            'name': 'stores_dir',
             'status': 'fail',
-            'detail': f'{zarr_root} is not a directory',
+            'detail': f'{stores_dir} is not a directory',
         }
-    if not os.access(zarr_root, os.R_OK | os.W_OK):
+    if not os.access(stores_dir, os.R_OK | os.W_OK):
         return {
-            'name': 'zarr_root',
+            'name': 'stores_dir',
             'status': 'fail',
-            'detail': f'{zarr_root} is not readable/writable',
+            'detail': f'{stores_dir} is not readable/writable',
         }
-    return {'name': 'zarr_root', 'status': 'ok', 'detail': str(zarr_root)}
+    return {'name': 'stores_dir', 'status': 'ok', 'detail': str(stores_dir)}
 
 
-def _check_stores(zarr_root: Path) -> dict[str, str]:
+def _check_stores(stores_dir: Path) -> dict[str, str]:
     """Discover zarr stores and report their status."""
-    entries = discover_zarr_stores(zarr_root)
+    entries = discover_zarr_stores(stores_dir)
     errored = [e for e in entries if e.error]
     total = len(entries)
 
@@ -811,9 +812,9 @@ def _check_stores(zarr_root: Path) -> dict[str, str]:
     }
 
 
-def _check_provenance(zarr_root: Path) -> dict[str, str]:
-    """Validate all provenance JSONL files under the zarr root."""
-    meta_dir = zarr_root / '.meta'
+def _check_provenance(stores_dir: Path) -> dict[str, str]:
+    """Validate all provenance JSONL files under the stores directory."""
+    meta_dir = stores_dir / '.meta'
     jsonl_path = meta_dir / 'provenance.jsonl'
 
     if not jsonl_path.is_file():
@@ -837,14 +838,14 @@ def _run_healthcheck(args: argparse.Namespace) -> None:
     log = get_logger(command='healthcheck')
     t0 = time.monotonic()
 
-    stores_dir = Path(args.zarr_root)
-    log.info('healthcheck_started', zarr_root=str(stores_dir))
+    stores_dir = Path(args.stores_dir)
+    log.info('healthcheck_started', stores_dir=str(stores_dir))
 
     checks = [
         _check_python_version(),
         _check_packages(),
         _check_rsync(),
-        _check_zarr_root(stores_dir),
+        _check_stores_dir(stores_dir),
     ]
 
     # Only run store/provenance checks if stores_dir is accessible.
@@ -941,9 +942,7 @@ def main() -> None:
         parser.print_help()
         sys.exit(0)
 
-    # Handlers read ``args.zarr_root`` — will be renamed to ``args.stores_dir``
-    # in PR 2 once the protocol rename lands.
-    args.zarr_root = str(settings.storage.stores_dir)
+    args.stores_dir = str(settings.storage.stores_dir)
 
     try:
         args.func(args)

@@ -290,7 +290,7 @@ class TestConcurrentIntegrateSameStore:
         with held_lock(zarr_root / 'alpha.zarr'), pytest.raises(Timeout):
             server_cli._run_integrate_annotations(
                 server_argv(
-                    zarr_root=zarr_root,
+                    stores_dir=zarr_root,
                     staging_dir=str(staging),
                     annotator_id='alice',
                     nano_id='ccccdddd',

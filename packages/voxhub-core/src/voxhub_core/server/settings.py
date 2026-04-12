@@ -112,7 +112,7 @@ def _parse_logging(raw: dict[str, object]) -> LoggingSettings:
 def _parse_storage(raw: dict[str, object]) -> StorageSettings:
     stores_dir_raw = raw.get('stores_dir')
     if stores_dir_raw is None:
-        raise SettingsError("[storage].stores_dir is required but missing")
+        raise SettingsError('[storage].stores_dir is required but missing')
     stores_dir = Path(str(stores_dir_raw)).expanduser()
     if not stores_dir.is_dir():
         raise SettingsError(
@@ -155,7 +155,7 @@ def load_settings() -> ServerSettings:
     storage_raw = raw.get('storage')
     if storage_raw is None:
         raise SettingsError(
-            f"Server config at {config_path} is missing the [storage] section"
+            f'Server config at {config_path} is missing the [storage] section'
         )
 
     return ServerSettings(

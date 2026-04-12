@@ -89,8 +89,9 @@ Beyond the existing `create_zarr_store` helper, these tests need:
 - `test_store_missing_spatial_metadata` — store has `raw/full` but attrs
   lack `ImagePositionPatient` / `PixelSpacing` → entry has `error: 'Missing
   spatial metadata'`, annotations still populated.
-- `test_nonexistent_zarr_root` — `zarr_root` doesn't exist → empty stores
-  list (discover returns nothing), not a crash.
+- `test_nonexistent_zarr_root` — the handler is called with a
+  ``stores_dir`` that doesn't exist → empty stores list (discover
+  returns nothing), not a crash.
 
 **Logging:**
 - `test_logs_duration_on_completion` — captures stderr, asserts JSON log
@@ -239,18 +240,18 @@ This is the largest and most complex handler. Split the class by concern.
 
 ### 4.7 `_run_healthcheck` — `TestHealthcheck`
 
-- `test_healthy_all_green` — well-formed zarr root, all checks pass →
+- `test_healthy_all_green` — well-formed stores directory, all checks pass →
   `status == 'healthy'`, all checks `status == 'ok'`, exit 0.
-- `test_degraded_when_zarr_root_unwritable` — read-only dir →
-  `status == 'degraded'`, `zarr_root` check fails, `SystemExit(1)`.
+- `test_degraded_when_stores_dir_unwritable` — read-only dir →
+  `status == 'degraded'`, `stores_dir` check fails, `SystemExit(1)`.
 - `test_degraded_when_store_corrupted` — one store has probe error →
   `stores` check fails.
 - `test_provenance_check_ok_when_file_missing` — no `.meta/provenance.jsonl`
   → check passes with detail `'no provenance file yet'`.
 - `test_provenance_check_fails_on_malformed_jsonl` — write a JSONL with a
   malformed line → check fails.
-- `test_store_and_provenance_checks_skipped_when_zarr_root_fails` — if
-  zarr_root check fails, store/provenance checks aren't run (they'd crash
+- `test_store_and_provenance_checks_skipped_when_stores_dir_fails` — if
+  stores_dir check fails, store/provenance checks aren't run (they'd crash
   otherwise).
 - `test_python_version_check` — asserts reports current Python version.
 - `test_rsync_check_when_rsync_present` / `test_rsync_check_when_absent` —

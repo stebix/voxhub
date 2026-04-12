@@ -314,7 +314,7 @@ voxhub_client/
 │   # Identity                      ← annotator_id + machine_id + nano_id
 │
 ├── ssh.py
-│   # SshTarget                     ← parses "user@host:/zarr_root", holds host/user/port/zarr_root
+│   # SshTarget                     ← parses "user@host" (or bare host), holds user/host/port
 │   # SshRunner                     ← runs ssh commands, parses JSON stdout, raises RemoteError
 │   #   .run(*args, timeout=None) → dict   ← checks protocol_version in response
 │   #   .mktemp() → str             ← creates temp dir on server, returns path
@@ -373,7 +373,11 @@ Structured error envelope (written to stdout on unexpected failure):
 
 ### Commands
 
-#### `list-stores <zarr_root>`
+#### `list-stores`
+
+Reads the operator-configured stores directory from
+``[storage].stores_dir`` in the server's TOML config (pointed at by
+``VOXHUB_SERVER_CONFIG``).  The client supplies nothing.
 
 Response:
 
@@ -403,7 +407,7 @@ Response:
 }
 ```
 
-#### `prepare-pull <zarr_root> [--stores n1 n2] [--ontologies o1 o2] [--staging-dir /tmp/...] [--include-existing-annotations path1 path2] [--compress]`
+#### `prepare-pull [--stores n1 n2] [--ontologies o1 o2] [--staging-dir /tmp/...] [--include-existing-annotations path1 path2] [--compress]`
 
 Calls `core.staging.stage()` into a server-side temp dir. Computes SHA-256 of each
 generated NRRD.
@@ -424,6 +428,7 @@ Response:
 {
   "protocol_version": 1,
   "staging_dir": "/tmp/dt-pull-abc123",
+  "server_stores_dir": "/srv/voxhub/zarr",
   "stores": {
     "gallivanting-groundhog": {
       "raw_checksum": "sha256:a3f1...",
@@ -438,7 +443,7 @@ Response:
 }
 ```
 
-#### `integrate-annotations <zarr_root> <staging_dir> --annotator-id <id> --machine-id <id> --nano-id <id> [--checksums file:sha256:... ...] [--force]`
+#### `integrate-annotations <staging_dir> --annotator-id <id> --machine-id <id> --nano-id <id> [--checksums file:sha256:... ...] [--force]`
 
 Calls `core.integrate.integrate()` then `server.provenance.record()`. Holds a per-store
 filelock during zarr writes. Verifies annotation file checksums before integrating.
@@ -489,15 +494,19 @@ Response: `{"protocol_version": 1, "removed": [...], "count": N}`
 
 ## Client Workflows
 
-### `pull user@host:/zarr_root ./local_staging [--stores ...] [--ontologies ...] [--include-existing-annotations path1 path2] [--compress]`
+### `pull user@host ./local_staging [--stores ...] [--ontologies ...] [--include-existing-annotations path1 path2] [--compress]`
+
+The SSH target is just ``user@host`` (or a bare ``host``).  The server
+owns its stores directory — the client never supplies one.
 
 ```
-1. SshRunner.run("list-stores", zarr_root)
+1. SshRunner.run("list-stores")
        → StoresResponse: store metadata + existing annotations
 
-2. SshRunner.run("prepare-pull", zarr_root, "--stores", ..., "--ontologies", ...,
+2. SshRunner.run("prepare-pull", "--stores", ..., "--ontologies", ...,
        "--include-existing-annotations", ...)
-       → PrepareResponse: staging_dir on server, per-store checksums, expected ontologies
+       → PrepareResponse: staging_dir on server, server_stores_dir,
+         per-store checksums, expected ontologies
 
 3. RsyncTransfer.pull(server:staging_dir/, local_staging/)
        rsync -az --progress user@host:/tmp/dt-abc/ ./local_staging/
@@ -505,7 +514,7 @@ Response: `{"protocol_version": 1, "removed": [...], "count": N}`
 4. SshRunner.run("cleanup", staging_dir)
 
 5. write_manifest(local_staging, RemoteManifest(
-       server_host=..., server_zarr_root=...,
+       server_host=..., server_stores_dir=<from PrepareResponse>,
        stores={name: RemoteManifestEntry(
            status="pulled", raw_checksum=...,
            expected_ontologies=[...], ...
@@ -545,7 +554,7 @@ Checksum caching: on re-pull, if local NRRD exists and SHA-256 matches
 7. RsyncTransfer.push(local_staging/, server:server_staging/)
        rsync -az --progress ./local_staging/ user@host:/tmp/dt-push-xyz/
 
-8. SshRunner.run("integrate-annotations", zarr_root, server_staging,
+8. SshRunner.run("integrate-annotations", server_staging,
        "--annotator-id", identity.annotator_id,
        "--machine-id", identity.machine_id,
        "--nano-id", identity.nano_id,
@@ -557,10 +566,10 @@ Checksum caching: on re-pull, if local NRRD exists and SHA-256 matches
 10. update_manifest_status(local_staging, store_name, "integrated")
 ```
 
-### `remote-catalog user@host:/zarr_root [--ontology ...]`
+### `remote-catalog user@host [--ontology ...]`
 
 ```
-1. SshRunner.run("list-stores", zarr_root) → StoresResponse
+1. SshRunner.run("list-stores") → StoresResponse
 2. Optionally filter by ontology
 3. Render locally with rich (tree + table, showing per-annotator annotation status)
 ```

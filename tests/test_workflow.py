@@ -569,7 +569,7 @@ class TestManifestWorkflow:
 
         manifest = RemoteManifest(
             server_host='alice@server',
-            server_zarr_root='/data/zarr',
+            server_stores_dir='/data/zarr',
             protocol_version=PROTOCOL_VERSION,
             pull_session_id='dt-pull-test',
             pulled_at='2026-01-01T00:00:00+00:00',
@@ -594,7 +594,7 @@ class TestManifestWorkflow:
 
         manifest = RemoteManifest(
             server_host='alice@server',
-            server_zarr_root='/data/zarr',
+            server_stores_dir='/data/zarr',
             protocol_version=PROTOCOL_VERSION,
             pull_session_id='dt-pull-test',
             pulled_at='2026-01-01T00:00:00+00:00',

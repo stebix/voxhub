@@ -213,9 +213,10 @@ def server_config_env(
 
 
 _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
-    # Shared positional argument across list-stores, prepare-pull,
-    # validate-attributes, healthcheck, and integrate-annotations.
-    'zarr_root': None,
+    # Shared injected attribute (populated from settings.storage.stores_dir
+    # by main()) used by list-stores, prepare-pull, validate-attributes,
+    # healthcheck, and integrate-annotations.
+    'stores_dir': None,
     # prepare-pull
     'stores': None,
     'ontologies': None,
@@ -244,7 +245,7 @@ def server_argv() -> Callable[..., argparse.Namespace]:
         fields = dict(_DEFAULT_NAMESPACE_FIELDS)
         fields.update(overrides)
         # Normalise Path objects to str (argparse gives str too).
-        for key in ('zarr_root', 'staging_dir'):
+        for key in ('stores_dir', 'staging_dir'):
             val = fields.get(key)
             if isinstance(val, Path):
                 fields[key] = str(val)

@@ -217,7 +217,7 @@ def write_remote_manifest(
     included_annotations: list[str] | None = None,
     pull_session_id: str = 'dt-pull-test-session',
     server_host: str = 'test.example.com',
-    server_zarr_root: str = '/srv/voxhub',
+    server_stores_dir: str = '/srv/voxhub',
     protocol_version: int = 1,
 ) -> Path:
     """Write a ``.voxhub_manifest.json`` covering the given stores.
@@ -240,7 +240,7 @@ def write_remote_manifest(
     }
     manifest = RemoteManifest(
         server_host=server_host,
-        server_zarr_root=server_zarr_root,
+        server_stores_dir=server_stores_dir,
         protocol_version=protocol_version,
         pull_session_id=pull_session_id,
         pulled_at=datetime.now(UTC).isoformat(),

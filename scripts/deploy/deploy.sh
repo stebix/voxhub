@@ -301,7 +301,10 @@ CONFIG_CONTENT="[logging]
 log_file = \"$LOG_DIR/debug.log\"
 log_max_bytes = 52428800   # 50 MB
 log_backup_count = 10
-stderr_level = \"WARNING\""
+stderr_level = \"WARNING\"
+
+[storage]
+stores_dir = \"$ZARR_ROOT\""
 
 if [[ -f "$CONFIG_FILE" ]]; then
     skip "Server config ($CONFIG_FILE)"

@@ -265,7 +265,6 @@ class PreparedStore:
 class PrepareRequest:
     """Arguments for ``prepare-pull``."""
 
-    zarr_root: str
     store_names: list[str] | None = None
     ontologies: list[str] | None = None
     staging_dir: str | None = None
@@ -275,10 +274,23 @@ class PrepareRequest:
 
 @attrs.define
 class PrepareResponse:
-    """Response from ``prepare-pull``."""
+    """Response from ``prepare-pull``.
+
+    Parameters
+    ----------
+    protocol_version : int
+    staging_dir : str
+        Server-side staging directory the client should pull from.
+    server_stores_dir : str
+        Absolute path to the operator-configured stores directory on
+        the server.  Echoed back so the client can record it in the
+        local pull manifest for provenance / audit purposes.
+    stores : dict[str, PreparedStore]
+    """
 
     protocol_version: int
     staging_dir: str
+    server_stores_dir: str
     stores: dict[str, PreparedStore]
 
     @classmethod
@@ -292,6 +304,7 @@ class PrepareResponse:
         return cls(
             protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
             staging_dir=str(d['staging_dir']),
+            server_stores_dir=str(d['server_stores_dir']),
             stores=stores,
         )
 
@@ -329,7 +342,6 @@ class IntegrateResult:
 class IntegrateRequest:
     """Arguments for ``integrate-annotations``."""
 
-    zarr_root: str
     staging_dir: str
     annotator_id: str
     machine_id: str

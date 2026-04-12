@@ -240,11 +240,11 @@ as warnings, not errors — the ground-truth is always `raw/full` attrs.
 #### `validate-attributes`
 
 ```
-voxhub-server validate-attributes <zarr_root> [--stores store1 store2 ...]
+voxhub-server validate-attributes [--stores store1 store2 ...]
 ```
 
-Runs `validate_dataset_attributes` across all (or selected) stores in a zarr
-root. Outputs a JSON report:
+Runs `validate_dataset_attributes` across all (or selected) stores in the
+operator-configured ``[storage].stores_dir``.  Outputs a JSON report:
 
 ```json
 {
@@ -278,7 +278,7 @@ interface for structured data.
 Display dataset attributes under each store node:
 
 ```
-server:/zarr_root
+server (stores_dir from server config)
 ├── patient-001.zarr  128 x 512 x 512
 │   FPVCT  0.5 x 0.5 x 0.5 mm (isotropic)  origin=clinic-A
 │   └── inner-ear-structures v1 by alice at 2026-03-31T15:00:00
@@ -290,9 +290,9 @@ server:/zarr_root
 New filter flags:
 
 ```
-voxhub remote-catalog user@host:/root --modality FPVCT
-voxhub remote-catalog user@host:/root --modality CT --tag dataset=training
-voxhub remote-catalog user@host:/root --tag origin=clinic-A
+voxhub remote-catalog user@host --modality FPVCT
+voxhub remote-catalog user@host --modality CT --tag dataset=training
+voxhub remote-catalog user@host --tag origin=clinic-A
 ```
 
 #### `pull` updates
@@ -300,8 +300,8 @@ voxhub remote-catalog user@host:/root --tag origin=clinic-A
 Same filter flags available on `pull` to select a subset of stores:
 
 ```
-voxhub pull user@host:/root ./local --modality FPVCT
-voxhub pull user@host:/root ./local --tag origin=clinic-A
+voxhub pull user@host ./local --modality FPVCT
+voxhub pull user@host ./local --tag origin=clinic-A
 ```
 
 ## Read Path Changes

@@ -89,12 +89,16 @@ clear error instead of OOM-killing the SSH session. **Fix (proper):** stream the
 NRRD write with chunked reads — the NRRD "raw" encoding supports it and pynrrd
 isn't the only way to write one.
 
-### 2c. No zarr-root / staging-dir confinement on `integrate-annotations` and `cleanup`
+### 2c. No staging-dir confinement on `integrate-annotations` and `cleanup`
 
-Same class of issue as 2a but more consequential. `cleanup` in particular takes a
-`staging_dir` argument and deletes it; with no bounds check, a buggy (or
-malicious-authenticated) client could point it at `~/.ssh` or the zarr root. The
-forced-command wrapper can't save you here because `cleanup` is on the whitelist.
+As of the `stores_dir` refactor, the operator-owned stores directory is
+no longer client-supplied — the server reads it from
+``[storage].stores_dir`` — so that part of the original attack surface
+is closed.  ``staging_dir`` is still client-provided, though.  `cleanup`
+in particular takes a `staging_dir` argument and deletes it; with no
+bounds check, a buggy (or malicious-authenticated) client could point
+it at `~/.ssh` or the stores directory.  The forced-command wrapper
+can't save you here because `cleanup` is on the whitelist.
 
 **Fix:** validate `staging_dir.resolve()` starts with `Path(tempfile.gettempdir())` in
 all three subcommands that take one.
@@ -211,7 +215,7 @@ Ordered, do-this-before-annotators-touch-it:
    (dry-run first).
 6. **Add one test annotator:** `sudo ./scripts/deploy/add-annotator.sh alice alice.pub`.
 7. **Smoke test from the client box:**
-   - `voxhub remote-catalog voxhub@<ip>:/mnt/storage/voxhub/data`
+   - `voxhub remote-catalog voxhub@<ip>`
    - `voxhub pull` → annotate a fake seg in 3D Slicer → `voxhub push`
    - Verify `.meta/provenance.jsonl` has the new entry
    - Verify `/tmp/dt-*` got cleaned up

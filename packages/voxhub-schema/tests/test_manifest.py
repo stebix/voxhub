@@ -8,7 +8,7 @@ from voxhub_schema.manifest import RemoteManifest, RemoteManifestEntry
 def _sample_manifest() -> RemoteManifest:
     return RemoteManifest(
         server_host='server.example.com',
-        server_zarr_root='/data/zarr',
+        server_stores_dir='/data/zarr',
         protocol_version=1,
         pull_session_id='abc12345',
         pulled_at='2026-01-01T00:00:00+00:00',
@@ -33,7 +33,7 @@ class TestManifestRoundTrip:
         text = m.to_json()
         rt = RemoteManifest.from_json(text)
         assert rt.server_host == m.server_host
-        assert rt.server_zarr_root == m.server_zarr_root
+        assert rt.server_stores_dir == m.server_stores_dir
         assert rt.protocol_version == m.protocol_version
         assert rt.pull_session_id == m.pull_session_id
 

@@ -10,7 +10,7 @@ def _sample_manifest():
     """Build a minimal valid manifest."""
     return RemoteManifest(
         server_host='alice@server',
-        server_zarr_root='/data/zarr',
+        server_stores_dir='/data/zarr',
         protocol_version=PROTOCOL_VERSION,
         pull_session_id='dt-pull-abc',
         pulled_at='2026-01-01T00:00:00+00:00',
@@ -39,7 +39,7 @@ class TestManifestRoundTrip:
         write_manifest(tmp_path, orig)
         rt = read_manifest(tmp_path)
         assert rt.server_host == orig.server_host
-        assert rt.server_zarr_root == orig.server_zarr_root
+        assert rt.server_stores_dir == orig.server_stores_dir
         assert rt.protocol_version == orig.protocol_version
         assert rt.pull_session_id == orig.pull_session_id
         assert 'store-a' in rt.stores

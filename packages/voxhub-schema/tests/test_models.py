@@ -52,6 +52,7 @@ class TestPrepareResponse:
         orig = PrepareResponse(
             protocol_version=PROTOCOL_VERSION,
             staging_dir='/tmp/staging',
+            server_stores_dir='/srv/voxhub/zarr',
             stores={
                 'store-a': PreparedStore(
                     raw_checksum='sha256:abc',
@@ -66,6 +67,7 @@ class TestPrepareResponse:
         )
         rt = _round_trip(orig, PrepareResponse)
         assert rt.protocol_version == PROTOCOL_VERSION
+        assert rt.server_stores_dir == '/srv/voxhub/zarr'
         assert 'store-a' in rt.stores
         s = rt.stores['store-a']
         assert s.shape == [10, 12, 14]
@@ -117,7 +119,7 @@ class TestServerError:
 
 class TestPrepareRequest:
     def test_optional_fields_serialize_as_none(self):
-        req = PrepareRequest(zarr_root='/data/zarr')
+        req = PrepareRequest()
         d = json.loads(serialize(req))
         assert d['store_names'] is None
         assert d['ontologies'] is None

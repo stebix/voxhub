@@ -55,10 +55,19 @@ class RemoteManifest:
 
     Records the server target, protocol version, pull session ID,
     and per-store metadata + expected ontologies.
+
+    Parameters
+    ----------
+    server_host : str
+        SSH host string (``user@host``) the pull was issued against.
+    server_stores_dir : str
+        Absolute path to the server's configured stores directory, as
+        reported by ``prepare-pull``.  Recorded for provenance only —
+        the client never supplies or parses this.
     """
 
     server_host: str
-    server_zarr_root: str
+    server_stores_dir: str
     protocol_version: int
     pull_session_id: str
     pulled_at: str
@@ -74,7 +83,7 @@ class RemoteManifest:
         }
         return cls(
             server_host=str(d['server_host']),
-            server_zarr_root=str(d['server_zarr_root']),
+            server_stores_dir=str(d['server_stores_dir']),
             protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
             pull_session_id=str(d['pull_session_id']),
             pulled_at=str(d['pulled_at']),

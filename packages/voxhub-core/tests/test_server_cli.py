@@ -37,7 +37,7 @@ class TestListStores:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_list_stores(server_argv(zarr_root=root))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
         assert payload['protocol_version'] == PROTOCOL_VERSION
@@ -56,7 +56,7 @@ class TestListStores:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('charlie', 'alpha', 'bravo'))
-        server_cli._run_list_stores(server_argv(zarr_root=root))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
         names = [s['name'] for s in payload['stores']]
@@ -69,7 +69,7 @@ class TestListStores:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',), with_annotations=True)
-        server_cli._run_list_stores(server_argv(zarr_root=root))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
         entry = payload['stores'][0]
@@ -91,7 +91,7 @@ class TestListStores:
             'tags': {'note': 'test'},
         }
         root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
-        server_cli._run_list_stores(server_argv(zarr_root=root))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
         entry = payload['stores'][0]
@@ -103,12 +103,12 @@ class TestListStores:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_list_stores(server_argv(zarr_root=root))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
         assert parsed_stdout()['protocol_version'] == PROTOCOL_VERSION
 
     def test_store_with_probe_error(self, zarr_root_factory, server_argv, parsed_stdout):
         root = zarr_root_factory(('good', 'broken'), corrupt=('broken',))
-        server_cli._run_list_stores(server_argv(zarr_root=root))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
         by_name = {s['name']: s for s in payload['stores']}
@@ -135,14 +135,14 @@ class TestListStores:
             meta.get('attributes', {}).pop(k, None)
         (arr_path / 'zarr.json').write_text(json.dumps(meta))
 
-        server_cli._run_list_stores(server_argv(zarr_root=root))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
         entry = parsed_stdout()['stores'][0]
         assert entry['error'] == 'Missing spatial metadata'
         # Annotations still reported — discovery is independent.
         assert len(entry['annotations']) == 1
 
     def test_nonexistent_zarr_root(self, tmp_path, server_argv, parsed_stdout):
-        server_cli._run_list_stores(server_argv(zarr_root=tmp_path / 'does-not-exist'))
+        server_cli._run_list_stores(server_argv(stores_dir=tmp_path / 'does-not-exist'))
         payload = parsed_stdout()
         assert payload['stores'] == []
         assert payload['protocol_version'] == PROTOCOL_VERSION
@@ -152,7 +152,7 @@ class TestListStores:
 
         caplog.set_level(logging.INFO, logger='voxhub_core.server.cli')
         root = zarr_root_factory(('alpha',))
-        server_cli._run_list_stores(server_argv(zarr_root=root))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
 
         # structlog renders the event dict as the LogRecord's msg.
         completed = [
@@ -176,7 +176,7 @@ class TestPreparePull:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
 
         payload = parsed_stdout()
         staging_dir = Path(payload['staging_dir'])
@@ -199,7 +199,7 @@ class TestPreparePull:
         root = zarr_root_factory(('alpha',))
         explicit = tmp_path / 'explicit_staging'
         server_cli._run_prepare_pull(
-            server_argv(zarr_root=root, stores=['alpha'], staging_dir=str(explicit))
+            server_argv(stores_dir=root, stores=['alpha'], staging_dir=str(explicit))
         )
 
         payload = parsed_stdout()
@@ -210,7 +210,7 @@ class TestPreparePull:
     def test_filters_stores_by_name(self, zarr_root_factory, server_argv, parsed_stdout):
         root = zarr_root_factory(('alpha', 'bravo', 'charlie'))
         server_cli._run_prepare_pull(
-            server_argv(zarr_root=root, stores=['alpha', 'charlie'])
+            server_argv(stores_dir=root, stores=['alpha', 'charlie'])
         )
 
         payload = parsed_stdout()
@@ -225,7 +225,7 @@ class TestPreparePull:
         root = zarr_root_factory(('alpha',))
         server_cli._run_prepare_pull(
             server_argv(
-                zarr_root=root,
+                stores_dir=root,
                 stores=['alpha'],
                 ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             )
@@ -249,7 +249,7 @@ class TestPreparePull:
 
         server_cli._run_prepare_pull(
             server_argv(
-                zarr_root=root,
+                stores_dir=root,
                 stores=['alpha'],
                 include_existing_annotations=[ann_rel],
             )
@@ -277,7 +277,7 @@ class TestPreparePull:
         monkeypatch.setattr(server_cli, 'stage', spy_stage)
 
         server_cli._run_prepare_pull(
-            server_argv(zarr_root=root, stores=['alpha'], compress=True)
+            server_argv(stores_dir=root, stores=['alpha'], compress=True)
         )
         payload = parsed_stdout()
         try:
@@ -296,7 +296,7 @@ class TestPreparePull:
         monkeypatch.setattr(server_cli, 'stage', boom)
 
         with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
+            server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
         assert excinfo.value.code == 1
 
         envelope = parsed_stdout()
@@ -313,7 +313,7 @@ class TestPreparePull:
 
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_prepare_pull(
-                server_argv(zarr_root=root, stores=['does-not-exist'])
+                server_argv(stores_dir=root, stores=['does-not-exist'])
             )
         assert excinfo.value.code == 1
 
@@ -326,7 +326,7 @@ class TestPreparePull:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
         payload = parsed_stdout()
         try:
             assert payload['protocol_version'] == PROTOCOL_VERSION
@@ -337,7 +337,7 @@ class TestPreparePull:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
         payload = parsed_stdout()
         try:
             assert isinstance(payload['staging_dir'], str)
@@ -354,7 +354,7 @@ class TestPreparePull:
 def _integrate_argv(
     server_argv,
     *,
-    zarr_root: Path,
+    stores_dir: Path,
     staging_dir: Path,
     annotator_id: str = 'alice',
     nano_id: str = 'deadbeef',
@@ -363,7 +363,7 @@ def _integrate_argv(
     checksums: list[str] | None = None,
 ):
     return server_argv(
-        zarr_root=zarr_root,
+        stores_dir=stores_dir,
         staging_dir=str(staging_dir),
         annotator_id=annotator_id,
         nano_id=nano_id,
@@ -404,7 +404,7 @@ class TestIntegrateAnnotationsHappy:
         staging = staging_dir_with_manifest(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -435,7 +435,7 @@ class TestIntegrateAnnotationsHappy:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -461,7 +461,7 @@ class TestIntegrateAnnotationsHappy:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -481,7 +481,7 @@ class TestIntegrateAnnotationsHappy:
         staging = staging_dir_with_manifest(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
         parsed_stdout()
 
@@ -520,7 +520,7 @@ class TestIntegrateAnnotationsHappy:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
         parsed_stdout()
 
@@ -545,7 +545,7 @@ class TestIntegrateAnnotationsHappy:
         server_cli._run_integrate_annotations(
             _integrate_argv(
                 server_argv,
-                zarr_root=zarr_root,
+                stores_dir=zarr_root,
                 staging_dir=staging,
                 checksums=[f'{seg_file.name}:{correct_checksum}'],
             )
@@ -574,7 +574,7 @@ class TestIntegrateAnnotationsErrors:
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_integrate_annotations(
                 _integrate_argv(
-                    server_argv, zarr_root=zarr_root, staging_dir=bare_staging
+                    server_argv, stores_dir=zarr_root, staging_dir=bare_staging
                 )
             )
         assert excinfo.value.code == 1
@@ -598,7 +598,7 @@ class TestIntegrateAnnotationsErrors:
             server_cli._run_integrate_annotations(
                 _integrate_argv(
                     server_argv,
-                    zarr_root=zarr_root,
+                    stores_dir=zarr_root,
                     staging_dir=staging,
                     checksums=[f'segmentation.seg.nrrd:{bogus}'],
                 )
@@ -623,7 +623,7 @@ class TestIntegrateAnnotationsErrors:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -650,7 +650,7 @@ class TestIntegrateAnnotationsErrors:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -675,7 +675,7 @@ class TestIntegrateAnnotationsErrors:
 
         server_cli._run_integrate_annotations(
             _integrate_argv(
-                server_argv, zarr_root=zarr_root, staging_dir=staging, force=True
+                server_argv, stores_dir=zarr_root, staging_dir=staging, force=True
             )
         )
 
@@ -696,7 +696,7 @@ class TestIntegrateAnnotationsErrors:
         (staging / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -734,7 +734,7 @@ class TestIntegrateAnnotationsMultiStore:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -754,7 +754,7 @@ class TestIntegrateAnnotationsMultiStore:
         staging = staging_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -774,7 +774,7 @@ class TestIntegrateAnnotationsMultiStore:
         (hidden / 'segmentation.seg.nrrd').write_bytes(b'junk')
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -791,7 +791,7 @@ class TestIntegrateAnnotationsMultiStore:
         staging = staging_dir_with_manifest(store_names=['alpha', 'orphan'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -823,7 +823,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         annotations = parsed_stdout()['stores']['alpha']['annotations']
@@ -850,7 +850,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -873,7 +873,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
+            _integrate_argv(server_argv, stores_dir=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -1063,7 +1063,7 @@ class TestValidateAttributes:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_validate_attributes(server_argv(zarr_root=root))
+        server_cli._run_validate_attributes(server_argv(stores_dir=root))
 
         result = parsed_stdout()['results']['alpha']
         assert result['status'] == 'missing'
@@ -1080,7 +1080,7 @@ class TestValidateAttributes:
             'tags': {},
         }
         root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
-        server_cli._run_validate_attributes(server_argv(zarr_root=root))
+        server_cli._run_validate_attributes(server_argv(stores_dir=root))
 
         result = parsed_stdout()['results']['alpha']
         assert result['status'] == 'ok'
@@ -1097,7 +1097,7 @@ class TestValidateAttributes:
             'tags': {},
         }
         root = zarr_root_factory(('alpha',), dataset_attributes={'alpha': da})
-        server_cli._run_validate_attributes(server_argv(zarr_root=root))
+        server_cli._run_validate_attributes(server_argv(stores_dir=root))
 
         result = parsed_stdout()['results']['alpha']
         assert result['status'] == 'warning'
@@ -1107,7 +1107,9 @@ class TestValidateAttributes:
 
     def test_filters_stores_by_name(self, zarr_root_factory, server_argv, parsed_stdout):
         root = zarr_root_factory(('alpha', 'bravo'))
-        server_cli._run_validate_attributes(server_argv(zarr_root=root, stores=['alpha']))
+        server_cli._run_validate_attributes(
+            server_argv(stores_dir=root, stores=['alpha'])
+        )
 
         payload = parsed_stdout()
         assert list(payload['results']) == ['alpha']
@@ -1116,7 +1118,7 @@ class TestValidateAttributes:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_validate_attributes(server_argv(zarr_root=root))
+        server_cli._run_validate_attributes(server_argv(stores_dir=root))
         assert parsed_stdout()['protocol_version'] == PROTOCOL_VERSION
 
 
@@ -1130,36 +1132,36 @@ class TestHealthcheck:
 
     def test_healthy_all_green(self, zarr_root_factory, server_argv, parsed_stdout):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_healthcheck(server_argv(zarr_root=root))
+        server_cli._run_healthcheck(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
         assert payload['status'] == 'healthy'
         check_names = [c['name'] for c in payload['checks']]
-        assert {'python_version', 'packages', 'zarr_root', 'stores'} <= set(check_names)
+        assert {'python_version', 'packages', 'stores_dir', 'stores'} <= set(check_names)
         for check in payload['checks']:
             assert check['status'] == 'ok', check
 
-    def test_degraded_when_zarr_root_unwritable(
+    def test_degraded_when_stores_dir_unwritable(
         self, tmp_path, server_argv, parsed_stdout
     ):
-        # Point at a path that doesn't exist — zarr_root check fails.
+        # Point at a path that doesn't exist — stores_dir check fails.
         missing = tmp_path / 'nonexistent'
 
         with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_healthcheck(server_argv(zarr_root=missing))
+            server_cli._run_healthcheck(server_argv(stores_dir=missing))
         assert excinfo.value.code == 1
 
         payload = parsed_stdout()
         assert payload['status'] == 'degraded'
-        zarr_check = next(c for c in payload['checks'] if c['name'] == 'zarr_root')
-        assert zarr_check['status'] == 'fail'
+        check = next(c for c in payload['checks'] if c['name'] == 'stores_dir')
+        assert check['status'] == 'fail'
 
     def test_degraded_when_store_corrupted(
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('good', 'broken'), corrupt=('broken',))
         with pytest.raises(SystemExit):
-            server_cli._run_healthcheck(server_argv(zarr_root=root))
+            server_cli._run_healthcheck(server_argv(stores_dir=root))
 
         payload = parsed_stdout()
         assert payload['status'] == 'degraded'
@@ -1171,7 +1173,7 @@ class TestHealthcheck:
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        server_cli._run_healthcheck(server_argv(zarr_root=root))
+        server_cli._run_healthcheck(server_argv(stores_dir=root))
 
         prov_check = next(
             c for c in parsed_stdout()['checks'] if c['name'] == 'provenance'
@@ -1188,7 +1190,7 @@ class TestHealthcheck:
         (meta_dir / 'provenance.jsonl').write_text('{"valid":true}\nNOT JSON\n')
 
         with pytest.raises(SystemExit):
-            server_cli._run_healthcheck(server_argv(zarr_root=root))
+            server_cli._run_healthcheck(server_argv(stores_dir=root))
 
         prov_check = next(
             c for c in parsed_stdout()['checks'] if c['name'] == 'provenance'
@@ -1202,7 +1204,7 @@ class TestHealthcheck:
         # they would crash on a nonexistent directory.
         missing = tmp_path / 'nonexistent'
         with pytest.raises(SystemExit):
-            server_cli._run_healthcheck(server_argv(zarr_root=missing))
+            server_cli._run_healthcheck(server_argv(stores_dir=missing))
 
         check_names = {c['name'] for c in parsed_stdout()['checks']}
         assert 'stores' not in check_names
@@ -1255,9 +1257,7 @@ class TestMainEntry:
             server_cli.main()
         assert excinfo.value.code == 2
 
-    def test_unhandled_exception_returns_server_error_envelope(
-        self, capsys, monkeypatch
-    ):
+    def test_unhandled_exception_returns_server_error_envelope(self, capsys, monkeypatch):
         # The autouse ``_default_server_config`` fixture provides a valid
         # VOXHUB_SERVER_CONFIG; force the list-stores handler to blow up.
         def boom(_args):  # type: ignore[no-untyped-def]
@@ -1327,14 +1327,14 @@ class TestMainStoresDirResolution:
         tmp_path,
     ):
         """Every stores-dir command receives ``settings.storage.stores_dir``
-        via ``args.zarr_root``."""
+        via ``args.stores_dir``."""
         root = zarr_root_factory(('alpha',))
         server_config_env(root)
 
         captured: dict[str, object] = {}
 
         def spy(args):  # type: ignore[no-untyped-def]
-            captured['zarr_root'] = args.zarr_root
+            captured['stores_dir'] = args.stores_dir
 
         for name in (
             '_run_list_stores',
@@ -1362,9 +1362,9 @@ class TestMainStoresDirResolution:
         monkeypatch.setattr('sys.argv', argv)
         server_cli.main()
 
-        assert captured['zarr_root'] == str(root)
+        assert captured['stores_dir'] == str(root)
 
-    def test_positional_zarr_root_is_rejected_by_argparse(
+    def test_positional_stores_dir_is_rejected_by_argparse(
         self,
         zarr_root_factory,
         server_config_env,

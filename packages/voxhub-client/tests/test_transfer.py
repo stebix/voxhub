@@ -10,12 +10,12 @@ from voxhub_client.transfer import RsyncTransfer, ScpFallback
 
 @pytest.fixture
 def target():
-    return SshTarget(user='alice', host='server', zarr_root='/data/zarr')
+    return SshTarget(user='alice', host='server')
 
 
 @pytest.fixture
 def target_with_port():
-    return SshTarget(user='alice', host='server', zarr_root='/data/zarr', port=2222)
+    return SshTarget(user='alice', host='server', port=2222)
 
 
 # ===================================================================
