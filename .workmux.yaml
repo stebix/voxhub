@@ -1,0 +1,9 @@
+# CLI configuration for workmux - expected to be placed in the root of the project
+
+main_branch: trunk
+
+agent: ccyolo
+
+post_create:
+  # equip worktree with own working venv
+  - uv sync
