@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 from _core_helpers import (
-    build_wip_dir_entries,
+    build_staging_dir_entries,
     write_remote_manifest,
 )
 from filelock import FileLock, Timeout
@@ -36,30 +36,30 @@ pytestmark = pytest.mark.slow
 # ---------------------------------------------------------------------------
 
 
-def _build_wip(
-    wip_parent: Path,
-    wip_name: str,
+def _build_staging(
+    staging_parent: Path,
+    staging_name: str,
     store_names: list[str],
     *,
     ontologies: tuple[str, ...] = ('inner-ear-structures',),
 ) -> Path:
-    """Build an isolated WIP dir with manifest under ``wip_parent``.
+    """Build an isolated staging dir with manifest under ``staging_parent``.
 
-    Each invocation produces a distinct directory so that ``wip_dir.name``
+    Each invocation produces a distinct directory so that ``staging_dir.name``
     (used as ``pull_session_id`` in provenance) differs per concurrent
     integrate.
     """
-    wip = wip_parent / wip_name
-    wip.mkdir(parents=True, exist_ok=True)
+    staging = staging_parent / staging_name
+    staging.mkdir(parents=True, exist_ok=True)
     for store in store_names:
-        build_wip_dir_entries(wip / store, include_seg=True)
+        build_staging_dir_entries(staging / store, include_seg=True)
     write_remote_manifest(
-        wip,
+        staging,
         store_names=list(store_names),
         expected_ontologies=list(ontologies),
-        pull_session_id=wip_name,
+        pull_session_id=staging_name,
     )
-    return wip
+    return staging
 
 
 def _parse_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -200,20 +200,20 @@ class TestConcurrentIntegrateSameStore:
         tmp_path,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip_a = _build_wip(tmp_path / 'wips', 'dt-pull-a', ['alpha'])
-        wip_b = _build_wip(tmp_path / 'wips', 'dt-pull-b', ['alpha'])
+        staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
+        staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['alpha'])
 
         results = concurrent_integrate_runner(
             [
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_a,
+                    'staging_dir': staging_a,
                     'annotator_id': 'alice',
                     'nano_id': 'aaaa1111',
                 },
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_b,
+                    'staging_dir': staging_b,
                     'annotator_id': 'bob',
                     'nano_id': 'bbbb2222',
                 },
@@ -243,11 +243,11 @@ class TestConcurrentIntegrateSameStore:
         zarr_root = zarr_root_factory(('alpha',))
         invocations = []
         for i in range(5):
-            wip = _build_wip(tmp_path / 'wips', f'dt-pull-{i}', ['alpha'])
+            staging = _build_staging(tmp_path / 'stagings', f'dt-pull-{i}', ['alpha'])
             invocations.append(
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip,
+                    'staging_dir': staging,
                     'annotator_id': f'user{i}',
                     'nano_id': f'nano{i:04d}',
                 }
@@ -279,7 +279,7 @@ class TestConcurrentIntegrateSameStore:
         still exercises the real ``_run_integrate_annotations`` code path.
         """
         zarr_root = zarr_root_factory(('alpha',))
-        wip = _build_wip(tmp_path / 'wips', 'dt-pull-contended', ['alpha'])
+        staging = _build_staging(tmp_path / 'stagings', 'dt-pull-contended', ['alpha'])
 
         def _short_lock(path: Path, *, timeout: float = 60.0) -> FileLock:
             del timeout
@@ -291,7 +291,7 @@ class TestConcurrentIntegrateSameStore:
             server_cli._run_integrate_annotations(
                 server_argv(
                     zarr_root=zarr_root,
-                    wip_dir=str(wip),
+                    wip_dir=str(staging),
                     annotator_id='alice',
                     nano_id='ccccdddd',
                 )
@@ -341,20 +341,20 @@ class TestConcurrentIntegrateDifferentStores:
         tmp_path,
     ):
         zarr_root = zarr_root_factory(('alpha', 'beta'))
-        wip_alpha = _build_wip(tmp_path / 'wips', 'dt-pull-alpha', ['alpha'])
-        wip_beta = _build_wip(tmp_path / 'wips', 'dt-pull-beta', ['beta'])
+        staging_alpha = _build_staging(tmp_path / 'stagings', 'dt-pull-alpha', ['alpha'])
+        staging_beta = _build_staging(tmp_path / 'stagings', 'dt-pull-beta', ['beta'])
 
         results = concurrent_integrate_runner(
             [
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_alpha,
+                    'staging_dir': staging_alpha,
                     'annotator_id': 'alice',
                     'nano_id': 'aaaa1111',
                 },
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_beta,
+                    'staging_dir': staging_beta,
                     'annotator_id': 'bob',
                     'nano_id': 'bbbb2222',
                 },
@@ -388,20 +388,20 @@ class TestConcurrentProvenanceAppend:
         tmp_path,
     ):
         zarr_root = zarr_root_factory(('alpha', 'beta'))
-        wip_a = _build_wip(tmp_path / 'wips', 'dt-pull-a', ['alpha'])
-        wip_b = _build_wip(tmp_path / 'wips', 'dt-pull-b', ['beta'])
+        staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
+        staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['beta'])
 
         results = concurrent_integrate_runner(
             [
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_a,
+                    'staging_dir': staging_a,
                     'annotator_id': 'alice',
                     'nano_id': 'aaaa1111',
                 },
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_b,
+                    'staging_dir': staging_b,
                     'annotator_id': 'bob',
                     'nano_id': 'bbbb2222',
                 },
@@ -565,20 +565,20 @@ class TestAnnotatorIsolation:
         tmp_path,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip_a = _build_wip(tmp_path / 'wips', 'dt-pull-a', ['alpha'])
-        wip_b = _build_wip(tmp_path / 'wips', 'dt-pull-b', ['alpha'])
+        staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
+        staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['alpha'])
 
         results = concurrent_integrate_runner(
             [
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_a,
+                    'staging_dir': staging_a,
                     'annotator_id': 'alice',
                     'nano_id': 'aaaa1111',
                 },
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_b,
+                    'staging_dir': staging_b,
                     'annotator_id': 'bob',
                     'nano_id': 'bbbb2222',
                 },
@@ -612,25 +612,25 @@ class TestAnnotatorIsolation:
         concurrent_integrate_runner,
         tmp_path,
     ):
-        """Same annotator_id + nano_id but distinct WIP payloads →
+        """Same annotator_id + nano_id but distinct staging payloads →
         each push creates a fresh instance directory (because
         ``instance_dir`` embeds a fresh random suffix per run), so both
         coexist under ``annotations/<annotator>-<nano>/``."""
         zarr_root = zarr_root_factory(('alpha',))
-        wip_a = _build_wip(tmp_path / 'wips', 'dt-pull-same-a', ['alpha'])
-        wip_b = _build_wip(tmp_path / 'wips', 'dt-pull-same-b', ['alpha'])
+        staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-same-a', ['alpha'])
+        staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-same-b', ['alpha'])
 
         results = concurrent_integrate_runner(
             [
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_a,
+                    'staging_dir': staging_a,
                     'annotator_id': 'alice',
                     'nano_id': 'samesame',
                 },
                 {
                     'zarr_root': zarr_root,
-                    'wip_dir': wip_b,
+                    'staging_dir': staging_b,
                     'annotator_id': 'alice',
                     'nano_id': 'samesame',
                 },

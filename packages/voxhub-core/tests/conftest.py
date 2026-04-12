@@ -54,7 +54,7 @@ def unconstrained_ontology():
     return load_ontology('unconstrained')
 
 
-# -- Zarr root / WIP dir builders -------------------------------------------
+# -- Zarr root / staging dir builders ---------------------------------------
 
 
 @pytest.fixture
@@ -105,18 +105,18 @@ def zarr_root_factory(
 
 
 @pytest.fixture
-def wip_dir_with_manifest(
+def staging_dir_with_manifest(
     tmp_path: Path,
 ) -> Callable[..., Path]:
-    """Build a WIP directory containing per-store subdirs plus a manifest.
+    """Build a staging directory containing per-store subdirs plus a manifest.
 
     Returns a callable ``(store_names=..., ontologies=..., include_seg=True,
     include_lmk=False, seg_label_map=None, seg_segments=None,
-    lmk_points=None, lmk_labels=None) -> Path`` producing the WIP directory.
-    The zarr root is paired independently — this fixture only produces the
-    client-side payload.
+    lmk_points=None, lmk_labels=None) -> Path`` producing the staging
+    directory.  The zarr root is paired independently — this fixture only
+    produces the client-side payload.
     """
-    from _core_helpers import build_wip_dir_entries
+    from _core_helpers import build_staging_dir_entries
 
     def _build(
         store_names: Iterable[str] = ('default',),
@@ -130,13 +130,13 @@ def wip_dir_with_manifest(
         lmk_labels: list[str] | None = None,
         lmk_coordinate_system: str = 'LPS',
     ) -> Path:
-        wip_dir = tmp_path / 'wip'
-        wip_dir.mkdir(exist_ok=True)
+        staging_dir = tmp_path / 'staging'
+        staging_dir.mkdir(exist_ok=True)
 
         store_list = list(store_names)
         for name in store_list:
-            build_wip_dir_entries(
-                wip_dir / name,
+            build_staging_dir_entries(
+                staging_dir / name,
                 include_seg=include_seg,
                 include_lmk=include_lmk,
                 seg_label_map=seg_label_map,
@@ -147,11 +147,11 @@ def wip_dir_with_manifest(
             )
 
         write_remote_manifest(
-            wip_dir,
+            staging_dir,
             store_names=store_list,
             expected_ontologies=list(ontologies),
         )
-        return wip_dir
+        return staging_dir
 
     return _build
 
@@ -281,7 +281,7 @@ def provenance_jsonl_factory() -> Callable[..., Path]:
 def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
     """Launch N ``integrate-annotations`` subprocesses in parallel.
 
-    Each invocation is a dict with keys ``zarr_root``, ``wip_dir``,
+    Each invocation is a dict with keys ``zarr_root``, ``staging_dir``,
     ``annotator_id``, ``nano_id`` and optionally ``machine_id``, ``force``.
     Returns a list of result dicts preserving invocation order, each carrying
     ``returncode``, parsed JSON ``stdout`` (best-effort, may be ``None``),
@@ -301,7 +301,7 @@ def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
                 'voxhub_core.server.cli',
                 'integrate-annotations',
                 str(inv['zarr_root']),
-                str(inv['wip_dir']),
+                str(inv['staging_dir']),
                 '--annotator-id',
                 inv['annotator_id'],
                 '--machine-id',

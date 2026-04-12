@@ -13,7 +13,7 @@ from _core_helpers import (
     SHAPE,
     SPACE_DIRECTIONS,
     SPACING_MM,
-    build_wip_dir,
+    build_staging_dir,
     create_zarr_store,
 )
 
@@ -321,12 +321,12 @@ class TestFindAnnotationFiles:
 
 class TestIntegrate:
     def _setup(self, tmp_path, *, seg=True, lmk=False, ontology=None):
-        """Set up zarr store + WIP directory for integration."""
+        """Set up zarr store + staging directory for integration."""
         zarr_root = tmp_path / 'zarr'
         zarr_root.mkdir()
         create_zarr_store(zarr_root / 'mystore.zarr')
 
-        wip = tmp_path / 'wip'
+        staging = tmp_path / 'staging'
         seg_lm = None
         seg_segments = None
         lmk_pts = None
@@ -347,20 +347,20 @@ class TestIntegrate:
             lmk_pts = [[-4.0, -5.0, -6.0], [-3.0, -4.0, -5.0], [-2.0, -3.0, -4.0]]
             lmk_labels = ['round_window', 'oval_window', 'cochlear_apex']
 
-        build_wip_dir(
-            wip,
+        build_staging_dir(
+            staging,
             'mystore',
             seg_label_map=seg_lm,
             seg_segments=seg_segments,
             lmk_points=lmk_pts,
             lmk_labels=lmk_labels,
         )
-        return zarr_root, wip
+        return zarr_root, staging
 
     def test_integrates_valid_segmentation(self, tmp_path, inner_ear_ontology):
-        zarr_root, wip = self._setup(tmp_path)
+        zarr_root, staging = self._setup(tmp_path)
         issues = integrate(
-            wip,
+            staging,
             zarr_root,
             annotator_id='alice',
             nano_id='abc12345',
@@ -377,9 +377,9 @@ class TestIntegrate:
         assert 'alice-abc12345' in list(ann)
 
     def test_integrates_valid_landmarks(self, tmp_path, landmark_ontology):
-        zarr_root, wip = self._setup(tmp_path, seg=False, lmk=True)
+        zarr_root, staging = self._setup(tmp_path, seg=False, lmk=True)
         issues = integrate(
-            wip,
+            staging,
             zarr_root,
             annotator_id='alice',
             nano_id='abc12345',
@@ -392,9 +392,9 @@ class TestIntegrate:
         assert 'alice-abc12345' in list(root['annotations'])
 
     def test_validate_only_does_not_write(self, tmp_path, inner_ear_ontology):
-        zarr_root, wip = self._setup(tmp_path)
+        zarr_root, staging = self._setup(tmp_path)
         integrate(
-            wip,
+            staging,
             zarr_root,
             annotator_id='alice',
             nano_id='abc12345',
@@ -410,17 +410,17 @@ class TestIntegrate:
         zarr_root.mkdir()
         create_zarr_store(zarr_root / 'mystore.zarr')
 
-        wip = tmp_path / 'wip'
+        staging = tmp_path / 'staging'
         wrong_shape = (8, 12, 14)
-        build_wip_dir(
-            wip,
+        build_staging_dir(
+            staging,
             'mystore',
             seg_label_map=np.zeros(wrong_shape, dtype=np.int16),
             seg_segments=[],
         )
         with pytest.raises(RuntimeError, match='Validation errors'):
             integrate(
-                wip,
+                staging,
                 zarr_root,
                 annotator_id='alice',
                 nano_id='abc12345',
@@ -430,9 +430,9 @@ class TestIntegrate:
     def test_force_integrates_despite_warnings(self, tmp_path, inner_ear_ontology):
         """With force=True, stores without errors still get integrated
         even when other stores have errors."""
-        zarr_root, wip = self._setup(tmp_path)
+        zarr_root, staging = self._setup(tmp_path)
         integrate(
-            wip,
+            staging,
             zarr_root,
             annotator_id='alice',
             nano_id='abc12345',
@@ -445,27 +445,27 @@ class TestIntegrate:
 
     def test_multi_annotator_isolation(self, tmp_path, inner_ear_ontology):
         """Two annotators integrating to the same store get separate paths."""
-        zarr_root, wip1 = self._setup(tmp_path)
+        zarr_root, staging1 = self._setup(tmp_path)
 
         # First annotator.
         integrate(
-            wip1,
+            staging1,
             zarr_root,
             annotator_id='alice',
             nano_id='aaa11111',
             ontology=inner_ear_ontology,
         )
 
-        # Second annotator with fresh WIP.
-        wip2 = tmp_path / 'wip2'
-        build_wip_dir(
-            wip2,
+        # Second annotator with fresh staging.
+        staging2 = tmp_path / 'staging2'
+        build_staging_dir(
+            staging2,
             'mystore',
             seg_label_map=np.zeros(SHAPE, dtype=np.int16),
             seg_segments=[],
         )
         integrate(
-            wip2,
+            staging2,
             zarr_root,
             annotator_id='bob',
             nano_id='bbb22222',

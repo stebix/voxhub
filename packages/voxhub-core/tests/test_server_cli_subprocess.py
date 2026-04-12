@@ -100,7 +100,7 @@ class TestCommandSmoke:
     def test_integrate_annotations_full_roundtrip(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         subprocess_server,
     ):
         """End-to-end: stage → build annotation → integrate → verify.
@@ -109,7 +109,7 @@ class TestCommandSmoke:
         argparse, real I/O, and the installed entrypoint.
         """
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(store_names=['alpha'])
+        wip = staging_dir_with_manifest(store_names=['alpha'])
 
         result = subprocess_server(
             'integrate-annotations',

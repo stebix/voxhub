@@ -49,7 +49,7 @@ def record_provenance(
     nano_id : str
         8-char nano-ID.
     pull_session_id : str
-        Session ID from the pull that created the WIP.
+        Session ID from the pull that created the staging directory.
     ontology : str
         Ontology name.
     ontology_version : int

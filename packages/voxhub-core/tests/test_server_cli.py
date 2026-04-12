@@ -396,12 +396,12 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_segmentation_writes_to_annotator_scoped_path(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(store_names=['alpha'])
+        wip = staging_dir_with_manifest(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
@@ -422,12 +422,12 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_landmarks_writes_to_annotator_scoped_path(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(
+        wip = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-landmarks'],
             include_seg=False,
@@ -448,12 +448,12 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_both_seg_and_landmarks_in_single_call(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(
+        wip = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             include_seg=True,
@@ -473,12 +473,12 @@ class TestIntegrateAnnotationsHappy:
     def test_provenance_recorded_on_success(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(store_names=['alpha'])
+        wip = staging_dir_with_manifest(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
@@ -510,12 +510,12 @@ class TestIntegrateAnnotationsHappy:
     def test_uses_ontology_from_manifest_not_cli(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(
+        wip = staging_dir_with_manifest(
             store_names=['alpha'], ontologies=['inner-ear-structures']
         )
 
@@ -533,12 +533,12 @@ class TestIntegrateAnnotationsHappy:
     def test_checksum_matches_accepted(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(store_names=['alpha'])
+        wip = staging_dir_with_manifest(store_names=['alpha'])
         seg_file = wip / 'alpha' / 'segmentation.seg.nrrd'
         correct_checksum = server_cli._compute_sha256(seg_file)
 
@@ -584,12 +584,12 @@ class TestIntegrateAnnotationsErrors:
     def test_checksum_mismatch_writes_error_envelope_and_exits(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(store_names=['alpha'])
+        wip = staging_dir_with_manifest(store_names=['alpha'])
 
         bogus = f'sha256:{"0" * 64}'
         with pytest.raises(SystemExit) as excinfo:
@@ -611,12 +611,14 @@ class TestIntegrateAnnotationsErrors:
     def test_unknown_ontology_produces_warning_but_continues(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(store_names=['alpha'], ontologies=['does-not-exist'])
+        wip = staging_dir_with_manifest(
+            store_names=['alpha'], ontologies=['does-not-exist']
+        )
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
@@ -633,13 +635,13 @@ class TestIntegrateAnnotationsErrors:
     def test_segmentation_validation_error_without_force_blocks_write(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
         # Shape mismatch: seg is (5,5,5), manifest declares SHAPE=(10,12,14).
-        wip = wip_dir_with_manifest(
+        wip = staging_dir_with_manifest(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
@@ -658,12 +660,12 @@ class TestIntegrateAnnotationsErrors:
     def test_force_allows_integration_despite_errors(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(
+        wip = staging_dir_with_manifest(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
@@ -680,12 +682,12 @@ class TestIntegrateAnnotationsErrors:
     def test_parse_error_recorded_in_issues(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha', 'bravo'))
-        wip = wip_dir_with_manifest(store_names=['alpha', 'bravo'])
+        wip = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
         # Corrupt alpha's seg.nrrd.
         (wip / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
 
@@ -714,12 +716,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_partial_failure_per_store_isolated(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha', 'bravo'))
-        wip = wip_dir_with_manifest(store_names=['alpha', 'bravo'])
+        wip = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
         # Bravo's seg has a shape mismatch.
         write_seg_nrrd(
             wip / 'bravo' / 'segmentation.seg.nrrd',
@@ -740,12 +742,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_iteration_order_deterministic(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha', 'bravo', 'charlie'))
-        wip = wip_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
+        wip = staging_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
@@ -757,12 +759,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_skips_hidden_directories(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(store_names=['alpha'])
+        wip = staging_dir_with_manifest(store_names=['alpha'])
         hidden = wip / '.hidden'
         hidden.mkdir()
         (hidden / 'segmentation.seg.nrrd').write_bytes(b'junk')
@@ -777,12 +779,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_skips_directories_without_matching_zarr_store(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(store_names=['alpha', 'orphan'])
+        wip = staging_dir_with_manifest(store_names=['alpha', 'orphan'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
@@ -804,12 +806,12 @@ class TestIntegrateAnnotationsOntology:
     def test_segmentation_ontology_resolution_filters_by_type(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = wip_dir_with_manifest(
+        wip = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             include_seg=True,
@@ -828,14 +830,14 @@ class TestIntegrateAnnotationsOntology:
     def test_first_matching_ontology_used(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
         # Pin the documented behavior at server/cli.py:446 — the first
         # matching segmentation ontology wins.
-        wip = wip_dir_with_manifest(
+        wip = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=[
                 'inner-ear-structures',
@@ -853,13 +855,13 @@ class TestIntegrateAnnotationsOntology:
     def test_no_matching_ontology_uses_unconstrained_fallback(
         self,
         zarr_root_factory,
-        wip_dir_with_manifest,
+        staging_dir_with_manifest,
         server_argv,
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
         # Only a landmarks ontology declared, but WIP ships a segmentation.
-        wip = wip_dir_with_manifest(
+        wip = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-landmarks'],
             include_seg=True,

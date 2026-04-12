@@ -1,8 +1,8 @@
 """Integrate 3D Slicer annotations back into zarr stores.
 
-Reads validated segmentation label maps and landmark points from a WIP
-directory and writes them as annotator-scoped groups/arrays in the
-corresponding zarr stores.
+Reads validated segmentation label maps and landmark points from a
+staging directory and writes them as annotator-scoped groups/arrays in
+the corresponding zarr stores.
 
 This module is the **local** integration logic.  It knows nothing about
 server-specific concerns (annotator ID, session ID, locks).  Server
@@ -29,7 +29,7 @@ from voxhub_schema import IssueRecord, Ontology, generate_nano_id
 def find_annotation_files(
     store_dir: Path,
 ) -> tuple[Path | None, Path | None]:
-    """Scan a WIP store directory for Slicer annotation files.
+    """Scan a staging store directory for Slicer annotation files.
 
     Parameters
     ----------
@@ -424,7 +424,7 @@ def write_landmarks_to_zarr(
 
 
 def integrate(
-    wip_dir: str | Path,
+    staging_dir: str | Path,
     zarr_root: str | Path,
     *,
     annotator_id: str,
@@ -434,15 +434,15 @@ def integrate(
     validate_only: bool = False,
     console: Console | None = None,
 ) -> dict[str, list[IssueRecord]]:
-    """Integrate annotations from a WIP directory into zarr stores.
+    """Integrate annotations from a staging directory into zarr stores.
 
     This is the **local** integration entrypoint.  It validates
     annotations then writes them to annotator-scoped zarr paths.
 
     Parameters
     ----------
-    wip_dir : str | Path
-        WIP directory containing staged NRRDs and annotation files.
+    staging_dir : str | Path
+        Staging directory containing staged NRRDs and annotation files.
     zarr_root : str | Path
         Directory containing the ``.zarr`` stores.
     annotator_id : str
@@ -468,7 +468,7 @@ def integrate(
     RuntimeError
         If validation errors prevent integration and *force* is False.
     """
-    wip_dir = Path(wip_dir)
+    staging_dir = Path(staging_dir)
     zarr_root = Path(zarr_root)
     console = console or Console()
 
@@ -483,8 +483,8 @@ def integrate(
     ] = []
     has_errors = False
 
-    # Discover stores in the WIP directory.
-    for store_dir in sorted(wip_dir.iterdir()):
+    # Discover stores in the staging directory.
+    for store_dir in sorted(staging_dir.iterdir()):
         if not store_dir.is_dir() or store_dir.name.startswith('.'):
             continue
 

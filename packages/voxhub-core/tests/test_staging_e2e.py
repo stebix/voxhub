@@ -34,9 +34,9 @@ def _silent_console() -> Console:
     return Console(file=io.StringIO(), record=False, width=160)
 
 
-def _stage(zarr_root: Path, wip_dir: Path, **kwargs) -> dict:
+def _stage(zarr_root: Path, staging_dir: Path, **kwargs) -> dict:
     """Invoke ``stage()`` with a silent console."""
-    return stage(zarr_root, wip_dir, console=_silent_console(), **kwargs)
+    return stage(zarr_root, staging_dir, console=_silent_console(), **kwargs)
 
 
 def _strip_spatial_attrs(zarr_path: Path, keys: tuple[str, ...]) -> None:
@@ -158,17 +158,19 @@ class TestExtractSpatialMetadata:
 class TestStageSingleStore:
     """Covers voxhub_core.staging.stage — single-store happy path."""
 
-    def test_creates_wip_dir_with_store_subdirectory(self, zarr_root_factory, tmp_path):
+    def test_creates_staging_dir_with_store_subdirectory(
+        self, zarr_root_factory, tmp_path
+    ):
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        _stage(root, wip, store_names=['foo'])
-        assert (wip / 'foo').is_dir()
+        staging = tmp_path / 'staging'
+        _stage(root, staging, store_names=['foo'])
+        assert (staging / 'foo').is_dir()
 
     def test_writes_raw_nrrd(self, zarr_root_factory, tmp_path):
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        _stage(root, wip, store_names=['foo'])
-        nrrd_path = wip / 'foo' / 'raw.nrrd'
+        staging = tmp_path / 'staging'
+        _stage(root, staging, store_names=['foo'])
+        nrrd_path = staging / 'foo' / 'raw.nrrd'
         assert nrrd_path.is_file()
         data, header = nrrd.read(str(nrrd_path))
         assert data.size > 0
@@ -178,18 +180,18 @@ class TestStageSingleStore:
         """nrrd.read on _write_nrrd_raw output returns the transpose of the
         source ZYX array (see axis-order note in test_staging.py)."""
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        _stage(root, wip, store_names=['foo'])
+        staging = tmp_path / 'staging'
+        _stage(root, staging, store_names=['foo'])
 
         src_arr = zarr.open_array(root / 'foo.zarr' / 'raw' / 'full', mode='r')
         src = src_arr[:]
-        read_back, _header = nrrd.read(str(wip / 'foo' / 'raw.nrrd'))
+        read_back, _header = nrrd.read(str(staging / 'foo' / 'raw.nrrd'))
         np.testing.assert_array_equal(read_back, np.asarray(src).T)
 
     def test_manifest_structure(self, zarr_root_factory, tmp_path):
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        manifest = _stage(root, wip, store_names=['foo'])
+        staging = tmp_path / 'staging'
+        manifest = _stage(root, staging, store_names=['foo'])
 
         assert list(manifest) == ['foo']
         entry = manifest['foo']
@@ -207,17 +209,17 @@ class TestStageSingleStore:
 
     def test_raw_checksum_is_sha256_hex(self, zarr_root_factory, tmp_path):
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        manifest = _stage(root, wip, store_names=['foo'])
+        staging = tmp_path / 'staging'
+        manifest = _stage(root, staging, store_names=['foo'])
         checksum = manifest['foo']['raw_checksum']
         assert _SHA256_HEX.match(checksum), checksum
 
     def test_checksum_matches_actual_file_contents(self, zarr_root_factory, tmp_path):
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        manifest = _stage(root, wip, store_names=['foo'])
+        staging = tmp_path / 'staging'
+        manifest = _stage(root, staging, store_names=['foo'])
 
-        actual = hashlib.sha256((wip / 'foo' / 'raw.nrrd').read_bytes()).hexdigest()
+        actual = hashlib.sha256((staging / 'foo' / 'raw.nrrd').read_bytes()).hexdigest()
         assert manifest['foo']['raw_checksum'] == f'sha256:{actual}'
 
 
@@ -231,20 +233,20 @@ class TestStageMultipleStores:
 
     def test_stages_all_stores_when_names_none(self, zarr_root_factory, tmp_path):
         root = zarr_root_factory(store_names=['a', 'b', 'c'])
-        wip = tmp_path / 'wip'
-        manifest = _stage(root, wip, store_names=None)
+        staging = tmp_path / 'staging'
+        manifest = _stage(root, staging, store_names=None)
         assert sorted(manifest) == ['a', 'b', 'c']
         for name in ('a', 'b', 'c'):
-            assert (wip / name / 'raw.nrrd').is_file()
+            assert (staging / name / 'raw.nrrd').is_file()
 
     def test_stages_subset_when_names_provided(self, zarr_root_factory, tmp_path):
         root = zarr_root_factory(store_names=['a', 'b', 'c'])
-        wip = tmp_path / 'wip'
-        manifest = _stage(root, wip, store_names=['a', 'c'])
+        staging = tmp_path / 'staging'
+        manifest = _stage(root, staging, store_names=['a', 'c'])
         assert sorted(manifest) == ['a', 'c']
-        assert (wip / 'a').is_dir()
-        assert (wip / 'c').is_dir()
-        assert not (wip / 'b').exists()
+        assert (staging / 'a').is_dir()
+        assert (staging / 'c').is_dir()
+        assert not (staging / 'b').exists()
 
     def test_nonexistent_store_name_raises(self, zarr_root_factory, tmp_path):
         """All requested names missing → FileNotFoundError.
@@ -253,17 +255,17 @@ class TestStageMultipleStores:
         leaves zero stores, ``stage()`` raises, not silently-skips.
         """
         root = zarr_root_factory(store_names=['a'])
-        wip = tmp_path / 'wip'
+        staging = tmp_path / 'staging'
         with pytest.raises(FileNotFoundError, match='No matching stores'):
-            _stage(root, wip, store_names=['missing'])
+            _stage(root, staging, store_names=['missing'])
 
     def test_partial_name_match_stages_intersection(self, zarr_root_factory, tmp_path):
         """Mix of valid and missing names → only valid ones are staged."""
         root = zarr_root_factory(store_names=['a', 'b'])
-        wip = tmp_path / 'wip'
-        manifest = _stage(root, wip, store_names=['a', 'missing'])
+        staging = tmp_path / 'staging'
+        manifest = _stage(root, staging, store_names=['a', 'missing'])
         assert list(manifest) == ['a']
-        assert not (wip / 'missing').exists()
+        assert not (staging / 'missing').exists()
 
 
 # ===========================================================================
@@ -281,10 +283,10 @@ class TestStageCompressionFlag:
         payload following the blank-line header terminator.
         """
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        _stage(root, wip, store_names=['foo'], compress=True)
+        staging = tmp_path / 'staging'
+        _stage(root, staging, store_names=['foo'], compress=True)
 
-        payload = (wip / 'foo' / 'raw.nrrd').read_bytes()
+        payload = (staging / 'foo' / 'raw.nrrd').read_bytes()
         blank_line = payload.index(b'\n\n')
         raw_block = payload[blank_line + 2 :]
         assert raw_block[:2] == b'\x1f\x8b', raw_block[:4]
@@ -295,13 +297,13 @@ class TestStageCompressionFlag:
         """Staging the same store compressed vs raw → identical data once
         decoded by nrrd.read."""
         root = zarr_root_factory(store_names=['foo'])
-        wip_raw = tmp_path / 'wip_raw'
-        wip_gz = tmp_path / 'wip_gz'
-        _stage(root, wip_raw, store_names=['foo'], compress=False)
-        _stage(root, wip_gz, store_names=['foo'], compress=True)
+        staging_raw = tmp_path / 'staging_raw'
+        staging_gz = tmp_path / 'staging_gz'
+        _stage(root, staging_raw, store_names=['foo'], compress=False)
+        _stage(root, staging_gz, store_names=['foo'], compress=True)
 
-        a, _ = nrrd.read(str(wip_raw / 'foo' / 'raw.nrrd'))
-        b, _ = nrrd.read(str(wip_gz / 'foo' / 'raw.nrrd'))
+        a, _ = nrrd.read(str(staging_raw / 'foo' / 'raw.nrrd'))
+        b, _ = nrrd.read(str(staging_gz / 'foo' / 'raw.nrrd'))
         np.testing.assert_array_equal(a, b)
 
 
@@ -315,40 +317,42 @@ class TestStageForceAndErrors:
 
     def test_refuses_to_overwrite_without_force(self, zarr_root_factory, tmp_path):
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        wip.mkdir()
-        (wip / 'preexisting.txt').write_text('hi')
+        staging = tmp_path / 'staging'
+        staging.mkdir()
+        (staging / 'preexisting.txt').write_text('hi')
 
         with pytest.raises(FileExistsError, match='already exists'):
-            _stage(root, wip, store_names=['foo'])
+            _stage(root, staging, store_names=['foo'])
 
-    def test_force_overwrites_existing_wip_contents(self, zarr_root_factory, tmp_path):
-        """force=True → stage succeeds even when wip_dir already exists.
+    def test_force_overwrites_existing_staging_contents(
+        self, zarr_root_factory, tmp_path
+    ):
+        """force=True → stage succeeds even when staging_dir already exists.
 
         ``stage()`` does not currently *erase* old files on force — it just
         bypasses the existence check. This test pins that exact semantics.
         """
         root = zarr_root_factory(store_names=['foo'])
-        wip = tmp_path / 'wip'
-        wip.mkdir()
-        preexisting = wip / 'preexisting.txt'
+        staging = tmp_path / 'staging'
+        staging.mkdir()
+        preexisting = staging / 'preexisting.txt'
         preexisting.write_text('hi')
 
-        manifest = _stage(root, wip, store_names=['foo'], force=True)
+        manifest = _stage(root, staging, store_names=['foo'], force=True)
         assert 'foo' in manifest
-        assert (wip / 'foo' / 'raw.nrrd').is_file()
+        assert (staging / 'foo' / 'raw.nrrd').is_file()
         assert preexisting.exists()
 
     def test_missing_zarr_root_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError, match='Zarr root directory not found'):
-            _stage(tmp_path / 'missing', tmp_path / 'wip')
+            _stage(tmp_path / 'missing', tmp_path / 'staging')
 
     def test_empty_zarr_root_raises(self, tmp_path):
         """Directory exists but contains no .zarr stores → FileNotFoundError."""
         empty = tmp_path / 'empty'
         empty.mkdir()
         with pytest.raises(FileNotFoundError, match=r'No \.zarr stores found'):
-            _stage(empty, tmp_path / 'wip')
+            _stage(empty, tmp_path / 'staging')
 
     def test_store_without_raw_full_is_skipped_not_raised(self, tmp_path):
         """A corrupted store (raw/full missing) is reported as an error by
@@ -364,5 +368,5 @@ class TestStageForceAndErrors:
         shutil.rmtree(broken / 'raw')
         del good
 
-        manifest = _stage(root, tmp_path / 'wip')
+        manifest = _stage(root, tmp_path / 'staging')
         assert list(manifest) == ['good']

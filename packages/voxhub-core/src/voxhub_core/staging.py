@@ -1,7 +1,7 @@
 """Stage zarr volumes as NRRD files for 3D Slicer annotation.
 
 Reads zarr stores, extracts spatial metadata, and writes NRRD files
-to a WIP directory for annotation in 3D Slicer.
+to a staging directory for annotation in 3D Slicer.
 """
 
 import gzip
@@ -236,27 +236,27 @@ def _compute_sha256(path: Path) -> str:
 
 def stage(
     zarr_root: str | Path,
-    wip_dir: str | Path,
+    staging_dir: str | Path,
     *,
     store_names: list[str] | None = None,
     compress: bool = False,
     force: bool = False,
     console: Console | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Export zarr volumes as NRRD files into a WIP directory.
+    """Export zarr volumes as NRRD files into a staging directory.
 
     Parameters
     ----------
     zarr_root : str | Path
         Directory containing ``.zarr`` stores.
-    wip_dir : str | Path
-        Target WIP directory to create.
+    staging_dir : str | Path
+        Target staging directory to create.
     store_names : list[str] | None
         Specific store names to stage.  ``None`` stages all.
     compress : bool
         Apply gzip compression to NRRD files.
     force : bool
-        Overwrite existing WIP directory contents.
+        Overwrite existing staging directory contents.
     console : Console | None
         Optional rich Console for output.
 
@@ -268,20 +268,23 @@ def stage(
     Raises
     ------
     FileExistsError
-        If *wip_dir* exists and *force* is False.
+        If *staging_dir* exists and *force* is False.
     FileNotFoundError
         If *zarr_root* does not exist or no stores found.
     """
     zarr_root = Path(zarr_root)
-    wip_dir = Path(wip_dir)
+    staging_dir = Path(staging_dir)
     console = console or Console()
 
     if not zarr_root.is_dir():
         msg = f'Zarr root directory not found: {zarr_root}'
         raise FileNotFoundError(msg)
 
-    if wip_dir.exists() and not force:
-        msg = f'WIP directory already exists: {wip_dir}. Pass force=True to overwrite.'
+    if staging_dir.exists() and not force:
+        msg = (
+            f'Staging directory already exists: {staging_dir}. '
+            f'Pass force=True to overwrite.'
+        )
         raise FileExistsError(msg)
 
     entries = discover_zarr_stores(zarr_root)
@@ -296,7 +299,7 @@ def stage(
             msg = f'No matching stores found for: {store_names}'
             raise FileNotFoundError(msg)
 
-    wip_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir.mkdir(parents=True, exist_ok=True)
 
     store_metadata: dict[str, dict[str, Any]] = {}
 
@@ -317,9 +320,9 @@ def stage(
 
         header = _build_nrrd_header(arr.shape, origin, space_directions)
 
-        store_wip = wip_dir / store_name
-        store_wip.mkdir(parents=True, exist_ok=True)
-        nrrd_path = store_wip / 'raw.nrrd'
+        store_staging = staging_dir / store_name
+        store_staging.mkdir(parents=True, exist_ok=True)
+        nrrd_path = store_staging / 'raw.nrrd'
         _write_nrrd_raw(nrrd_path, volume_data, header, compress=compress)
 
         raw_checksum = _compute_sha256(nrrd_path)
@@ -342,5 +345,7 @@ def stage(
             'staged_at': datetime.now(UTC).isoformat(),
         }
 
-    console.print(f'\n[bold]{len(store_metadata)}[/bold] store(s) staged to {wip_dir}')
+    console.print(
+        f'\n[bold]{len(store_metadata)}[/bold] store(s) staged to {staging_dir}'
+    )
     return store_metadata

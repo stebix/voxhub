@@ -132,7 +132,7 @@ def default_lmk_labels() -> list[str]:
     return ['round_window', 'oval_window', 'cochlear_apex']
 
 
-def build_wip_dir(
+def build_staging_dir(
     root: Path,
     store_name: str,
     *,
@@ -142,7 +142,7 @@ def build_wip_dir(
     lmk_labels: list[str] | None = None,
     lmk_coordinate_system: str = 'LPS',
 ) -> Path:
-    """Build a WIP directory mirroring what ``stage()`` would produce."""
+    """Build a staging directory mirroring what ``stage()`` would produce."""
     store_dir = root / store_name
     store_dir.mkdir(parents=True, exist_ok=True)
 
@@ -164,7 +164,7 @@ def build_wip_dir(
     return root
 
 
-def build_wip_dir_entries(
+def build_staging_dir_entries(
     store_dir: Path,
     *,
     include_seg: bool = True,
@@ -175,10 +175,10 @@ def build_wip_dir_entries(
     lmk_labels: list[str] | None = None,
     lmk_coordinate_system: str = 'LPS',
 ) -> Path:
-    """Populate a per-store subdirectory inside a WIP dir with defaults.
+    """Populate a per-store subdirectory inside a staging dir with defaults.
 
-    Unlike ``build_wip_dir`` this takes the per-store path directly, so it
-    composes cleanly with multi-store fixtures.
+    Unlike ``build_staging_dir`` this takes the per-store path directly, so
+    it composes cleanly with multi-store fixtures.
     """
     store_dir.mkdir(parents=True, exist_ok=True)
 
@@ -210,7 +210,7 @@ def build_wip_dir_entries(
 
 
 def write_remote_manifest(
-    wip_dir: Path,
+    staging_dir: Path,
     *,
     store_names: list[str],
     expected_ontologies: list[str] | None = None,
@@ -222,9 +222,9 @@ def write_remote_manifest(
 ) -> Path:
     """Write a ``.voxhub_manifest.json`` covering the given stores.
 
-    Returns the WIP directory.
+    Returns the staging directory.
     """
-    wip_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir.mkdir(parents=True, exist_ok=True)
     stores = {
         name: RemoteManifestEntry(
             status='pulled',
@@ -246,8 +246,8 @@ def write_remote_manifest(
         pulled_at=datetime.now(UTC).isoformat(),
         stores=stores,
     )
-    manifest.write(wip_dir)
-    return wip_dir
+    manifest.write(staging_dir)
+    return staging_dir
 
 
 def populate_store_annotation(
