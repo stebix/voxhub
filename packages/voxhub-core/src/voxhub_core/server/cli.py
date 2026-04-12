@@ -207,10 +207,10 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
 
     # Create a temp dir for staging.
     session_id = generate_nano_id()
-    if args.wip_dir:
-        wip_dir = Path(args.wip_dir)
+    if args.staging_dir:
+        staging_dir = Path(args.staging_dir)
     else:
-        wip_dir = Path(
+        staging_dir = Path(
             tempfile.mkdtemp(
                 prefix=f'dt-pull-{session_id}-',
             )
@@ -220,7 +220,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         console = Console(stderr=True, quiet=True)
         store_metadata = stage(
             zarr_root,
-            wip_dir,
+            staging_dir,
             store_names=store_names,
             compress=compress,
             force=True,
@@ -237,7 +237,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
             zarr_path = zarr_root / f'{store_name}.zarr'
             src = zarr_path / ann_path
             if src.exists():
-                dst = wip_dir / store_name / ann_path
+                dst = staging_dir / store_name / ann_path
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if src.is_dir():
                     shutil.copytree(src, dst, dirs_exist_ok=True)
@@ -261,14 +261,14 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     log.info(
         'prepare_pull_completed',
         stores=list(store_metadata.keys()),
-        wip_dir=str(wip_dir),
+        staging_dir=str(staging_dir),
         duration_s=round(duration, 3),
     )
 
     _write_dict(
         {
             'protocol_version': PROTOCOL_VERSION,
-            'wip_dir': str(wip_dir),
+            'staging_dir': str(staging_dir),
             'stores': stores_response,
         }
     )
@@ -328,7 +328,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     t0 = time.monotonic()
 
     zarr_root = Path(args.zarr_root)
-    wip_dir = Path(args.wip_dir)
+    staging_dir = Path(args.staging_dir)
     annotator_id = args.annotator_id
     machine_id = args.machine_id
     nano_id = args.nano_id
@@ -338,22 +338,22 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     log.info(
         'integrate_started',
         zarr_root=str(zarr_root),
-        wip_dir=str(wip_dir),
+        staging_dir=str(staging_dir),
         annotator_id=annotator_id,
     )
 
-    # Read the pull manifest from the WIP directory.  The manifest was
+    # Read the pull manifest from the staging directory.  The manifest was
     # written by ``prepare-pull`` and rsync'd alongside the annotation
     # files.  It carries the authoritative ontology declarations.
     try:
-        manifest = RemoteManifest.read(wip_dir)
+        manifest = RemoteManifest.read(staging_dir)
     except FileNotFoundError:
         msg = (
-            f'No pull manifest found in {wip_dir}. '
-            f'The WIP directory must contain .voxhub_manifest.json '
+            f'No pull manifest found in {staging_dir}. '
+            f'The staging directory must contain .voxhub_manifest.json '
             f'from the original pull.'
         )
-        log.error('manifest_missing', wip_dir=str(wip_dir))
+        log.error('manifest_missing', staging_dir=str(staging_dir))
         _write_error('manifest_missing', msg)
         sys.exit(1)
 
@@ -377,7 +377,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
     stores_result: dict[str, dict[str, Any]] = {}
 
-    for store_dir in sorted(wip_dir.iterdir()):
+    for store_dir in sorted(staging_dir.iterdir()):
         if not store_dir.is_dir() or store_dir.name.startswith('.'):
             continue
 
@@ -484,7 +484,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             annotator_id=annotator_id,
                             machine_id=machine_id,
                             nano_id=nano_id,
-                            pull_session_id=wip_dir.name,
+                            pull_session_id=staging_dir.name,
                             ontology=ont_name,
                             ontology_version=ont_version,
                             source_nrrd_checksum=seg_checksum,
@@ -556,7 +556,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             annotator_id=annotator_id,
                             machine_id=machine_id,
                             nano_id=nano_id,
-                            pull_session_id=wip_dir.name,
+                            pull_session_id=staging_dir.name,
                             ontology=ont_name,
                             ontology_version=ont_version,
                             source_nrrd_checksum=lmk_checksum,
@@ -611,15 +611,15 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
 def _run_cleanup(args: argparse.Namespace) -> None:
     log = get_logger(command='cleanup')
-    wip_dir = Path(args.wip_dir)
+    staging_dir = Path(args.staging_dir)
 
-    log.info('cleanup_started', wip_dir=str(wip_dir))
+    log.info('cleanup_started', staging_dir=str(staging_dir))
 
-    if wip_dir.is_dir():
-        shutil.rmtree(wip_dir)
-        log.info('cleanup_completed', wip_dir=str(wip_dir))
+    if staging_dir.is_dir():
+        shutil.rmtree(staging_dir)
+        log.info('cleanup_completed', staging_dir=str(staging_dir))
     else:
-        log.warning('cleanup_not_found', wip_dir=str(wip_dir))
+        log.warning('cleanup_not_found', staging_dir=str(staging_dir))
 
     _write_dict(
         {
@@ -899,7 +899,7 @@ def main() -> None:
     pp.add_argument('zarr_root')
     pp.add_argument('--stores', nargs='*')
     pp.add_argument('--ontologies', nargs='*')
-    pp.add_argument('--wip-dir', default=None)
+    pp.add_argument('--staging-dir', default=None)
     pp.add_argument('--include-existing-annotations', nargs='*')
     pp.add_argument('--compress', action='store_true')
     pp.set_defaults(func=_run_prepare_pull)
@@ -907,7 +907,7 @@ def main() -> None:
     # integrate-annotations
     ia = subparsers.add_parser('integrate-annotations')
     ia.add_argument('zarr_root')
-    ia.add_argument('wip_dir')
+    ia.add_argument('staging_dir')
     ia.add_argument('--annotator-id', required=True)
     ia.add_argument('--machine-id', required=True)
     ia.add_argument('--nano-id', required=True)
@@ -917,7 +917,7 @@ def main() -> None:
 
     # cleanup
     cl = subparsers.add_parser('cleanup')
-    cl.add_argument('wip_dir')
+    cl.add_argument('staging_dir')
     cl.set_defaults(func=_run_cleanup)
 
     # gc

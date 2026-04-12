@@ -1,6 +1,6 @@
 """File transfer via rsync (with scp fallback).
 
-Handles pull and push of WIP directories between local and remote.
+Handles pull and push of staging directories between local and remote.
 """
 
 import subprocess

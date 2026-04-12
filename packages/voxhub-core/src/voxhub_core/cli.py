@@ -100,9 +100,9 @@ def _build_stage_parser(
         help='Directory containing .zarr stores.',
     )
     parser.add_argument(
-        'wip_dir',
+        'staging_dir',
         type=Path,
-        help='Target WIP directory.',
+        help='Target staging directory.',
     )
     parser.add_argument(
         '--stores',
@@ -118,7 +118,7 @@ def _build_stage_parser(
     parser.add_argument(
         '--force',
         action='store_true',
-        help='Overwrite existing WIP directory.',
+        help='Overwrite existing staging directory.',
     )
     parser.set_defaults(func=_run_stage)
 
@@ -128,12 +128,12 @@ def _build_integrate_parser(
 ) -> None:
     parser = subparsers.add_parser(
         'integrate',
-        help='Integrate annotations from WIP directory into zarr.',
+        help='Integrate annotations from staging directory into zarr.',
     )
     parser.add_argument(
-        'wip_dir',
+        'staging_dir',
         type=Path,
-        help='WIP directory with annotations.',
+        help='staging directory with annotations.',
     )
     parser.add_argument(
         'zarr_root',
@@ -230,7 +230,7 @@ def _run_stage(args: argparse.Namespace) -> None:
     try:
         stage(
             args.zarr_root,
-            args.wip_dir,
+            args.staging_dir,
             store_names=args.stores,
             compress=args.compress,
             force=args.force,
@@ -247,7 +247,7 @@ def _run_integrate(args: argparse.Namespace) -> None:
 
     try:
         integrate(
-            args.wip_dir,
+            args.staging_dir,
             args.zarr_root,
             annotator_id=args.annotator_id,
             nano_id=args.nano_id,

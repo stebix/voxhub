@@ -82,19 +82,19 @@ class TestCommandSmoke:
 
     def test_prepare_pull(self, zarr_root_factory, subprocess_server, tmp_path):
         root = zarr_root_factory(('alpha',))
-        wip = tmp_path / 'subproc_wip'
+        staging = tmp_path / 'subproc_staging'
         result = subprocess_server(
             'prepare-pull',
             str(root),
             '--stores',
             'alpha',
-            '--wip-dir',
-            str(wip),
+            '--staging-dir',
+            str(staging),
         )
 
         assert result.returncode == 0, result.stderr
         payload = _parse_json_stdout(result)
-        assert Path(payload['wip_dir']) == wip
+        assert Path(payload['staging_dir']) == staging
         assert 'alpha' in payload['stores']
 
     def test_integrate_annotations_full_roundtrip(
@@ -109,12 +109,12 @@ class TestCommandSmoke:
         argparse, real I/O, and the installed entrypoint.
         """
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_manifest(store_names=['alpha'])
 
         result = subprocess_server(
             'integrate-annotations',
             str(zarr_root),
-            str(wip),
+            str(staging),
             '--annotator-id',
             'alice',
             '--machine-id',
@@ -135,15 +135,15 @@ class TestCommandSmoke:
         assert annotator_dirs[0].name == 'alice-sub12345'
 
     def test_cleanup(self, tmp_path, subprocess_server):
-        wip = tmp_path / 'dt-pull-smoke'
-        wip.mkdir()
-        (wip / 'payload').write_text('x')
+        staging = tmp_path / 'dt-pull-smoke'
+        staging.mkdir()
+        (staging / 'payload').write_text('x')
 
-        result = subprocess_server('cleanup', str(wip))
+        result = subprocess_server('cleanup', str(staging))
 
         assert result.returncode == 0, result.stderr
         assert _parse_json_stdout(result)['status'] == 'ok'
-        assert not wip.exists()
+        assert not staging.exists()
 
     def test_gc(self, tmp_path, subprocess_server):
         """``gc`` scans ``tempfile.gettempdir()``.  Redirect via TMPDIR so
@@ -225,8 +225,8 @@ class TestProtocolContract:
         result = subprocess_server(
             'prepare-pull',
             str(missing_root),
-            '--wip-dir',
-            str(tmp_path / 'wip'),
+            '--staging-dir',
+            str(tmp_path / 'staging'),
         )
 
         assert result.returncode == 1

@@ -42,16 +42,16 @@ class TestRsyncPull:
     def test_pull_appends_trailing_slashes(self, target):
         xfer = RsyncTransfer(target=target)
         with patch('subprocess.run') as mock:
-            xfer.pull('/remote/wip', '/local/wip', progress=False)
+            xfer.pull('/remote/staging', '/local/staging', progress=False)
         cmd = mock.call_args[0][0]
         # Source and dest should have trailing slashes.
-        assert cmd[-1] == '/local/wip/'
-        assert cmd[-2].endswith('/remote/wip/')
+        assert cmd[-1] == '/local/staging/'
+        assert cmd[-2].endswith('/remote/staging/')
 
     def test_pull_existing_trailing_slashes_not_doubled(self, target):
         xfer = RsyncTransfer(target=target)
         with patch('subprocess.run') as mock:
-            xfer.pull('/remote/wip/', '/local/wip/', progress=False)
+            xfer.pull('/remote/staging/', '/local/staging/', progress=False)
         cmd = mock.call_args[0][0]
         assert not cmd[-1].endswith('//')
         assert not cmd[-2].endswith('//')
@@ -80,7 +80,7 @@ class TestRsyncPull:
     def test_pull_source_is_remote(self, target):
         xfer = RsyncTransfer(target=target)
         with patch('subprocess.run') as mock:
-            xfer.pull('/remote/wip', '/local', progress=False)
+            xfer.pull('/remote/staging', '/local', progress=False)
         cmd = mock.call_args[0][0]
         src = cmd[-2]
         assert src.startswith('alice@server:')
@@ -98,10 +98,10 @@ class TestRsyncPush:
     def test_push_local_source_remote_dest(self, target):
         xfer = RsyncTransfer(target=target)
         with patch('subprocess.run') as mock:
-            xfer.push('/local/wip', '/remote/wip', progress=False)
+            xfer.push('/local/staging', '/remote/staging', progress=False)
         cmd = mock.call_args[0][0]
         # Local is source (second-to-last), remote is dest (last).
-        assert cmd[-2] == '/local/wip/'
+        assert cmd[-2] == '/local/staging/'
         assert cmd[-1].startswith('alice@server:')
 
     def test_push_appends_trailing_slashes(self, target):

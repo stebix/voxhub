@@ -1,7 +1,7 @@
 """Local manifest operations for the client.
 
 Thin wrappers around ``voxhub_schema.RemoteManifest`` for reading,
-writing, and updating manifests in WIP directories.
+writing, and updating manifests in staging directories.
 """
 
 from pathlib import Path
@@ -9,13 +9,13 @@ from pathlib import Path
 from voxhub_schema import ManifestStatus, RemoteManifest
 
 
-def read_manifest(wip_dir: str | Path) -> RemoteManifest:
-    """Read the manifest from a WIP directory.
+def read_manifest(staging_dir: str | Path) -> RemoteManifest:
+    """Read the manifest from a staging directory.
 
     Parameters
     ----------
-    wip_dir : str | Path
-        The local WIP directory.
+    staging_dir : str | Path
+        The local staging directory.
 
     Returns
     -------
@@ -26,24 +26,24 @@ def read_manifest(wip_dir: str | Path) -> RemoteManifest:
     FileNotFoundError
         If the manifest file does not exist.
     """
-    return RemoteManifest.read(Path(wip_dir))
+    return RemoteManifest.read(Path(staging_dir))
 
 
-def write_manifest(wip_dir: str | Path, manifest: RemoteManifest) -> None:
-    """Write the manifest to a WIP directory.
+def write_manifest(staging_dir: str | Path, manifest: RemoteManifest) -> None:
+    """Write the manifest to a staging directory.
 
     Parameters
     ----------
-    wip_dir : str | Path
-        The local WIP directory.
+    staging_dir : str | Path
+        The local staging directory.
     manifest : RemoteManifest
         The manifest to write.
     """
-    manifest.write(Path(wip_dir))
+    manifest.write(Path(staging_dir))
 
 
 def update_manifest_status(
-    wip_dir: str | Path,
+    staging_dir: str | Path,
     store_name: str,
     status: ManifestStatus,
 ) -> None:
@@ -51,8 +51,8 @@ def update_manifest_status(
 
     Parameters
     ----------
-    wip_dir : str | Path
-        The local WIP directory.
+    staging_dir : str | Path
+        The local staging directory.
     store_name : str
         Name of the store to update.
     status : ManifestStatus
@@ -63,12 +63,12 @@ def update_manifest_status(
     KeyError
         If the store is not in the manifest.
     """
-    wip_dir = Path(wip_dir)
-    manifest = RemoteManifest.read(wip_dir)
+    staging_dir = Path(staging_dir)
+    manifest = RemoteManifest.read(staging_dir)
 
     if store_name not in manifest.stores:
         msg = f"Store '{store_name}' not found in manifest"
         raise KeyError(msg)
 
     manifest.stores[store_name].status = status
-    manifest.write(wip_dir)
+    manifest.write(staging_dir)

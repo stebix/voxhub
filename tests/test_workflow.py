@@ -47,9 +47,9 @@ def zarr_root(tmp_path):
 
 
 @pytest.fixture
-def wip_dir(tmp_path):
-    """Empty WIP directory for staging / annotation."""
-    d = tmp_path / 'wip'
+def staging_dir(tmp_path):
+    """Empty staging directory for staging / annotation."""
+    d = tmp_path / 'staging'
     d.mkdir()
     return d
 
@@ -111,14 +111,14 @@ def _write_valid_lmk(store_dir):
 class TestSegmentationRoundTrip:
     """zarr → stage → annotate → preflight → integrate → verify."""
 
-    def test_full_cycle(self, zarr_root, wip_dir, inner_ear_ontology):
+    def test_full_cycle(self, zarr_root, staging_dir, inner_ear_ontology):
         # 1. Stage (simulate pull).
-        meta = stage(zarr_root, wip_dir, force=True)
+        meta = stage(zarr_root, staging_dir, force=True)
         assert 'scan-001' in meta
         entry = _manifest_entry_from_stage(meta['scan-001'])
 
         # 2. Write annotation (simulate Slicer).
-        store_dir = wip_dir / 'scan-001'
+        store_dir = staging_dir / 'scan-001'
         seg_path = _write_valid_seg(store_dir, inner_ear_ontology)
 
         # 3. Preflight validation (client-side).
@@ -128,7 +128,7 @@ class TestSegmentationRoundTrip:
 
         # 4. Integrate (server-side).
         result = integrate(
-            wip_dir,
+            staging_dir,
             zarr_root,
             annotator_id='alice',
             nano_id='abcd1234',
@@ -145,13 +145,13 @@ class TestSegmentationRoundTrip:
         assert 'alice-abcd1234' in list(ann_group.group_keys())
 
     def test_preflight_rejects_wrong_ontology_labels(
-        self, zarr_root, wip_dir, inner_ear_ontology
+        self, zarr_root, staging_dir, inner_ear_ontology
     ):
-        meta = stage(zarr_root, wip_dir, force=True)
+        meta = stage(zarr_root, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
 
         # Write seg with labels NOT in the ontology.
-        store_dir = wip_dir / 'scan-001'
+        store_dir = staging_dir / 'scan-001'
         lm = np.zeros(SHAPE, dtype=np.int16)
         lm[0, 0, 0] = 1
         segments = [{'name': 'alien_structure', 'label_value': 1}]
@@ -164,9 +164,9 @@ class TestSegmentationRoundTrip:
         assert 'vestibule' in error_text or 'not defined' in error_text
 
     def test_integration_blocked_by_shape_mismatch(self, zarr_root, tmp_path):
-        wip = tmp_path / 'wip_bad'
-        wip.mkdir()
-        store_dir = wip / 'scan-001'
+        staging = tmp_path / 'staging_bad'
+        staging.mkdir()
+        store_dir = staging / 'scan-001'
         store_dir.mkdir()
 
         # Write seg with wrong shape.
@@ -176,7 +176,7 @@ class TestSegmentationRoundTrip:
 
         with pytest.raises(RuntimeError, match='Validation errors'):
             integrate(
-                wip,
+                staging,
                 zarr_root,
                 annotator_id='alice',
                 nano_id='abcd1234',
@@ -191,8 +191,8 @@ class TestSegmentationRoundTrip:
 class TestLandmarkRoundTrip:
     """zarr → stage → annotate landmarks → preflight → integrate → verify."""
 
-    def test_full_cycle(self, zarr_root, wip_dir, landmark_ontology):
-        meta = stage(zarr_root, wip_dir, force=True)
+    def test_full_cycle(self, zarr_root, staging_dir, landmark_ontology):
+        meta = stage(zarr_root, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
         entry = RemoteManifestEntry(
             status=entry.status,
@@ -204,7 +204,7 @@ class TestLandmarkRoundTrip:
             expected_ontologies=['inner-ear-landmarks'],
         )
 
-        store_dir = wip_dir / 'scan-001'
+        store_dir = staging_dir / 'scan-001'
         lmk_path = _write_valid_lmk(store_dir)
 
         issues = validate_lmk_preflight(lmk_path, entry, landmark_ontology)
@@ -212,7 +212,7 @@ class TestLandmarkRoundTrip:
         assert errors == [], f'Unexpected preflight errors: {errors}'
 
         result = integrate(
-            wip_dir,
+            staging_dir,
             zarr_root,
             annotator_id='bob',
             nano_id='efgh5678',
@@ -225,9 +225,9 @@ class TestLandmarkRoundTrip:
         root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
         assert 'bob-efgh5678' in list(root['annotations'].group_keys())
 
-    def test_ras_landmarks_stored_as_lps(self, zarr_root, wip_dir):
-        stage(zarr_root, wip_dir, force=True)
-        store_dir = wip_dir / 'scan-001'
+    def test_ras_landmarks_stored_as_lps(self, zarr_root, staging_dir):
+        stage(zarr_root, staging_dir, force=True)
+        store_dir = staging_dir / 'scan-001'
 
         # Write landmarks in RAS.
         pts = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
@@ -235,7 +235,7 @@ class TestLandmarkRoundTrip:
         write_mrk_json(store_dir / 'landmarks.mrk.json', pts, labels, 'RAS')
 
         integrate(
-            wip_dir,
+            staging_dir,
             zarr_root,
             annotator_id='carol',
             nano_id='ijkl9012',
@@ -267,14 +267,14 @@ class TestLandmarkRoundTrip:
 class TestSpatialMetadataIntegrity:
     """DICOM attrs → zarr → staging → manifest — no drift."""
 
-    def test_metadata_chain_is_consistent(self, zarr_root, wip_dir):
+    def test_metadata_chain_is_consistent(self, zarr_root, staging_dir):
         # 1. Read attrs from zarr, compute spatial metadata.
         root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
         attrs = dict(root['raw']['full'].attrs)
         origin, dirs, spacing = extract_spatial_metadata(attrs)
 
         # 2. Stage and get metadata.
-        meta = stage(zarr_root, wip_dir, force=True)
+        meta = stage(zarr_root, staging_dir, force=True)
         stage_info = meta['scan-001']
 
         # 3. Verify staging output matches direct extraction.
@@ -286,12 +286,12 @@ class TestSpatialMetadataIntegrity:
         assert stage_info['shape'] == list(root['raw']['full'].shape)
 
     def test_corrupted_origin_caught_by_preflight(
-        self, zarr_root, wip_dir, inner_ear_ontology
+        self, zarr_root, staging_dir, inner_ear_ontology
     ):
-        meta = stage(zarr_root, wip_dir, force=True)
+        meta = stage(zarr_root, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
 
-        store_dir = wip_dir / 'scan-001'
+        store_dir = staging_dir / 'scan-001'
         lm = np.zeros(SHAPE, dtype=np.int16)
         # Write seg with wrong origin (simulates resampled annotation).
         seg_path = write_seg_nrrd(
@@ -316,14 +316,14 @@ class TestSpatialMetadataIntegrity:
 class TestProvenanceCompleteness:
     """After integration + provenance recording, verify metadata."""
 
-    def _integrate_and_record(self, zarr_root, wip_dir, ontology):
+    def _integrate_and_record(self, zarr_root, staging_dir, ontology):
         """Run the full integrate → provenance pipeline, return annotation path."""
-        stage(zarr_root, wip_dir, force=True)
-        store_dir = wip_dir / 'scan-001'
+        stage(zarr_root, staging_dir, force=True)
+        store_dir = staging_dir / 'scan-001'
         _write_valid_seg(store_dir, ontology)
 
         integrate(
-            wip_dir,
+            staging_dir,
             zarr_root,
             annotator_id='alice',
             nano_id='abcd1234',
@@ -354,10 +354,10 @@ class TestProvenanceCompleteness:
         return annotation_path
 
     def test_zarr_attrs_contain_all_provenance_fields(
-        self, zarr_root, wip_dir, inner_ear_ontology
+        self, zarr_root, staging_dir, inner_ear_ontology
     ):
         annotation_path = self._integrate_and_record(
-            zarr_root, wip_dir, inner_ear_ontology
+            zarr_root, staging_dir, inner_ear_ontology
         )
 
         root = zarr.open_group(zarr_root / 'scan-001.zarr', mode='r')
@@ -386,10 +386,10 @@ class TestProvenanceCompleteness:
         assert attrs['pull_session_id'] == 'dt-pull-test'
 
     def test_provenance_jsonl_contains_matching_entry(
-        self, zarr_root, wip_dir, inner_ear_ontology
+        self, zarr_root, staging_dir, inner_ear_ontology
     ):
         annotation_path = self._integrate_and_record(
-            zarr_root, wip_dir, inner_ear_ontology
+            zarr_root, staging_dir, inner_ear_ontology
         )
 
         jsonl_path = zarr_root / '.meta' / 'provenance.jsonl'
@@ -416,12 +416,12 @@ class TestMultiAnnotatorIsolation:
 
     def test_separate_annotation_paths(self, zarr_root, tmp_path):
         # Annotator 1.
-        wip_1 = tmp_path / 'wip_alice'
-        wip_1.mkdir()
-        stage(zarr_root, wip_1, force=True)
-        _write_valid_seg(wip_1 / 'scan-001', load_ontology('inner-ear-structures'))
+        staging_1 = tmp_path / 'staging_alice'
+        staging_1.mkdir()
+        stage(zarr_root, staging_1, force=True)
+        _write_valid_seg(staging_1 / 'scan-001', load_ontology('inner-ear-structures'))
         integrate(
-            wip_1,
+            staging_1,
             zarr_root,
             annotator_id='alice',
             nano_id='aaaa1111',
@@ -429,12 +429,12 @@ class TestMultiAnnotatorIsolation:
         )
 
         # Annotator 2.
-        wip_2 = tmp_path / 'wip_bob'
-        wip_2.mkdir()
-        stage(zarr_root, wip_2, force=True)
-        _write_valid_seg(wip_2 / 'scan-001', load_ontology('inner-ear-structures'))
+        staging_2 = tmp_path / 'staging_bob'
+        staging_2.mkdir()
+        stage(zarr_root, staging_2, force=True)
+        _write_valid_seg(staging_2 / 'scan-001', load_ontology('inner-ear-structures'))
         integrate(
-            wip_2,
+            staging_2,
             zarr_root,
             annotator_id='bob',
             nano_id='bbbb2222',
@@ -450,12 +450,12 @@ class TestMultiAnnotatorIsolation:
         ontology = load_ontology('inner-ear-structures')
 
         for name, nano in [('alice', 'aaaa1111'), ('bob', 'bbbb2222')]:
-            wip = tmp_path / f'wip_{name}'
-            wip.mkdir()
-            stage(zarr_root, wip, force=True)
-            _write_valid_seg(wip / 'scan-001', ontology)
+            staging = tmp_path / f'staging_{name}'
+            staging.mkdir()
+            stage(zarr_root, staging, force=True)
+            _write_valid_seg(staging / 'scan-001', ontology)
             integrate(
-                wip,
+                staging,
                 zarr_root,
                 annotator_id=name,
                 nano_id=nano,
@@ -497,13 +497,13 @@ class TestOntologyEnforcementE2E:
     """Ontology constraints enforced across the full pipeline."""
 
     def test_constrained_missing_required_label(
-        self, zarr_root, wip_dir, inner_ear_ontology
+        self, zarr_root, staging_dir, inner_ear_ontology
     ):
         """Constrained ontology requires cochlea+vestibule+semicircular_canals."""
-        meta = stage(zarr_root, wip_dir, force=True)
+        meta = stage(zarr_root, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
 
-        store_dir = wip_dir / 'scan-001'
+        store_dir = staging_dir / 'scan-001'
         lm = np.zeros(SHAPE, dtype=np.int16)
         lm[0, 0, 0] = 1
         # Only cochlea — missing vestibule and semicircular_canals.
@@ -521,9 +521,9 @@ class TestOntologyEnforcementE2E:
         assert 'vestibule' in error_text or 'semicircular' in error_text
 
     def test_unconstrained_non_sequential_labels(
-        self, zarr_root, wip_dir, unconstrained_ontology
+        self, zarr_root, staging_dir, unconstrained_ontology
     ):
-        meta = stage(zarr_root, wip_dir, force=True)
+        meta = stage(zarr_root, staging_dir, force=True)
         entry = _manifest_entry_from_stage(meta['scan-001'])
         entry = RemoteManifestEntry(
             status=entry.status,
@@ -535,7 +535,7 @@ class TestOntologyEnforcementE2E:
             expected_ontologies=['unconstrained'],
         )
 
-        store_dir = wip_dir / 'scan-001'
+        store_dir = staging_dir / 'scan-001'
         lm = np.zeros(SHAPE, dtype=np.int16)
         lm[0, 0, 0] = 1
         lm[1, 1, 1] = 5  # Non-sequential: jumps from 1 to 5.
@@ -563,8 +563,8 @@ class TestOntologyEnforcementE2E:
 class TestManifestWorkflow:
     """Manifest lifecycle: stage → write → read → update."""
 
-    def test_manifest_round_trip_through_staging(self, zarr_root, wip_dir):
-        meta = stage(zarr_root, wip_dir, force=True)
+    def test_manifest_round_trip_through_staging(self, zarr_root, staging_dir):
+        meta = stage(zarr_root, staging_dir, force=True)
         info = meta['scan-001']
 
         manifest = RemoteManifest(
@@ -577,8 +577,8 @@ class TestManifestWorkflow:
                 'scan-001': _manifest_entry_from_stage(info),
             },
         )
-        write_manifest(wip_dir, manifest)
-        rt = read_manifest(wip_dir)
+        write_manifest(staging_dir, manifest)
+        rt = read_manifest(staging_dir)
 
         assert rt.protocol_version == PROTOCOL_VERSION
         assert rt.pull_session_id == 'dt-pull-test'
@@ -588,8 +588,8 @@ class TestManifestWorkflow:
         assert s.shape == list(SHAPE)
         assert s.raw_checksum.startswith('sha256:')
 
-    def test_manifest_status_lifecycle(self, zarr_root, wip_dir):
-        meta = stage(zarr_root, wip_dir, force=True)
+    def test_manifest_status_lifecycle(self, zarr_root, staging_dir):
+        meta = stage(zarr_root, staging_dir, force=True)
         info = meta['scan-001']
 
         manifest = RemoteManifest(
@@ -602,13 +602,13 @@ class TestManifestWorkflow:
                 'scan-001': _manifest_entry_from_stage(info),
             },
         )
-        write_manifest(wip_dir, manifest)
+        write_manifest(staging_dir, manifest)
 
         # After pull: status is 'pulled'.
-        assert read_manifest(wip_dir).stores['scan-001'].status == 'pulled'
+        assert read_manifest(staging_dir).stores['scan-001'].status == 'pulled'
 
         # After push+integration: update to 'integrated'.
-        update_manifest_status(wip_dir, 'scan-001', 'integrated')
+        update_manifest_status(staging_dir, 'scan-001', 'integrated')
         assert (
-            read_manifest(wip_dir).stores['scan-001'].status == 'integrated'
+            read_manifest(staging_dir).stores['scan-001'].status == 'integrated'
         )

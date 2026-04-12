@@ -291,7 +291,7 @@ class TestConcurrentIntegrateSameStore:
             server_cli._run_integrate_annotations(
                 server_argv(
                     zarr_root=zarr_root,
-                    wip_dir=str(staging),
+                    staging_dir=str(staging),
                     annotator_id='alice',
                     nano_id='ccccdddd',
                 )

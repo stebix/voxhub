@@ -179,10 +179,10 @@ class TestPreparePull:
         server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
 
         payload = parsed_stdout()
-        wip_dir = Path(payload['wip_dir'])
+        staging_dir = Path(payload['staging_dir'])
         try:
-            assert wip_dir.is_dir()
-            assert wip_dir.name.startswith('dt-pull-')
+            assert staging_dir.is_dir()
+            assert staging_dir.name.startswith('dt-pull-')
             entry = payload['stores']['alpha']
             assert entry['raw_checksum'].startswith('sha256:')
             assert entry['shape'] == list(SHAPE)
@@ -191,21 +191,21 @@ class TestPreparePull:
             assert entry['expected_ontologies'] == []
             assert entry['included_annotations'] == []
         finally:
-            shutil.rmtree(wip_dir, ignore_errors=True)
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
-    def test_uses_explicit_wip_dir_when_provided(
+    def test_uses_explicit_staging_dir_when_provided(
         self, zarr_root_factory, tmp_path, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
-        explicit = tmp_path / 'explicit_wip'
+        explicit = tmp_path / 'explicit_staging'
         server_cli._run_prepare_pull(
-            server_argv(zarr_root=root, stores=['alpha'], wip_dir=str(explicit))
+            server_argv(zarr_root=root, stores=['alpha'], staging_dir=str(explicit))
         )
 
         payload = parsed_stdout()
-        assert Path(payload['wip_dir']) == explicit
+        assert Path(payload['staging_dir']) == explicit
         assert explicit.is_dir()
-        assert not payload['wip_dir'].startswith(('/tmp/dt-pull', '/var/'))
+        assert not payload['staging_dir'].startswith(('/tmp/dt-pull', '/var/'))
 
     def test_filters_stores_by_name(self, zarr_root_factory, server_argv, parsed_stdout):
         root = zarr_root_factory(('alpha', 'bravo', 'charlie'))
@@ -217,7 +217,7 @@ class TestPreparePull:
         try:
             assert set(payload['stores']) == {'alpha', 'charlie'}
         finally:
-            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
+            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
     def test_records_expected_ontologies(
         self, zarr_root_factory, server_argv, parsed_stdout
@@ -238,7 +238,7 @@ class TestPreparePull:
                 'inner-ear-landmarks',
             ]
         finally:
-            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
+            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
     def test_copies_existing_annotations_when_requested(
         self, zarr_root_factory, server_argv, parsed_stdout
@@ -256,11 +256,11 @@ class TestPreparePull:
         )
 
         payload = parsed_stdout()
-        wip_dir = Path(payload['wip_dir'])
+        staging_dir = Path(payload['staging_dir'])
         try:
-            assert (wip_dir / 'alpha' / ann_rel).is_dir()
+            assert (staging_dir / 'alpha' / ann_rel).is_dir()
         finally:
-            shutil.rmtree(wip_dir, ignore_errors=True)
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def test_compression_flag_propagates_to_stage(
         self, zarr_root_factory, server_argv, parsed_stdout, monkeypatch
@@ -283,7 +283,7 @@ class TestPreparePull:
         try:
             assert captured['compress'] is True
         finally:
-            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
+            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
     def test_stage_failure_writes_error_envelope_and_exits(
         self, zarr_root_factory, server_argv, parsed_stdout, monkeypatch
@@ -331,19 +331,19 @@ class TestPreparePull:
         try:
             assert payload['protocol_version'] == PROTOCOL_VERSION
         finally:
-            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
+            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
-    def test_wip_dir_is_string_not_path_object(
+    def test_staging_dir_is_string_not_path_object(
         self, zarr_root_factory, server_argv, parsed_stdout
     ):
         root = zarr_root_factory(('alpha',))
         server_cli._run_prepare_pull(server_argv(zarr_root=root, stores=['alpha']))
         payload = parsed_stdout()
         try:
-            assert isinstance(payload['wip_dir'], str)
-            assert not payload['wip_dir'].startswith('PosixPath(')
+            assert isinstance(payload['staging_dir'], str)
+            assert not payload['staging_dir'].startswith('PosixPath(')
         finally:
-            shutil.rmtree(payload['wip_dir'], ignore_errors=True)
+            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
 
 # ===========================================================================
@@ -355,7 +355,7 @@ def _integrate_argv(
     server_argv,
     *,
     zarr_root: Path,
-    wip_dir: Path,
+    staging_dir: Path,
     annotator_id: str = 'alice',
     nano_id: str = 'deadbeef',
     machine_id: str = 'machine-xyz',
@@ -364,7 +364,7 @@ def _integrate_argv(
 ):
     return server_argv(
         zarr_root=zarr_root,
-        wip_dir=str(wip_dir),
+        staging_dir=str(staging_dir),
         annotator_id=annotator_id,
         nano_id=nano_id,
         machine_id=machine_id,
@@ -401,10 +401,10 @@ class TestIntegrateAnnotationsHappy:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_manifest(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -427,7 +427,7 @@ class TestIntegrateAnnotationsHappy:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(
+        staging = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-landmarks'],
             include_seg=False,
@@ -435,7 +435,7 @@ class TestIntegrateAnnotationsHappy:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -453,7 +453,7 @@ class TestIntegrateAnnotationsHappy:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(
+        staging = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             include_seg=True,
@@ -461,7 +461,7 @@ class TestIntegrateAnnotationsHappy:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -478,10 +478,10 @@ class TestIntegrateAnnotationsHappy:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_manifest(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
         parsed_stdout()
 
@@ -515,12 +515,12 @@ class TestIntegrateAnnotationsHappy:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(
+        staging = staging_dir_with_manifest(
             store_names=['alpha'], ontologies=['inner-ear-structures']
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
         parsed_stdout()
 
@@ -538,15 +538,15 @@ class TestIntegrateAnnotationsHappy:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(store_names=['alpha'])
-        seg_file = wip / 'alpha' / 'segmentation.seg.nrrd'
+        staging = staging_dir_with_manifest(store_names=['alpha'])
+        seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
         correct_checksum = server_cli._compute_sha256(seg_file)
 
         server_cli._run_integrate_annotations(
             _integrate_argv(
                 server_argv,
                 zarr_root=zarr_root,
-                wip_dir=wip,
+                staging_dir=staging,
                 checksums=[f'{seg_file.name}:{correct_checksum}'],
             )
         )
@@ -567,13 +567,15 @@ class TestIntegrateAnnotationsErrors:
         self, zarr_root_factory, tmp_path, server_argv, parsed_stdout
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        # WIP exists but lacks .voxhub_manifest.json.
-        bare_wip = tmp_path / 'bare_wip'
-        (bare_wip / 'alpha').mkdir(parents=True)
+        # staging exists but lacks .voxhub_manifest.json.
+        bare_staging = tmp_path / 'bare_staging'
+        (bare_staging / 'alpha').mkdir(parents=True)
 
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_integrate_annotations(
-                _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=bare_wip)
+                _integrate_argv(
+                    server_argv, zarr_root=zarr_root, staging_dir=bare_staging
+                )
             )
         assert excinfo.value.code == 1
 
@@ -589,7 +591,7 @@ class TestIntegrateAnnotationsErrors:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_manifest(store_names=['alpha'])
 
         bogus = f'sha256:{"0" * 64}'
         with pytest.raises(SystemExit) as excinfo:
@@ -597,7 +599,7 @@ class TestIntegrateAnnotationsErrors:
                 _integrate_argv(
                     server_argv,
                     zarr_root=zarr_root,
-                    wip_dir=wip,
+                    staging_dir=staging,
                     checksums=[f'segmentation.seg.nrrd:{bogus}'],
                 )
             )
@@ -616,12 +618,12 @@ class TestIntegrateAnnotationsErrors:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(
+        staging = staging_dir_with_manifest(
             store_names=['alpha'], ontologies=['does-not-exist']
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -641,14 +643,14 @@ class TestIntegrateAnnotationsErrors:
     ):
         zarr_root = zarr_root_factory(('alpha',))
         # Shape mismatch: seg is (5,5,5), manifest declares SHAPE=(10,12,14).
-        wip = staging_dir_with_manifest(
+        staging = staging_dir_with_manifest(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -665,14 +667,16 @@ class TestIntegrateAnnotationsErrors:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(
+        staging = staging_dir_with_manifest(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip, force=True)
+            _integrate_argv(
+                server_argv, zarr_root=zarr_root, staging_dir=staging, force=True
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -687,12 +691,12 @@ class TestIntegrateAnnotationsErrors:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha', 'bravo'))
-        wip = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
+        staging = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
         # Corrupt alpha's seg.nrrd.
-        (wip / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
+        (staging / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -721,16 +725,16 @@ class TestIntegrateAnnotationsMultiStore:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha', 'bravo'))
-        wip = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
+        staging = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
         # Bravo's seg has a shape mismatch.
         write_seg_nrrd(
-            wip / 'bravo' / 'segmentation.seg.nrrd',
+            staging / 'bravo' / 'segmentation.seg.nrrd',
             np.zeros((4, 4, 4), dtype=np.int16),
             [{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -747,10 +751,10 @@ class TestIntegrateAnnotationsMultiStore:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha', 'bravo', 'charlie'))
-        wip = staging_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
+        staging = staging_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -764,13 +768,13 @@ class TestIntegrateAnnotationsMultiStore:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(store_names=['alpha'])
-        hidden = wip / '.hidden'
+        staging = staging_dir_with_manifest(store_names=['alpha'])
+        hidden = staging / '.hidden'
         hidden.mkdir()
         (hidden / 'segmentation.seg.nrrd').write_bytes(b'junk')
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -784,10 +788,10 @@ class TestIntegrateAnnotationsMultiStore:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(store_names=['alpha', 'orphan'])
+        staging = staging_dir_with_manifest(store_names=['alpha', 'orphan'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         payload = parsed_stdout()
@@ -811,7 +815,7 @@ class TestIntegrateAnnotationsOntology:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        wip = staging_dir_with_manifest(
+        staging = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             include_seg=True,
@@ -819,7 +823,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         annotations = parsed_stdout()['stores']['alpha']['annotations']
@@ -837,7 +841,7 @@ class TestIntegrateAnnotationsOntology:
         zarr_root = zarr_root_factory(('alpha',))
         # Pin the documented behavior at server/cli.py:446 — the first
         # matching segmentation ontology wins.
-        wip = staging_dir_with_manifest(
+        staging = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=[
                 'inner-ear-structures',
@@ -846,7 +850,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -860,8 +864,8 @@ class TestIntegrateAnnotationsOntology:
         parsed_stdout,
     ):
         zarr_root = zarr_root_factory(('alpha',))
-        # Only a landmarks ontology declared, but WIP ships a segmentation.
-        wip = staging_dir_with_manifest(
+        # Only a landmarks ontology declared, but staging ships a segmentation.
+        staging = staging_dir_with_manifest(
             store_names=['alpha'],
             ontologies=['inner-ear-landmarks'],
             include_seg=True,
@@ -869,7 +873,7 @@ class TestIntegrateAnnotationsOntology:
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, zarr_root=zarr_root, wip_dir=wip)
+            _integrate_argv(server_argv, zarr_root=zarr_root, staging_dir=staging)
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -887,23 +891,23 @@ class TestIntegrateAnnotationsOntology:
 class TestCleanup:
     """Covers voxhub_core.server.cli._run_cleanup."""
 
-    def test_removes_existing_wip_dir(self, tmp_path, server_argv, parsed_stdout):
-        wip = tmp_path / 'dt-pull-abc'
-        wip.mkdir()
-        (wip / 'payload').write_text('data')
+    def test_removes_existing_staging_dir(self, tmp_path, server_argv, parsed_stdout):
+        staging = tmp_path / 'dt-pull-abc'
+        staging.mkdir()
+        (staging / 'payload').write_text('data')
 
-        server_cli._run_cleanup(server_argv(wip_dir=str(wip)))
+        server_cli._run_cleanup(server_argv(staging_dir=str(staging)))
 
         payload = parsed_stdout()
         assert payload['status'] == 'ok'
-        assert not wip.exists()
+        assert not staging.exists()
 
-    def test_noop_when_wip_dir_missing(
+    def test_noop_when_staging_dir_missing(
         self, tmp_path, server_argv, parsed_stdout, capsys
     ):
         missing = tmp_path / 'does-not-exist'
 
-        server_cli._run_cleanup(server_argv(wip_dir=str(missing)))
+        server_cli._run_cleanup(server_argv(staging_dir=str(missing)))
 
         # Reading stderr first would consume the JSON stdout too, so we
         # parse stdout through the fixture which calls readouterr().
@@ -915,14 +919,16 @@ class TestCleanup:
         'documented concern from docs/testing/server-cli.md §4.4',
         strict=True,
     )
-    def test_refuses_to_remove_non_wip_path(self, tmp_path, server_argv, parsed_stdout):
-        # A path that looks nothing like a WIP directory (no dt-* prefix,
+    def test_refuses_to_remove_non_staging_path(
+        self, tmp_path, server_argv, parsed_stdout
+    ):
+        # A path that looks nothing like a staging directory (no dt-* prefix,
         # not under system tmpdir) should be refused.  If this xfail ever
         # flips to passing, _run_cleanup now rejects suspicious paths.
         suspicious = tmp_path / 'user-data'
         suspicious.mkdir()
 
-        server_cli._run_cleanup(server_argv(wip_dir=str(suspicious)))
+        server_cli._run_cleanup(server_argv(staging_dir=str(suspicious)))
 
         # We expect either a non-ok status OR the directory to remain.
         payload = parsed_stdout()

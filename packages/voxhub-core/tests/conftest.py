@@ -166,7 +166,7 @@ _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
     # prepare-pull
     'stores': None,
     'ontologies': None,
-    'wip_dir': None,
+    'staging_dir': None,
     'include_existing_annotations': None,
     'compress': False,
     # integrate-annotations
@@ -191,7 +191,7 @@ def server_argv() -> Callable[..., argparse.Namespace]:
         fields = dict(_DEFAULT_NAMESPACE_FIELDS)
         fields.update(overrides)
         # Normalise Path objects to str (argparse gives str too).
-        for key in ('zarr_root', 'wip_dir'):
+        for key in ('zarr_root', 'staging_dir'):
             val = fields.get(key)
             if isinstance(val, Path):
                 fields[key] = str(val)
