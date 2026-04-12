@@ -156,7 +156,7 @@ because production concurrency is cross-process only (SSH spawns a fresh
 This is the area where the implicit POSIX atomicity assumption lives.
 
 - `test_two_different_stores_append_single_jsonl_concurrently` — two
-  stores under the same zarr_root, each gets an integrate in parallel
+  stores under the same stores_dir, each gets an integrate in parallel
   → both provenance entries land in `.meta/provenance.jsonl`, both
   lines parse as valid JSON, no interleaved/truncated lines.
 - `test_high_concurrency_jsonl_integrity` — 10 concurrent appends to

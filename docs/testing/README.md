@@ -78,7 +78,7 @@ ontology fixtures and single-store builders. The new tests require extensions:
 
 ### New fixtures (to add to `conftest.py`)
 
-- `zarr_root_factory` — pytest fixture producing a `tmp_path` containing one
+- `stores_dir_factory` — pytest fixture producing a `tmp_path` containing one
   or more zarr stores built via `create_zarr_store`. Parameterized on store
   count and on whether existing annotations are pre-populated.
 - `staging_dir_with_manifest` — builds a staging directory complete with a valid
@@ -94,8 +94,6 @@ ontology fixtures and single-store builders. The new tests require extensions:
 
 ### New builder helpers (to add to `_core_helpers.py`)
 
-- `create_zarr_root(root_path, store_specs)` — build multiple stores under a
-  single parent directory in one call.
 - `write_remote_manifest(staging_dir, store_names, ...)` — thin wrapper around
   `RemoteManifest.write()` with sensible defaults.
 - `write_provenance_jsonl(path, entries)` — write a synthetic provenance JSONL

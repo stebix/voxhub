@@ -48,9 +48,9 @@ One smoke test per command is enough at this layer.
 
 Beyond the existing `create_zarr_store` helper, these tests need:
 
-- `zarr_root_factory(store_count=1, with_annotations=False)` — builds a
+- `stores_dir_factory(store_count=1, with_annotations=False)` — builds a
   `tmp_path / 'stores'` directory containing N zarr stores.
-- `staging_dir_with_manifest(zarr_root, store_names, ontologies=...)` — builds a
+- `staging_dir_with_manifest(store_names, ontologies=...)` — builds a
   staging directory that looks like the output of `prepare-pull`, including a
   valid `.voxhub_manifest.json` written via `RemoteManifest.write()`.
 - `server_argv(**kwargs)` — returns an `argparse.Namespace` with defaults
@@ -89,7 +89,7 @@ Beyond the existing `create_zarr_store` helper, these tests need:
 - `test_store_missing_spatial_metadata` — store has `raw/full` but attrs
   lack `ImagePositionPatient` / `PixelSpacing` → entry has `error: 'Missing
   spatial metadata'`, annotations still populated.
-- `test_nonexistent_zarr_root` — the handler is called with a
+- `test_nonexistent_stores_dir` — the handler is called with a
   ``stores_dir`` that doesn't exist → empty stores list (discover
   returns nothing), not a crash.
 
@@ -185,7 +185,7 @@ This is the largest and most complex handler. Split the class by concern.
   response stores dict order matches `sorted(staging_dir.iterdir())`.
 - `test_skips_hidden_directories` — staging has `.hidden/` → ignored.
 - `test_skips_directories_without_matching_zarr_store` — staging has
-  `orphan/seg.nrrd` but no `orphan.zarr` in zarr_root → silently skipped
+  `orphan/seg.nrrd` but no `orphan.zarr` in stores_dir → silently skipped
   (verify current behavior, document).
 
 #### `TestIntegrateAnnotations_Ontology`

@@ -35,7 +35,7 @@ error signal.
 
 ## 2. Fixtures required
 
-- `zarr_root_factory` — same fixture as `server-cli.md`; shared.
+- `stores_dir_factory` — same fixture as `server-cli.md`; shared.
 - `create_zarr_store_with_annotations(path, annotator_specs)` — extends
   the existing `create_zarr_store` helper to also pre-populate annotations
   under the annotator-scoped path convention. Signature sketch:
@@ -168,7 +168,7 @@ and `extract_spatial_metadata()`.
 ### 4.3 `TestStageMultipleStores`
 
 - `test_stages_all_stores_when_names_none` — `store_names=None` → all
-  stores in the zarr_root are staged.
+  stores in the stores directory are staged.
 - `test_stages_subset_when_names_provided` — `store_names=['a', 'c']`
   → only those two appear in manifest and on disk.
 - `test_nonexistent_store_name_behavior` — `store_names=['missing']`
@@ -189,7 +189,7 @@ and `extract_spatial_metadata()`.
   with a file that would conflict → `FileExistsError`.
 - `test_force_overwrites_existing_staging_contents` — same setup but
   `force=True` → succeeds, old contents gone.
-- `test_missing_zarr_root_raises` — `zarr_root` doesn't exist →
+- `test_missing_stores_dir_raises` — `stores_dir` doesn't exist →
   `FileNotFoundError`.
 - `test_zarr_store_without_raw_full_raises_or_skips` — store lacks
   `raw/full` → document behavior, pin it down.
