@@ -2,7 +2,7 @@
 # healthcheck.sh — Operational status check for the voxhub server.
 #
 # Usage:
-#   sudo ./healthcheck.sh --zarr-root /mnt/storage/voxhub/data
+#   sudo ./healthcheck.sh --stores-dir /mnt/storage/voxhub/data
 #   sudo ./healthcheck.sh                    # reads from server.toml
 #
 # Runs the voxhub-server healthcheck, checks disk space, and verifies the GC
@@ -22,7 +22,7 @@ warn() { printf "  ${YELLOW}WARN${RESET}  %s\n" "$*"; }
 err()  { printf "  ${RED}FAIL${RESET}  %s\n" "$*"; ERRORS=$((ERRORS + 1)); }
 
 VOXHUB_USER="voxhub"
-ZARR_ROOT=""
+STORES_DIR=""
 ERRORS=0
 
 # ---------------------------------------------------------------------------
@@ -31,19 +31,19 @@ ERRORS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --zarr-root) ZARR_ROOT="$2"; shift 2 ;;
+        --stores-dir) STORES_DIR="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: sudo $0 [--zarr-root <path>]"
+            echo "Usage: sudo $0 [--stores-dir <path>]"
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
-# If no --zarr-root, try to infer from recent invocations or just require it
-if [[ -z "$ZARR_ROOT" ]]; then
-    echo "Usage: sudo $0 --zarr-root <path>"
-    echo "  (--zarr-root is required)"
+# If no --stores-dir, try to infer from recent invocations or just require it
+if [[ -z "$STORES_DIR" ]]; then
+    echo "Usage: sudo $0 --stores-dir <path>"
+    echo "  (--stores-dir is required)"
     exit 1
 fi
 
@@ -69,7 +69,7 @@ fi
 printf "\n${CYAN}Server healthcheck${RESET}\n"
 
 if command -v voxhub-server &>/dev/null; then
-    HC_OUTPUT=$(sudo -u "$VOXHUB_USER" voxhub-server healthcheck "$ZARR_ROOT" 2>&1) && HC_EXIT=0 || HC_EXIT=$?
+    HC_OUTPUT=$(sudo -u "$VOXHUB_USER" voxhub-server healthcheck 2>&1) && HC_EXIT=0 || HC_EXIT=$?
     if [[ $HC_EXIT -eq 0 ]]; then
         pass "voxhub-server healthcheck passed"
     else
@@ -86,8 +86,8 @@ fi
 
 printf "\n${CYAN}Disk space${RESET}\n"
 
-if [[ -d "$ZARR_ROOT" ]]; then
-    DISK_INFO=$(df -h "$ZARR_ROOT" | tail -1)
+if [[ -d "$STORES_DIR" ]]; then
+    DISK_INFO=$(df -h "$STORES_DIR" | tail -1)
     USAGE_PCT=$(echo "$DISK_INFO" | awk '{print $5}' | tr -d '%')
     AVAIL=$(echo "$DISK_INFO" | awk '{print $4}')
     MOUNT=$(echo "$DISK_INFO" | awk '{print $6}')
@@ -100,7 +100,7 @@ if [[ -d "$ZARR_ROOT" ]]; then
         pass "Disk usage ${USAGE_PCT}% on $MOUNT ($AVAIL available)"
     fi
 else
-    err "Zarr root not found: $ZARR_ROOT"
+    err "Stores directory not found: $STORES_DIR"
 fi
 
 # ---------------------------------------------------------------------------

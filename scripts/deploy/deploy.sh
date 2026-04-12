@@ -2,9 +2,9 @@
 # deploy.sh — One-shot provisioning of a voxhub server on Debian 13 (trixie).
 #
 # Usage:
-#   sudo ./deploy.sh --zarr-root /mnt/storage/voxhub/data
-#   sudo ./deploy.sh --zarr-root /mnt/storage/voxhub/data --repo-url git@github.com:org/voxhub.git
-#   sudo ./deploy.sh --zarr-root /mnt/storage/voxhub/data --dry-run
+#   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data
+#   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --repo-url git@github.com:org/voxhub.git
+#   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --dry-run
 #
 # Idempotent — safe to re-run.  Re-running pulls latest code, re-syncs the
 # venv, and re-validates.
@@ -37,7 +37,7 @@ step() {
 # Defaults
 # ---------------------------------------------------------------------------
 
-ZARR_ROOT=""
+STORES_DIR=""
 REPO_URL="https://github.com/jnickla1/voxhub.git"
 BRANCH="main"
 DRY_RUN=false
@@ -53,10 +53,10 @@ STEP_NUM=0
 
 usage() {
     cat <<EOF
-Usage: sudo $0 --zarr-root <path> [OPTIONS]
+Usage: sudo $0 --stores-dir <path> [OPTIONS]
 
 Options:
-  --zarr-root <path>     Path to the zarr store directory (required)
+  --stores-dir <path>    Path to the directory of zarr stores (required)
   --repo-url <url>       Git clone URL (default: $REPO_URL)
   --branch <name>        Branch to deploy (default: $BRANCH)
   --dry-run              Show what would be done without making changes
@@ -67,7 +67,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --zarr-root)   ZARR_ROOT="$2"; shift 2 ;;
+        --stores-dir)  STORES_DIR="$2"; shift 2 ;;
         --repo-url)    REPO_URL="$2"; shift 2 ;;
         --branch)      BRANCH="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=true; shift ;;
@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -z "$ZARR_ROOT" ]] && fail "--zarr-root is required"
+[[ -z "$STORES_DIR" ]] && fail "--stores-dir is required"
 [[ "$EUID" -ne 0 ]]   && fail "This script must be run as root (or via sudo)"
 
 if $DRY_RUN; then
@@ -265,29 +265,29 @@ else
 fi
 
 # ===================================================================
-# Step 8: Prepare zarr root
+# Step 8: Prepare stores directory
 # ===================================================================
-step "Prepare zarr root directory"
+step "Prepare stores directory"
 
-# Check if zarr root is on a mount — warn if mount isn't active
-ZARR_MOUNT=$(df --output=target "$ZARR_ROOT" 2>/dev/null | tail -1 || true)
-if [[ -n "$ZARR_MOUNT" && "$ZARR_MOUNT" != "/" ]]; then
-    info "Zarr root is on mount: $ZARR_MOUNT"
-    if ! grep -qsF "$ZARR_MOUNT" /etc/fstab; then
-        warn "Mount $ZARR_MOUNT is NOT in /etc/fstab — it may not survive a reboot"
+# Check if stores directory is on a mount — warn if mount isn't active
+STORES_MOUNT=$(df --output=target "$STORES_DIR" 2>/dev/null | tail -1 || true)
+if [[ -n "$STORES_MOUNT" && "$STORES_MOUNT" != "/" ]]; then
+    info "Stores directory is on mount: $STORES_MOUNT"
+    if ! grep -qsF "$STORES_MOUNT" /etc/fstab; then
+        warn "Mount $STORES_MOUNT is NOT in /etc/fstab — it may not survive a reboot"
     fi
 fi
 
-if [[ -d "$ZARR_ROOT" ]]; then
-    skip "Zarr root directory ($ZARR_ROOT)"
+if [[ -d "$STORES_DIR" ]]; then
+    skip "Stores directory ($STORES_DIR)"
 else
-    info "Creating $ZARR_ROOT"
-    run mkdir -p "$ZARR_ROOT"
+    info "Creating $STORES_DIR"
+    run mkdir -p "$STORES_DIR"
 fi
 
-run mkdir -p "$ZARR_ROOT/.meta"
-run chown -R "$VOXHUB_USER:$VOXHUB_USER" "$ZARR_ROOT"
-ok "Zarr root ready at $ZARR_ROOT"
+run mkdir -p "$STORES_DIR/.meta"
+run chown -R "$VOXHUB_USER:$VOXHUB_USER" "$STORES_DIR"
+ok "Stores directory ready at $STORES_DIR"
 
 # ===================================================================
 # Step 9: Server configuration (TOML)
@@ -304,7 +304,7 @@ log_backup_count = 10
 stderr_level = \"WARNING\"
 
 [storage]
-stores_dir = \"$ZARR_ROOT\""
+stores_dir = \"$STORES_DIR\""
 
 if [[ -f "$CONFIG_FILE" ]]; then
     skip "Server config ($CONFIG_FILE)"
@@ -380,8 +380,8 @@ step "Run healthcheck"
 if $DRY_RUN; then
     ok "(dry-run) healthcheck skipped"
 else
-    info "Running: voxhub-server healthcheck $ZARR_ROOT"
-    if sudo -u "$VOXHUB_USER" /usr/local/bin/voxhub-server healthcheck "$ZARR_ROOT"; then
+    info "Running: voxhub-server healthcheck"
+    if sudo -u "$VOXHUB_USER" /usr/local/bin/voxhub-server healthcheck; then
         ok "Healthcheck passed"
     else
         warn "Healthcheck reported issues (see output above) — may be expected on fresh install"
@@ -397,7 +397,7 @@ printf "${BOLD}${GREEN}═══════════════════
 
 cat <<EOF
   Install dir:   $INSTALL_DIR
-  Zarr root:     $ZARR_ROOT
+  Stores dir:    $STORES_DIR
   Log dir:       $LOG_DIR
   Server config: $CONFIG_FILE
   SSH config:    $SSHD_CONF
@@ -408,7 +408,7 @@ cat <<EOF
        sudo ./add-annotator.sh <name> <pubkey.pub>
 
     2. Annotators connect with:
-       voxhub pull $VOXHUB_USER@<server-ip>:$ZARR_ROOT ./local_staging
+       voxhub pull $VOXHUB_USER@<server-ip> ./local_staging
        voxhub push ./local_staging
 
 EOF

@@ -111,7 +111,7 @@ all three subcommands that take one.
   the only non-reproducible artifact on this system (raw volumes can be re-exported
   from DICOM sources). **Recommendation:** turn on Hetzner snapshot backups (~20%
   of instance cost) *and* add a nightly `rsync -a --link-dest` of
-  `$ZARR_ROOT/.meta/provenance.jsonl` + `$ZARR_ROOT/*/annotations/` to a second
+  `$STORES_DIR/.meta/provenance.jsonl` + `$STORES_DIR/*/annotations/` to a second
   location. `.meta/provenance.jsonl` is the audit log — back it up separately, it's
   small and invaluable.
 
@@ -186,7 +186,7 @@ all three subcommands that take one.
 
 For **2-5 annotators, typical CT volumes ≤ 400 MB uncompressed**:
 
-- **Minimum:** CX22 (2 vCPU, 4 GB, 40 GB disk) + attached volume for `$ZARR_ROOT`.
+- **Minimum:** CX22 (2 vCPU, 4 GB, 40 GB disk) + attached volume for `$STORES_DIR`.
   Works but will be tight: a single large push holds ~400 MB resident, and
   log+tmp+zarr competes for the 40 GB local disk.
 - **Sweet spot:** **CX32 (4 vCPU, 8 GB, 80 GB disk) + a 100-200 GB volume mounted
@@ -211,7 +211,7 @@ Ordered, do-this-before-annotators-touch-it:
 3. **Attach a Hetzner volume, add it to `/etc/fstab`, mount it at
    `/mnt/storage/voxhub`.** Verify with `findmnt`.
 4. **Enable Hetzner daily snapshots** on the instance + volume.
-5. **Run `sudo ./scripts/deploy/deploy.sh --zarr-root /mnt/storage/voxhub/data`**
+5. **Run `sudo ./scripts/deploy/deploy.sh --stores-dir /mnt/storage/voxhub/data`**
    (dry-run first).
 6. **Add one test annotator:** `sudo ./scripts/deploy/add-annotator.sh alice alice.pub`.
 7. **Smoke test from the client box:**
