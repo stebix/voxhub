@@ -344,7 +344,7 @@ class TestStageForceAndErrors:
         assert preexisting.exists()
 
     def test_missing_zarr_root_raises(self, tmp_path):
-        with pytest.raises(FileNotFoundError, match='Zarr root directory not found'):
+        with pytest.raises(FileNotFoundError, match='Stores directory not found'):
             _stage(tmp_path / 'missing', tmp_path / 'staging')
 
     def test_empty_zarr_root_raises(self, tmp_path):

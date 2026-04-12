@@ -429,7 +429,7 @@ class TestConcurrentProvenanceAppend:
         ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
         targets = [
             {
-                'zarr_root': zarr_root,
+                'stores_dir': zarr_root,
                 'store_name': name,
                 'annotation_path': ann_path,
                 'annotator_id': f'annot{i:02d}',
@@ -481,7 +481,7 @@ class TestConcurrentProvenanceAppend:
 
         targets = [
             {
-                'zarr_root': zarr_root,
+                'stores_dir': zarr_root,
                 'store_name': name,
                 'annotation_path': ann_path,
                 'annotator_id': f'big{i}',
@@ -527,7 +527,7 @@ class TestConcurrentProvenanceAppend:
         ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
         targets = [
             {
-                'zarr_root': zarr_root,
+                'stores_dir': zarr_root,
                 'store_name': name,
                 'annotation_path': ann_path,
                 'annotator_id': f'stress{i:03d}',

@@ -236,7 +236,7 @@ def _check_landmark_coherence(
 
 
 def audit(
-    zarr_root: str | Path,
+    stores_dir: str | Path,
     *,
     ontology_filter: str | None = None,
     store_names: list[str] | None = None,
@@ -246,7 +246,7 @@ def audit(
 
     Parameters
     ----------
-    zarr_root : str | Path
+    stores_dir : str | Path
         Directory containing ``.zarr`` stores.
     ontology_filter : str | None
         If set, only check annotations for this ontology.
@@ -259,10 +259,10 @@ def audit(
     -------
     list[CoherenceIssue]
     """
-    zarr_root = Path(zarr_root)
+    stores_dir = Path(stores_dir)
     console = console or Console()
 
-    entries = discover_zarr_stores(zarr_root)
+    entries = discover_zarr_stores(stores_dir)
 
     if store_names is not None:
         name_set = set(store_names)

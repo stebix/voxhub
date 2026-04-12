@@ -95,7 +95,7 @@ def _build_stage_parser(
         help='Export zarr volumes as NRRD for annotation.',
     )
     parser.add_argument(
-        'zarr_root',
+        'stores_dir',
         type=Path,
         help='Directory containing .zarr stores.',
     )
@@ -136,7 +136,7 @@ def _build_integrate_parser(
         help='staging directory with annotations.',
     )
     parser.add_argument(
-        'zarr_root',
+        'stores_dir',
         type=Path,
         help='Directory containing .zarr stores.',
     )
@@ -176,7 +176,7 @@ def _build_audit_parser(
         help='Audit cross-store annotation coherence.',
     )
     parser.add_argument(
-        'zarr_root',
+        'stores_dir',
         type=Path,
         help='Directory containing .zarr stores.',
     )
@@ -229,7 +229,7 @@ def _run_catalog(args: argparse.Namespace) -> None:
 def _run_stage(args: argparse.Namespace) -> None:
     try:
         stage(
-            args.zarr_root,
+            args.stores_dir,
             args.staging_dir,
             store_names=args.stores,
             compress=args.compress,
@@ -248,7 +248,7 @@ def _run_integrate(args: argparse.Namespace) -> None:
     try:
         integrate(
             args.staging_dir,
-            args.zarr_root,
+            args.stores_dir,
             annotator_id=args.annotator_id,
             nano_id=args.nano_id,
             ontology=ontology,
@@ -262,7 +262,7 @@ def _run_integrate(args: argparse.Namespace) -> None:
 
 def _run_audit(args: argparse.Namespace) -> None:
     issues = audit(
-        args.zarr_root,
+        args.stores_dir,
         ontology_filter=args.ontology,
         store_names=args.stores,
     )

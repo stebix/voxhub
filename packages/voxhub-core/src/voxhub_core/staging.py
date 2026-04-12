@@ -235,7 +235,7 @@ def _compute_sha256(path: Path) -> str:
 
 
 def stage(
-    zarr_root: str | Path,
+    stores_dir: str | Path,
     staging_dir: str | Path,
     *,
     store_names: list[str] | None = None,
@@ -247,7 +247,7 @@ def stage(
 
     Parameters
     ----------
-    zarr_root : str | Path
+    stores_dir : str | Path
         Directory containing ``.zarr`` stores.
     staging_dir : str | Path
         Target staging directory to create.
@@ -270,14 +270,14 @@ def stage(
     FileExistsError
         If *staging_dir* exists and *force* is False.
     FileNotFoundError
-        If *zarr_root* does not exist or no stores found.
+        If *stores_dir* does not exist or no stores found.
     """
-    zarr_root = Path(zarr_root)
+    stores_dir = Path(stores_dir)
     staging_dir = Path(staging_dir)
     console = console or Console()
 
-    if not zarr_root.is_dir():
-        msg = f'Zarr root directory not found: {zarr_root}'
+    if not stores_dir.is_dir():
+        msg = f'Stores directory not found: {stores_dir}'
         raise FileNotFoundError(msg)
 
     if staging_dir.exists() and not force:
@@ -287,9 +287,9 @@ def stage(
         )
         raise FileExistsError(msg)
 
-    entries = discover_zarr_stores(zarr_root)
+    entries = discover_zarr_stores(stores_dir)
     if not entries:
-        msg = f'No .zarr stores found under {zarr_root}'
+        msg = f'No .zarr stores found under {stores_dir}'
         raise FileNotFoundError(msg)
 
     if store_names is not None:

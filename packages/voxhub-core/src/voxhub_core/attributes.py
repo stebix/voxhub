@@ -1,6 +1,6 @@
 """Read, write, and validate dataset attributes on zarr stores.
 
-Dataset attributes are structured metadata stored in the zarr root group
+Dataset attributes are structured metadata stored in each zarr store's root group
 under the ``"dataset_attributes"`` key. They provide a human-curated,
 queryable view of domain-specific properties (modality, resolution,
 origin, tags).

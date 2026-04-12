@@ -1,7 +1,7 @@
 """Provenance recording for annotation integration.
 
 Writes provenance metadata to zarr array attrs and to the central
-``.meta/provenance.jsonl`` index at the zarr root.
+``.meta/provenance.jsonl`` index at the stores directory root.
 """
 
 import json
@@ -16,7 +16,7 @@ from voxhub_schema import IssueRecord
 
 
 def record_provenance(
-    zarr_root: Path,
+    stores_dir: Path,
     store_name: str,
     annotation_path: str,
     *,
@@ -36,8 +36,8 @@ def record_provenance(
 
     Parameters
     ----------
-    zarr_root : Path
-        Root directory containing zarr stores.
+    stores_dir : Path
+        Directory containing zarr stores.
     store_name : str
         Name of the zarr store (without ``.zarr``).
     annotation_path : str
@@ -62,7 +62,7 @@ def record_provenance(
         Validation issues (warnings that were accepted).
     """
     timestamp = datetime.now(UTC).isoformat()
-    zarr_path = zarr_root / f'{store_name}.zarr'
+    zarr_path = stores_dir / f'{store_name}.zarr'
 
     # Update zarr array attributes.
     root = zarr.open_group(zarr_path, mode='r+')
@@ -85,7 +85,7 @@ def record_provenance(
     node.update_attributes(provenance_attrs)
 
     # Append to provenance JSONL index.
-    meta_dir = zarr_root / '.meta'
+    meta_dir = stores_dir / '.meta'
     meta_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = meta_dir / 'provenance.jsonl'
 

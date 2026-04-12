@@ -109,7 +109,7 @@ Every record includes at minimum:
 | `timestamp` | ISO-8601 UTC timestamp |
 
 Command handlers bind additional context at the start of each invocation
-(e.g. `command`, `zarr_root`, `annotator_id`), so all records within a
+(e.g. `command`, `stores_dir`, `annotator_id`), so all records within a
 command carry that context automatically.
 
 ### Provenance vs. logs
@@ -118,7 +118,7 @@ Structlog records capture **operational events** (what the server did,
 errors, timings).  They are not the authoritative audit trail.
 
 The authoritative data-lineage record is the **provenance JSONL** written
-to `<zarr_root>/.meta/provenance.jsonl` — one entry per successful push,
+to `<stores_dir>/.meta/provenance.jsonl` — one entry per successful push,
 fsynced for durability.  Use that file to answer "who annotated what and
 when"; use the log file to answer "what did the server do, and did
 anything go wrong".

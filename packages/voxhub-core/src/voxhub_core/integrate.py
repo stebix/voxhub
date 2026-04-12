@@ -425,7 +425,7 @@ def write_landmarks_to_zarr(
 
 def integrate(
     staging_dir: str | Path,
-    zarr_root: str | Path,
+    stores_dir: str | Path,
     *,
     annotator_id: str,
     nano_id: str,
@@ -443,7 +443,7 @@ def integrate(
     ----------
     staging_dir : str | Path
         Staging directory containing staged NRRDs and annotation files.
-    zarr_root : str | Path
+    stores_dir : str | Path
         Directory containing the ``.zarr`` stores.
     annotator_id : str
         Annotator identifier (e.g. ``'alice'``).
@@ -469,7 +469,7 @@ def integrate(
         If validation errors prevent integration and *force* is False.
     """
     staging_dir = Path(staging_dir)
-    zarr_root = Path(zarr_root)
+    stores_dir = Path(stores_dir)
     console = console or Console()
 
     all_issues: dict[str, list[IssueRecord]] = {}
@@ -489,7 +489,7 @@ def integrate(
             continue
 
         store_name = store_dir.name
-        zarr_path = zarr_root / f'{store_name}.zarr'
+        zarr_path = stores_dir / f'{store_name}.zarr'
 
         if not zarr_path.is_dir():
             console.print(f'  [yellow]{store_name}: zarr store not found (skip)[/yellow]')
