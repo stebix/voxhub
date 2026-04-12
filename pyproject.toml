@@ -73,3 +73,6 @@ reportUnknownMemberType = false
 [tool.pytest.ini_options]
 testpaths = ['packages/*/tests', 'tests']
 addopts = '-v --tb=short'
+markers = [
+    'slow: tests that take significant time (subprocess, multi-process concurrency)',
+]
