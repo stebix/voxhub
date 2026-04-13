@@ -58,6 +58,9 @@ from voxhub_schema import (
 )
 
 
+STAGING_DIR_PREFIX: str = 'vxhb-staging-'
+
+
 def _write_json(obj: object) -> None:
     """Write an attrs instance as JSON to stdout."""
     sys.stdout.write(serialize(obj) + '\n')
@@ -212,7 +215,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     else:
         staging_dir = Path(
             tempfile.mkdtemp(
-                prefix=f'dt-pull-{session_id}-',
+                prefix=f'{STAGING_DIR_PREFIX}{session_id}-',
             )
         )
 
@@ -646,7 +649,7 @@ def _run_gc(args: argparse.Namespace) -> None:
     for entry in tmp_root.iterdir():
         if not entry.is_dir():
             continue
-        if not entry.name.startswith('dt-'):
+        if not entry.name.startswith(STAGING_DIR_PREFIX):
             continue
         try:
             mtime = entry.stat().st_mtime

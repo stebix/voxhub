@@ -144,7 +144,7 @@ class TestCommandSmoke:
         assert annotator_dirs[0].name == 'alice-sub12345'
 
     def test_cleanup(self, tmp_path, subprocess_server):
-        staging = tmp_path / 'dt-pull-smoke'
+        staging = tmp_path / 'vxhb-staging-smoke'
         staging.mkdir()
         (staging / 'payload').write_text('x')
 
@@ -159,8 +159,8 @@ class TestCommandSmoke:
         the subprocess doesn't touch the real /tmp."""
         fake_tmp = tmp_path / 'fake_tmp'
         fake_tmp.mkdir()
-        # Seed an old dt-* dir that must be reaped.
-        old = fake_tmp / 'dt-pull-old'
+        # Seed an old staging dir that must be reaped.
+        old = fake_tmp / 'vxhb-staging-old'
         old.mkdir()
         old_ts = old.stat().st_mtime - 48 * 3600
         os.utime(old, (old_ts, old_ts))

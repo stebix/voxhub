@@ -200,8 +200,8 @@ class TestConcurrentIntegrateSameStore:
         tmp_path,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
-        staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['alpha'])
+        staging_a = _build_staging(tmp_path / 'stagings', 'vxhb-staging-a', ['alpha'])
+        staging_b = _build_staging(tmp_path / 'stagings', 'vxhb-staging-b', ['alpha'])
 
         results = concurrent_integrate_runner(
             [
@@ -243,7 +243,9 @@ class TestConcurrentIntegrateSameStore:
         stores_dir = stores_dir_factory(('alpha',))
         invocations = []
         for i in range(5):
-            staging = _build_staging(tmp_path / 'stagings', f'dt-pull-{i}', ['alpha'])
+            staging = _build_staging(
+                tmp_path / 'stagings', f'vxhb-staging-{i}', ['alpha']
+            )
             invocations.append(
                 {
                     'stores_dir': stores_dir,
@@ -279,7 +281,9 @@ class TestConcurrentIntegrateSameStore:
         still exercises the real ``_run_integrate_annotations`` code path.
         """
         stores_dir = stores_dir_factory(('alpha',))
-        staging = _build_staging(tmp_path / 'stagings', 'dt-pull-contended', ['alpha'])
+        staging = _build_staging(
+            tmp_path / 'stagings', 'vxhb-staging-contended', ['alpha']
+        )
 
         def _short_lock(path: Path, *, timeout: float = 60.0) -> FileLock:
             del timeout
@@ -341,8 +345,12 @@ class TestConcurrentIntegrateDifferentStores:
         tmp_path,
     ):
         stores_dir = stores_dir_factory(('alpha', 'beta'))
-        staging_alpha = _build_staging(tmp_path / 'stagings', 'dt-pull-alpha', ['alpha'])
-        staging_beta = _build_staging(tmp_path / 'stagings', 'dt-pull-beta', ['beta'])
+        staging_alpha = _build_staging(
+            tmp_path / 'stagings', 'vxhb-staging-alpha', ['alpha']
+        )
+        staging_beta = _build_staging(
+            tmp_path / 'stagings', 'vxhb-staging-beta', ['beta']
+        )
 
         results = concurrent_integrate_runner(
             [
@@ -388,8 +396,8 @@ class TestConcurrentProvenanceAppend:
         tmp_path,
     ):
         stores_dir = stores_dir_factory(('alpha', 'beta'))
-        staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
-        staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['beta'])
+        staging_a = _build_staging(tmp_path / 'stagings', 'vxhb-staging-a', ['alpha'])
+        staging_b = _build_staging(tmp_path / 'stagings', 'vxhb-staging-b', ['beta'])
 
         results = concurrent_integrate_runner(
             [
@@ -565,8 +573,8 @@ class TestAnnotatorIsolation:
         tmp_path,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-a', ['alpha'])
-        staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-b', ['alpha'])
+        staging_a = _build_staging(tmp_path / 'stagings', 'vxhb-staging-a', ['alpha'])
+        staging_b = _build_staging(tmp_path / 'stagings', 'vxhb-staging-b', ['alpha'])
 
         results = concurrent_integrate_runner(
             [
@@ -617,8 +625,12 @@ class TestAnnotatorIsolation:
         ``instance_dir`` embeds a fresh random suffix per run), so both
         coexist under ``annotations/<annotator>-<nano>/``."""
         stores_dir = stores_dir_factory(('alpha',))
-        staging_a = _build_staging(tmp_path / 'stagings', 'dt-pull-same-a', ['alpha'])
-        staging_b = _build_staging(tmp_path / 'stagings', 'dt-pull-same-b', ['alpha'])
+        staging_a = _build_staging(
+            tmp_path / 'stagings', 'vxhb-staging-same-a', ['alpha']
+        )
+        staging_b = _build_staging(
+            tmp_path / 'stagings', 'vxhb-staging-same-b', ['alpha']
+        )
 
         results = concurrent_integrate_runner(
             [

@@ -182,7 +182,7 @@ class TestPreparePull:
         staging_dir = Path(payload['staging_dir'])
         try:
             assert staging_dir.is_dir()
-            assert staging_dir.name.startswith('dt-pull-')
+            assert staging_dir.name.startswith(server_cli.STAGING_DIR_PREFIX)
             entry = payload['stores']['alpha']
             assert entry['raw_checksum'].startswith('sha256:')
             assert entry['shape'] == list(SHAPE)
@@ -205,7 +205,9 @@ class TestPreparePull:
         payload = parsed_stdout()
         assert Path(payload['staging_dir']) == explicit
         assert explicit.is_dir()
-        assert not payload['staging_dir'].startswith(('/tmp/dt-pull', '/var/'))
+        assert not payload['staging_dir'].startswith(
+            (f'/tmp/{server_cli.STAGING_DIR_PREFIX}', '/var/')
+        )
 
     def test_filters_stores_by_name(self, stores_dir_factory, server_argv, parsed_stdout):
         root = stores_dir_factory(('alpha', 'bravo', 'charlie'))
@@ -892,7 +894,7 @@ class TestCleanup:
     """Covers voxhub_core.server.cli._run_cleanup."""
 
     def test_removes_existing_staging_dir(self, tmp_path, server_argv, parsed_stdout):
-        staging = tmp_path / 'dt-pull-abc'
+        staging = tmp_path / 'vxhb-staging-abc'
         staging.mkdir()
         (staging / 'payload').write_text('data')
 
@@ -959,7 +961,7 @@ class TestGc:
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        old = tmp_path / 'fake_tmp' / 'dt-pull-old'
+        old = tmp_path / 'fake_tmp' / 'vxhb-staging-old'
         old.mkdir()
         # 48 hours in the past.
         import os as _os
@@ -978,7 +980,7 @@ class TestGc:
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        recent = tmp_path / 'fake_tmp' / 'dt-pull-recent'
+        recent = tmp_path / 'fake_tmp' / 'vxhb-staging-recent'
         recent.mkdir()
 
         server_cli._run_gc(server_argv(ttl_hours=24.0))
@@ -987,7 +989,7 @@ class TestGc:
         assert payload['count'] == 0
         assert recent.exists()
 
-    def test_ignores_non_dt_prefix(
+    def test_ignores_non_staging_prefix(
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
@@ -1008,18 +1010,18 @@ class TestGc:
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        dt_file = tmp_path / 'fake_tmp' / 'dt-file'
-        dt_file.write_text('data')
+        staging_file = tmp_path / 'fake_tmp' / 'vxhb-staging-file'
+        staging_file.write_text('data')
         import os as _os
 
-        old_ts = dt_file.stat().st_mtime - 48 * 3600
-        _os.utime(dt_file, (old_ts, old_ts))
+        old_ts = staging_file.stat().st_mtime - 48 * 3600
+        _os.utime(staging_file, (old_ts, old_ts))
 
         server_cli._run_gc(server_argv(ttl_hours=24.0))
 
         payload = parsed_stdout()
         assert payload['count'] == 0
-        assert dt_file.exists()
+        assert staging_file.exists()
 
     def test_count_matches_removed_length(
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
@@ -1027,7 +1029,7 @@ class TestGc:
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
         import os as _os
 
-        for name in ('dt-pull-a', 'dt-pull-b', 'dt-pull-c'):
+        for name in ('vxhb-staging-a', 'vxhb-staging-b', 'vxhb-staging-c'):
             p = tmp_path / 'fake_tmp' / name
             p.mkdir()
             _os.utime(p, (p.stat().st_mtime - 48 * 3600,) * 2)

@@ -215,7 +215,7 @@ def write_remote_manifest(
     store_names: list[str],
     expected_ontologies: list[str] | None = None,
     included_annotations: list[str] | None = None,
-    pull_session_id: str = 'dt-pull-test-session',
+    pull_session_id: str = 'vxhb-staging-test-session',
     server_host: str = 'test.example.com',
     server_stores_dir: str = '/srv/voxhub',
     protocol_version: int = 1,
