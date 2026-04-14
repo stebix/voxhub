@@ -535,6 +535,20 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                         error=str(exc),
                     )
 
+        # Invalidate the catalog cache outside store_lock: the zarr write has
+        # already committed, and holding store_lock while taking the catalog
+        # lock would invert the lock order. A failure here must not fail the
+        # push -- the TTL + fingerprint path reconciles on the next read.
+        if annotations_written:
+            try:
+                catalog_cache.invalidate_store(stores_dir, store_name)
+            except Exception as exc:
+                log.warning(
+                    'catalog_invalidate_failed',
+                    store=store_name,
+                    error=str(exc),
+                )
+
         stores_result[store_name] = {
             'status': ('integrated' if annotations_written else 'failed'),
             'annotations': annotations_written,

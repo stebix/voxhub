@@ -365,6 +365,54 @@ class TestConcurrentIntegrateDifferentStores:
         records = _parse_jsonl(stores_dir / '.meta' / 'provenance.jsonl')
         assert {r['store'] for r in records} == {'alpha', 'beta'}
 
+    def test_parallel_pushes_catalog_version_accounts_for_all(
+        self,
+        stores_dir_factory,
+        concurrent_integrate_runner,
+        server_argv,
+        parsed_stdout,
+        tmp_path,
+    ):
+        """Five parallel integrates on distinct stores must each invalidate
+        the catalog exactly once; the post-settle list-stores must show
+        every new annotation and ``catalog_version`` must equal the
+        initial version plus the number of integrated stores.
+        """
+        store_names = [f'store{i:02d}' for i in range(5)]
+        stores_dir = stores_dir_factory(tuple(store_names))
+
+        # Seed the catalog so ``initial_version`` is stable.
+        server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
+        initial_version = parsed_stdout()['catalog_version']
+
+        invocations = []
+        for i, name in enumerate(store_names):
+            staging = _build_staging(tmp_path / 'stagings', f'dt-pull-{name}', [name])
+            invocations.append(
+                {
+                    'stores_dir': stores_dir,
+                    'staging_dir': staging,
+                    'annotator_id': f'user{i}',
+                    'nano_id': f'nano{i:04d}',
+                }
+            )
+
+        results = concurrent_integrate_runner(invocations, timeout=120.0)
+        assert all(r['returncode'] == 0 for r in results), [r['stderr'] for r in results]
+
+        server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
+        payload = parsed_stdout()
+
+        assert payload['catalog_version'] == initial_version + len(store_names)
+
+        by_name = {s['name']: s for s in payload['stores']}
+        assert set(by_name) == set(store_names)
+        # Every integrated annotation must appear exactly once.
+        for i, name in enumerate(store_names):
+            annotations = by_name[name]['annotations']
+            assert len(annotations) == 1, (name, annotations)
+            assert annotations[0]['annotator_id'] == f'user{i}'
+
 
 # ===========================================================================
 # Concurrent provenance append

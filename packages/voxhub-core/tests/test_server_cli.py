@@ -980,6 +980,149 @@ class TestIntegrateAnnotationsOntology:
 
 
 # ===========================================================================
+# _run_integrate_annotations (catalog cache invalidation — PR 3)
+# ===========================================================================
+
+
+class TestIntegrateAnnotationsCacheInvalidation:
+    """Covers write-through invalidation of the catalog cache.
+
+    After a successful integrate the next ``list-stores`` call must observe
+    the newly-written annotation immediately -- no TTL wait -- and the
+    ``catalog_version`` must increase monotonically per touched store.
+    """
+
+    def test_successful_integrate_bumps_catalog_version_and_shows_annotation(
+        self,
+        stores_dir_factory,
+        staging_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_manifest(store_names=['alpha'])
+
+        server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
+        first = parsed_stdout()
+        assert first['stores'][0]['annotations'] == []
+        initial_version = first['catalog_version']
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        )
+        parsed_stdout()  # drain integrate output
+
+        server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
+        second = parsed_stdout()
+
+        assert second['catalog_version'] == initial_version + 1
+        alpha = next(s for s in second['stores'] if s['name'] == 'alpha')
+        assert len(alpha['annotations']) == 1
+        assert alpha['annotations'][0]['annotator_id'] == 'alice'
+        assert alpha['annotations'][0]['ontology'] == 'inner-ear-structures'
+
+    def test_integrate_writing_nothing_leaves_catalog_version_untouched(
+        self,
+        stores_dir_factory,
+        staging_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        # Shape mismatch + force=False => validation errors block all writes.
+        staging = staging_dir_with_manifest(
+            store_names=['alpha'],
+            seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
+            seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
+        )
+
+        server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
+        first = parsed_stdout()
+        initial_version = first['catalog_version']
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        )
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'failed'
+
+        server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
+        second = parsed_stdout()
+
+        assert second['catalog_version'] == initial_version
+
+    def test_multi_store_integrate_bumps_version_once_per_store(
+        self,
+        stores_dir_factory,
+        staging_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
+    ):
+        stores_dir = stores_dir_factory(('alpha', 'bravo', 'charlie'))
+        staging = staging_dir_with_manifest(store_names=['alpha', 'bravo', 'charlie'])
+
+        server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
+        initial_version = parsed_stdout()['catalog_version']
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        )
+        integrate_payload = parsed_stdout()
+        touched = [
+            name
+            for name, result in integrate_payload['stores'].items()
+            if result['status'] == 'integrated'
+        ]
+        assert set(touched) == {'alpha', 'bravo', 'charlie'}
+
+        server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
+        final = parsed_stdout()
+
+        assert final['catalog_version'] == initial_version + len(touched)
+        for store in final['stores']:
+            assert len(store['annotations']) == 1
+            assert store['annotations'][0]['annotator_id'] == 'alice'
+
+    def test_invalidate_failure_is_non_fatal(
+        self,
+        stores_dir_factory,
+        staging_dir_with_manifest,
+        server_argv,
+        parsed_stdout,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from voxhub_core.server import catalog_cache
+
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_manifest(store_names=['alpha'])
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise catalog_cache.CacheLockError('simulated lock timeout')
+
+        monkeypatch.setattr(catalog_cache, 'invalidate_store', boom)
+
+        with caplog.at_level('WARNING'):
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'integrated'
+        assert len(_written_annotations(stores_dir / 'alpha.zarr')) == 1
+
+        events = [
+            r.msg
+            for r in caplog.records
+            if isinstance(r.msg, dict)
+            and r.msg.get('event') == 'catalog_invalidate_failed'
+        ]
+        assert events, 'expected a catalog_invalidate_failed warning'
+        assert events[0]['store'] == 'alpha'
+        assert 'simulated lock timeout' in events[0]['error']
+
+
+# ===========================================================================
 # _run_cleanup
 # ===========================================================================
 
