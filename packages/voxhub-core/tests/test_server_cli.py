@@ -163,6 +163,102 @@ class TestListStores:
         assert completed
         assert 'duration_s' in completed[0].msg
 
+    # -- Catalog-cache integration (PR 2) ----------------------------------
+
+    def test_catalog_version_emitted_on_first_call(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        payload = parsed_stdout()
+        assert payload['catalog_version'] == 1
+
+    def test_cache_file_created_at_meta_catalog_json(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        parsed_stdout()  # drain stdout
+
+        cache_path = root / '.meta' / 'catalog.json'
+        assert cache_path.is_file()
+        data = json.loads(cache_path.read_text())
+        assert data['catalog_version'] == 1
+        assert set(data['stores'].keys()) == {'alpha'}
+
+    def test_repeated_calls_within_ttl_reuse_cache(
+        self,
+        stores_dir_factory,
+        server_argv,
+        parsed_stdout,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from voxhub_core.server import catalog_cache as cc
+
+        root = stores_dir_factory(('alpha', 'bravo'))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        first = parsed_stdout()
+
+        # Poison the rebuild path: a warm hit must not touch it.
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise AssertionError('warm hit must not rebuild')
+
+        monkeypatch.setattr(cc, '_build_snapshot', _boom)
+
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        second = parsed_stdout()
+
+        assert second['catalog_version'] == first['catalog_version']
+        assert [s['name'] for s in second['stores']] == [
+            s['name'] for s in first['stores']
+        ]
+
+    def test_corrupt_cache_file_triggers_healthy_rebuild(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        parsed_stdout()  # drain
+
+        cache_path = root / '.meta' / 'catalog.json'
+        cache_path.write_text('{not json at all')
+
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        payload = parsed_stdout()
+
+        assert len(payload['stores']) == 1
+        assert payload['stores'][0]['name'] == 'alpha'
+        assert payload['stores'][0]['error'] is None
+        # Corrupt parse → cold rebuild → catalog_version resets to 1.
+        assert payload['catalog_version'] == 1
+
+    def test_out_of_band_add_after_ttl_bumps_catalog_version(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        from _core_helpers import create_zarr_store
+
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        first = parsed_stdout()
+        assert first['catalog_version'] == 1
+        assert {s['name'] for s in first['stores']} == {'alpha'}
+
+        # Age the on-disk catalog past the default TTL. Rewriting ``built_at``
+        # is cheaper than faking a monotonic clock through the CLI.
+        cache_path = root / '.meta' / 'catalog.json'
+        data = json.loads(cache_path.read_text())
+        data['built_at'] = '2000-01-01T00:00:00+00:00'
+        cache_path.write_text(json.dumps(data))
+
+        # Out-of-band filesystem mutation the fingerprint will notice.
+        create_zarr_store(root / 'bravo.zarr')
+
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        second = parsed_stdout()
+
+        assert second['catalog_version'] == first['catalog_version'] + 1
+        assert {s['name'] for s in second['stores']} == {'alpha', 'bravo'}
+
 
 # ===========================================================================
 # _run_prepare_pull

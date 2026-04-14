@@ -24,7 +24,6 @@ import zarr
 from rich.console import Console
 
 from voxhub_core.attributes import (
-    DATASET_ATTRIBUTES_KEY,
     get_dataset_attributes,
     validate_dataset_attributes,
 )
@@ -38,6 +37,7 @@ from voxhub_core.integrate import (
     write_landmarks_to_zarr,
     write_segmentation_to_zarr,
 )
+from voxhub_core.server import catalog_cache
 from voxhub_core.server.locks import store_lock
 from voxhub_core.server.logging import configure_logging, get_logger
 from voxhub_core.server.provenance import (
@@ -94,6 +94,19 @@ def _compute_sha256(path: Path) -> str:
 # -- list-stores -------------------------------------------------------------
 
 
+def _age_seconds(built_at: str) -> float:
+    """Return the age of an ISO-8601 ``built_at`` timestamp in seconds.
+
+    Unparseable input is treated as infinitely old — purely a log-line
+    signal, so a degraded value must not crash the handler.
+    """
+    try:
+        dt = datetime.fromisoformat(built_at)
+    except ValueError:
+        return float('inf')
+    return max(0.0, time.time() - dt.timestamp())
+
+
 def _run_list_stores(args: argparse.Namespace) -> None:
     log = get_logger(command='list-stores')
     t0 = time.monotonic()
@@ -101,86 +114,22 @@ def _run_list_stores(args: argparse.Namespace) -> None:
     stores_dir = Path(args.stores_dir)
     log.info('list_stores_started', stores_dir=str(stores_dir))
 
-    entries = discover_zarr_stores(stores_dir)
-
-    stores: list[dict[str, Any]] = []
-    for entry in entries:
-        store_name = entry.path.name.removesuffix('.zarr')
-        annotations = [
-            {
-                'path': a.path,
-                'ontology': a.ontology,
-                'ontology_version': a.ontology_version,
-                'annotator_id': a.annotator_id,
-                'integrated_at': a.integrated_at,
-            }
-            for a in entry.annotations
-        ]
-
-        if entry.error:
-            stores.append(
-                {
-                    'name': store_name,
-                    'shape': [],
-                    'dtype': '',
-                    'origin_lps': [],
-                    'spacing_mm': [],
-                    'space_directions': [],
-                    'annotations': [],
-                    'error': entry.error,
-                    'dataset_attributes': None,
-                }
-            )
-            continue
-
-        root = zarr.open_group(entry.path, mode='r')
-        arr = root['raw']['full']
-        a = dict(arr.attrs)
-
-        try:
-            origin, space_directions, spacing_mm = extract_spatial_metadata(a)
-        except KeyError:
-            stores.append(
-                {
-                    'name': store_name,
-                    'shape': list(entry.shape or []),
-                    'dtype': entry.dtype or '',
-                    'origin_lps': [],
-                    'spacing_mm': [],
-                    'space_directions': [],
-                    'annotations': annotations,
-                    'error': 'Missing spatial metadata',
-                    'dataset_attributes': None,
-                }
-            )
-            continue
-
-        da_raw = dict(root.attrs).get(DATASET_ATTRIBUTES_KEY)
-        stores.append(
-            {
-                'name': store_name,
-                'shape': list(arr.shape),
-                'dtype': str(arr.dtype),
-                'origin_lps': origin.tolist(),
-                'spacing_mm': spacing_mm,
-                'space_directions': space_directions.tolist(),
-                'annotations': annotations,
-                'error': None,
-                'dataset_attributes': da_raw,
-            }
-        )
+    snapshot = catalog_cache.read_catalog(stores_dir)
 
     duration = time.monotonic() - t0
     log.info(
         'list_stores_completed',
-        store_count=len(stores),
+        store_count=len(snapshot.stores),
+        catalog_version=snapshot.catalog_version,
+        cache_age_s=round(_age_seconds(snapshot.built_at), 3),
         duration_s=round(duration, 3),
     )
 
     _write_dict(
         {
             'protocol_version': PROTOCOL_VERSION,
-            'stores': stores,
+            'catalog_version': snapshot.catalog_version,
+            'stores': list(snapshot.stores.values()),
         }
     )
 
