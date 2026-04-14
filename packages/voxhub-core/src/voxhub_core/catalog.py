@@ -43,6 +43,7 @@ class ZarrEntry:
     annotations: list[AnnotationEntry] = attrs.Factory(list)
     error: str | None = None
     dataset_attributes: DatasetAttributes | None = None
+    dataset_attributes_raw: dict[str, Any] | None = None
 
 
 def _discover_annotations(root: zarr.Group) -> list[AnnotationEntry]:
@@ -105,6 +106,7 @@ def _probe_zarr(path: Path) -> ZarrEntry:
 
         da_raw = dict(root.attrs).get('dataset_attributes')
         if da_raw is not None:
+            entry.dataset_attributes_raw = dict(da_raw)  # type: ignore[arg-type]
             entry.dataset_attributes = DatasetAttributes.from_dict(da_raw)  # type: ignore[arg-type]
     except Exception as exc:
         entry.error = str(exc)
