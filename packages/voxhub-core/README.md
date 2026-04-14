@@ -112,6 +112,31 @@ Command handlers bind additional context at the start of each invocation
 (e.g. `command`, `stores_dir`, `annotator_id`), so all records within a
 command carry that context automatically.
 
+---
+
+## Catalog cache admin
+
+The server caches the `list-stores` payload on disk at
+`<stores_dir>/.meta/catalog.json`. The cache is refreshed automatically
+on a 60 s TTL and invalidated per-store on every in-band write
+(`integrate-annotations`). For everything else — manual `rsync` of a new
+store, hand-edited metadata, a deleted `*.zarr` directory — use the
+`catalog` subcommand to force immediate reconciliation.
+
+```bash
+voxhub-server catalog refresh               # rebuild the whole catalog
+voxhub-server catalog refresh --store NAME  # re-probe one store
+voxhub-server catalog show                  # print the current snapshot
+voxhub-server catalog stats                 # cache file age, fingerprint, size
+```
+
+Each command emits a single JSON object on stdout. Refresh bumps
+`catalog_version`; `stats` reports `status` (`ok` / `missing` /
+`corrupt`), `age_s`, `fingerprint_match`, `store_count`, and
+`cache_file_size_bytes`. A mismatched fingerprint means the next warm
+read will trigger a full rebuild on its own — manual refresh is only
+required when the operator needs visibility *before* the next read.
+
 ### Provenance vs. logs
 
 Structlog records capture **operational events** (what the server did,

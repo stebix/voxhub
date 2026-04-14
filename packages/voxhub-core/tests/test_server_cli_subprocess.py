@@ -320,3 +320,33 @@ class TestStoresDirFromSettings:
         payload = _parse_json_stdout(result)
         assert payload['error'] is True
         assert payload['code'] == 'storage_misconfigured'
+
+
+class TestCatalogCommandSubprocess:
+    """Covers subprocess-level wiring of the ``catalog`` subparser."""
+
+    def test_catalog_without_action_prints_help_exit_zero(
+        self, stores_dir_factory, server_config_env, subprocess_server
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_config_env(root)
+        result = subprocess_server('catalog')
+
+        assert result.returncode == 0, result.stderr
+        # Help is emitted on stdout (argparse default for ``print_help``).
+        assert 'refresh' in result.stdout
+        assert 'show' in result.stdout
+        assert 'stats' in result.stdout
+
+    def test_catalog_refresh_subprocess(
+        self, stores_dir_factory, server_config_env, subprocess_server
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_config_env(root)
+        result = subprocess_server('catalog', 'refresh')
+
+        assert result.returncode == 0, result.stderr
+        payload = _parse_json_stdout(result)
+        assert payload['protocol_version'] == PROTOCOL_VERSION
+        assert payload['catalog_version'] == 1
+        assert payload['store_count'] == 1

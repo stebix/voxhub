@@ -692,6 +692,93 @@ def _run_validate_attributes(args: argparse.Namespace) -> None:
     )
 
 
+# -- catalog -----------------------------------------------------------------
+
+
+def _run_catalog_refresh(args: argparse.Namespace) -> None:
+    log = get_logger(command='catalog-refresh')
+    stores_dir = Path(args.stores_dir)
+    store_name: str | None = args.store
+
+    if store_name is not None:
+        # Guard against typos: only accept names that exist on disk or in
+        # the current cache. Allowing in-cache-only names preserves the
+        # "drop stale entry" use case.
+        zarr_path = stores_dir / f'{store_name}.zarr'
+        in_cache = False
+        existing = catalog_cache._load_catalog_file(
+            catalog_cache._catalog_paths(stores_dir)[1]
+        )
+        if existing is not None and store_name in existing.stores:
+            in_cache = True
+        if not zarr_path.is_dir() and not in_cache:
+            msg = (
+                f'Store {store_name!r} not found on disk and not present '
+                f'in the catalog cache under {stores_dir}'
+            )
+            log.error('catalog_store_not_found', store=store_name)
+            _write_error('store_not_found', msg)
+            sys.exit(1)
+
+        snapshot = catalog_cache.invalidate_store(stores_dir, store_name)
+        log.info(
+            'catalog_store_refreshed',
+            store=store_name,
+            catalog_version=snapshot.catalog_version,
+        )
+    else:
+        snapshot = catalog_cache.rebuild(stores_dir)
+        log.info(
+            'catalog_rebuilt',
+            store_count=len(snapshot.stores),
+            catalog_version=snapshot.catalog_version,
+        )
+
+    _write_dict(
+        {
+            'protocol_version': PROTOCOL_VERSION,
+            'catalog_version': snapshot.catalog_version,
+            'store_count': len(snapshot.stores),
+            'built_at': snapshot.built_at,
+        }
+    )
+
+
+def _run_catalog_show(args: argparse.Namespace) -> None:
+    log = get_logger(command='catalog-show')
+    stores_dir = Path(args.stores_dir)
+    snapshot = catalog_cache.read_catalog(stores_dir)
+    log.info(
+        'catalog_show_completed',
+        store_count=len(snapshot.stores),
+        catalog_version=snapshot.catalog_version,
+    )
+
+    _write_dict(
+        {
+            'protocol_version': PROTOCOL_VERSION,
+            'catalog_version': snapshot.catalog_version,
+            'built_at': snapshot.built_at,
+            'stores_dir_fingerprint': snapshot.stores_dir_fingerprint,
+            'stores': list(snapshot.stores.values()),
+        }
+    )
+
+
+def _run_catalog_stats(args: argparse.Namespace) -> None:
+    log = get_logger(command='catalog-stats')
+    stores_dir = Path(args.stores_dir)
+    stats = catalog_cache.peek_stats(stores_dir)
+    log.info('catalog_stats_completed', status=stats['status'])
+
+    _write_dict(
+        {
+            'protocol_version': PROTOCOL_VERSION,
+            **stats,
+        }
+    )
+
+
 # -- healthcheck -------------------------------------------------------------
 
 
@@ -898,6 +985,43 @@ def main() -> None:
     # healthcheck
     hc = subparsers.add_parser('healthcheck')
     hc.set_defaults(func=_run_healthcheck)
+
+    # catalog
+    cat = subparsers.add_parser(
+        'catalog',
+        help='Inspect and refresh the list-stores catalog cache.',
+    )
+    cat_sub = cat.add_subparsers(dest='catalog_action')
+
+    cat_refresh = cat_sub.add_parser(
+        'refresh',
+        help='Rebuild the catalog cache, or re-probe a single store.',
+    )
+    cat_refresh.add_argument(
+        '--store',
+        default=None,
+        help='Name of a single store to re-probe (without .zarr suffix).',
+    )
+    cat_refresh.set_defaults(func=_run_catalog_refresh)
+
+    cat_show = cat_sub.add_parser(
+        'show',
+        help='Pretty-print the current catalog snapshot.',
+    )
+    cat_show.set_defaults(func=_run_catalog_show)
+
+    cat_stats = cat_sub.add_parser(
+        'stats',
+        help='Report cache file age, fingerprint match, and store count.',
+    )
+    cat_stats.set_defaults(func=_run_catalog_stats)
+
+    # `voxhub-server catalog` with no action → print help for the catalog
+    # subparser and exit cleanly, mirroring the top-level behaviour below.
+    def _catalog_help(_args: argparse.Namespace) -> None:
+        cat.print_help()
+
+    cat.set_defaults(func=_catalog_help, catalog_action=None)
 
     args = parser.parse_args()
 

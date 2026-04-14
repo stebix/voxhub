@@ -448,3 +448,50 @@ def read_catalog(
             return renewed
     except Timeout:
         return existing
+
+
+def peek_stats(
+    stores_dir: Path,
+    *,
+    now_func: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    """Return cache-file diagnostics without triggering a rebuild.
+
+    Read-only; no lock is acquired and no bytes are written. Safe to call
+    against a missing, stale, or corrupt cache — the ``status`` field
+    discriminates:
+
+    - ``'missing'``: no cache file at ``<stores_dir>/.meta/catalog.json``.
+    - ``'corrupt'``: file present but unreadable / unparseable / schema
+      mismatch. The ``cache_file_size_bytes`` field is still populated so
+      operators can gauge whether the file is empty vs. truncated.
+    - ``'ok'``: full detail dict including ``catalog_version``,
+      ``built_at``, ``age_s``, ``fingerprint_match``, ``store_count``, and
+      ``cache_file_size_bytes``.
+
+    ``fingerprint_match`` compares the cached fingerprint against a live
+    ``fingerprint(stores_dir)`` walk. A mismatch means the TTL-triggered
+    refresh path would choose a full rebuild on the next read.
+    """
+    _, catalog_path, _ = _catalog_paths(stores_dir)
+
+    try:
+        size = catalog_path.stat().st_size
+    except FileNotFoundError:
+        return {'status': 'missing'}
+    except OSError as exc:
+        return {'status': 'corrupt', 'detail': str(exc)}
+
+    snap = _load_catalog_file(catalog_path)
+    if snap is None:
+        return {'status': 'corrupt', 'cache_file_size_bytes': size}
+
+    return {
+        'status': 'ok',
+        'catalog_version': snap.catalog_version,
+        'built_at': snap.built_at,
+        'age_s': round(_age_seconds(snap.built_at, now_func), 3),
+        'fingerprint_match': fingerprint(stores_dir) == snap.stores_dir_fingerprint,
+        'store_count': len(snap.stores),
+        'cache_file_size_bytes': size,
+    }

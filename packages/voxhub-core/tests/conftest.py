@@ -231,6 +231,9 @@ _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
     'force': False,
     # gc
     'ttl_hours': 24.0,
+    # catalog refresh
+    'store': None,
+    'catalog_action': None,
 }
 
 

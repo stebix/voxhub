@@ -1704,3 +1704,206 @@ class TestMainStoresDirResolution:
         envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert envelope['error'] is True
         assert envelope['code'] == 'storage_misconfigured'
+
+
+# ===========================================================================
+# _run_catalog_{refresh,show,stats}
+# ===========================================================================
+
+
+class TestCatalogCommand:
+    """Covers the ``voxhub-server catalog`` admin subcommand (PR 4)."""
+
+    # -- refresh -----------------------------------------------------------
+
+    def test_refresh_no_existing_cache_builds_one(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha', 'bravo'))
+        cache_path = root / '.meta' / 'catalog.json'
+        assert not cache_path.exists()
+
+        server_cli._run_catalog_refresh(server_argv(stores_dir=root, store=None))
+
+        payload = parsed_stdout()
+        assert payload['protocol_version'] == PROTOCOL_VERSION
+        assert payload['catalog_version'] == 1
+        assert payload['store_count'] == 2
+        assert 'built_at' in payload
+        assert cache_path.is_file()
+
+    def test_refresh_on_existing_cache_bumps_version(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        first = parsed_stdout()
+        assert first['catalog_version'] == 1
+
+        server_cli._run_catalog_refresh(server_argv(stores_dir=root, store=None))
+        refreshed = parsed_stdout()
+        assert refreshed['catalog_version'] == 2
+
+    def test_refresh_single_store_only_touches_target(
+        self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
+    ):
+        from voxhub_core.server import catalog_cache as cc
+
+        root = stores_dir_factory(('alpha', 'bravo', 'charlie'))
+        # Seed the cache so the single-store path splices rather than
+        # falling back to a full rebuild.
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        parsed_stdout()
+
+        # A full-walk rebuild goes through ``_build_snapshot``; a
+        # single-store refresh must not invoke it.
+        def _no_full_rebuild(*_a: object, **_kw: object) -> object:
+            raise AssertionError('single-store refresh must not full-rebuild')
+
+        monkeypatch.setattr(cc, '_build_snapshot', _no_full_rebuild)
+
+        server_cli._run_catalog_refresh(server_argv(stores_dir=root, store='bravo'))
+        payload = parsed_stdout()
+
+        assert payload['catalog_version'] == 2
+        assert payload['store_count'] == 3
+
+        # The on-disk catalog must still contain all three stores.
+        data = json.loads((root / '.meta' / 'catalog.json').read_text())
+        assert set(data['stores']) == {'alpha', 'bravo', 'charlie'}
+
+    def test_refresh_nonexistent_store_returns_store_not_found(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        parsed_stdout()
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_catalog_refresh(
+                server_argv(stores_dir=root, store='does-not-exist')
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'store_not_found'
+        assert envelope['protocol_version'] == PROTOCOL_VERSION
+        assert 'does-not-exist' in envelope['message']
+
+    def test_refresh_store_removed_from_disk_drops_entry(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        """A store present in the cache but absent on disk is a valid
+        refresh target — the operator wants to drop the stale entry. Only
+        names that are nowhere (disk + cache) error out."""
+        root = stores_dir_factory(('alpha', 'bravo'))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        parsed_stdout()
+
+        shutil.rmtree(root / 'bravo.zarr')
+
+        server_cli._run_catalog_refresh(server_argv(stores_dir=root, store='bravo'))
+        payload = parsed_stdout()
+
+        assert payload['store_count'] == 1
+        data = json.loads((root / '.meta' / 'catalog.json').read_text())
+        assert set(data['stores']) == {'alpha'}
+
+    # -- show --------------------------------------------------------------
+
+    def test_show_returns_full_snapshot(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',), with_annotations=True)
+        server_cli._run_catalog_show(server_argv(stores_dir=root))
+
+        payload = parsed_stdout()
+        assert payload['protocol_version'] == PROTOCOL_VERSION
+        assert payload['catalog_version'] == 1
+        assert 'built_at' in payload
+        assert 'stores_dir_fingerprint' in payload
+        assert len(payload['stores']) == 1
+        entry = payload['stores'][0]
+        assert entry['name'] == 'alpha'
+        assert len(entry['annotations']) == 1
+
+    def test_show_store_entries_match_list_stores(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha', 'bravo'), with_annotations=True)
+
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        list_payload = parsed_stdout()
+
+        server_cli._run_catalog_show(server_argv(stores_dir=root))
+        show_payload = parsed_stdout()
+
+        list_by_name = {s['name']: s for s in list_payload['stores']}
+        show_by_name = {s['name']: s for s in show_payload['stores']}
+        assert list_by_name == show_by_name
+
+    # -- stats -------------------------------------------------------------
+
+    def test_stats_fresh_build_reports_fingerprint_match(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha', 'bravo'))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        parsed_stdout()
+
+        server_cli._run_catalog_stats(server_argv(stores_dir=root))
+        stats = parsed_stdout()
+
+        assert stats['status'] == 'ok'
+        assert stats['fingerprint_match'] is True
+        assert stats['store_count'] == 2
+        assert stats['catalog_version'] == 1
+        assert stats['cache_file_size_bytes'] > 0
+        assert stats['age_s'] >= 0.0
+
+    def test_stats_after_out_of_band_add_reports_fingerprint_mismatch(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        from _core_helpers import create_zarr_store
+
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        parsed_stdout()
+
+        create_zarr_store(root / 'bravo.zarr')
+
+        server_cli._run_catalog_stats(server_argv(stores_dir=root))
+        stats = parsed_stdout()
+
+        assert stats['status'] == 'ok'
+        assert stats['fingerprint_match'] is False
+
+    def test_stats_missing_cache_reports_missing_status(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        # Do NOT prime the cache.
+        assert not (root / '.meta' / 'catalog.json').exists()
+
+        server_cli._run_catalog_stats(server_argv(stores_dir=root))
+        stats = parsed_stdout()
+
+        assert stats['status'] == 'missing'
+        assert stats['protocol_version'] == PROTOCOL_VERSION
+
+    def test_stats_corrupt_cache_reports_corrupt_status(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        parsed_stdout()
+
+        cache_path = root / '.meta' / 'catalog.json'
+        cache_path.write_text('{not valid json at all')
+
+        server_cli._run_catalog_stats(server_argv(stores_dir=root))
+        stats = parsed_stdout()
+
+        assert stats['status'] == 'corrupt'
+        assert stats['cache_file_size_bytes'] > 0
