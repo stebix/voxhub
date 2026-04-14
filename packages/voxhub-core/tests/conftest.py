@@ -217,12 +217,13 @@ _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
     # by main()) used by list-stores, prepare-pull, validate-attributes,
     # healthcheck, and integrate-annotations.
     'stores_dir': None,
-    # prepare-pull
-    'stores': None,
-    'ontologies': None,
+    # prepare-pull (single-store)
+    'store': None,
     'staging_dir': None,
     'include_existing_annotations': None,
     'compress': False,
+    # validate-attributes (multi-store)
+    'stores': None,
     # integrate-annotations
     'annotator_id': 'alice',
     'machine_id': 'machine-abc',

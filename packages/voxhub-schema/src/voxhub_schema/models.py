@@ -229,21 +229,79 @@ class StoreInfo:
 
 
 @attrs.define
-class PreparedStore:
-    """Per-store data returned by ``prepare-pull``."""
+class PrepareRequest:
+    """Arguments for ``prepare-pull``."""
 
+    store_name: str
+    staging_dir: str | None = None
+    include_existing_annotations: list[str] | None = None
+    compress: bool = False
+
+
+@attrs.define
+class PrepareResponse:
+    """Response from ``prepare-pull`` (single-store).
+
+    ``prepare-pull`` operates on exactly one store per invocation; the
+    volume metadata previously nested under ``stores[<name>]`` is now
+    flattened onto this envelope.
+
+    Parameters
+    ----------
+    protocol_version : int
+    staging_dir : str
+        Server-side staging directory the client should rsync.  The
+        directory contains ``raw.nrrd``, ``.voxhub_pull.json``, and
+        (optionally) a ``reference/`` subdirectory with exported
+        reference annotations.
+    server_host : str
+        FQDN of the staging server, echoed for client-side audit log.
+    server_stores_dir : str
+        Absolute path to the operator-configured stores directory on
+        the server.
+    store_name : str
+        Name of the store this staging dir originated from — the
+        reintegration target for push.
+    raw_name : str
+        Filename of the raw volume in *staging_dir*.
+    raw_checksum, shape, spacing_mm, origin_lps, space_directions
+        Volume metadata (per :func:`voxhub_core.staging.stage`).
+    skipped_annotations : list[dict[str, str]]
+        Requested annotations that were not exported to reference files,
+        with a human-readable reason per entry.  Non-fatal on the server
+        side; the client surfaces this prominently so the annotator is
+        never silently denied a reference file they asked for.  Each
+        entry has keys ``'path'`` and ``'reason'``.
+    """
+
+    protocol_version: int
+    staging_dir: str
+    server_host: str
+    server_stores_dir: str
+    store_name: str
+    raw_name: str
     raw_checksum: str
     shape: list[int]
     spacing_mm: list[float]
     origin_lps: list[float]
     space_directions: list[list[float]]
-    expected_ontologies: list[str]
-    included_annotations: list[str]
+    skipped_annotations: list[dict[str, str]] = attrs.Factory(list)
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
+        skipped_raw = d.get('skipped_annotations', []) or []
+        skipped: list[dict[str, str]] = [
+            {'path': str(e['path']), 'reason': str(e['reason'])}
+            for e in skipped_raw  # type: ignore[union-attr]
+        ]
         return cls(
+            protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
+            staging_dir=str(d['staging_dir']),
+            server_host=str(d['server_host']),
+            server_stores_dir=str(d['server_stores_dir']),
+            store_name=str(d['store_name']),
+            raw_name=str(d['raw_name']),
             raw_checksum=str(d['raw_checksum']),
             shape=list(d['shape']),  # type: ignore[arg-type]
             spacing_mm=list(d['spacing_mm']),  # type: ignore[arg-type]
@@ -252,60 +310,7 @@ class PreparedStore:
                 list(row)  # type: ignore[arg-type]
                 for row in d['space_directions']  # type: ignore[union-attr]
             ],
-            expected_ontologies=list(
-                d.get('expected_ontologies', [])  # type: ignore[arg-type]
-            ),
-            included_annotations=list(
-                d.get('included_annotations', [])  # type: ignore[arg-type]
-            ),
-        )
-
-
-@attrs.define
-class PrepareRequest:
-    """Arguments for ``prepare-pull``."""
-
-    store_names: list[str] | None = None
-    ontologies: list[str] | None = None
-    staging_dir: str | None = None
-    include_existing_annotations: list[str] | None = None
-    compress: bool = False
-
-
-@attrs.define
-class PrepareResponse:
-    """Response from ``prepare-pull``.
-
-    Parameters
-    ----------
-    protocol_version : int
-    staging_dir : str
-        Server-side staging directory the client should pull from.
-    server_stores_dir : str
-        Absolute path to the operator-configured stores directory on
-        the server.  Echoed back so the client can record it in the
-        local pull manifest for provenance / audit purposes.
-    stores : dict[str, PreparedStore]
-    """
-
-    protocol_version: int
-    staging_dir: str
-    server_stores_dir: str
-    stores: dict[str, PreparedStore]
-
-    @classmethod
-    def from_dict(cls, d: dict[str, object]) -> Self:
-        """Deserialize from a plain dict."""
-        stores_raw = d.get('stores', {})
-        stores = {
-            name: PreparedStore.from_dict(info)  # type: ignore[arg-type]
-            for name, info in stores_raw.items()  # type: ignore[union-attr]
-        }
-        return cls(
-            protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
-            staging_dir=str(d['staging_dir']),
-            server_stores_dir=str(d['server_stores_dir']),
-            stores=stores,
+            skipped_annotations=skipped,
         )
 
 

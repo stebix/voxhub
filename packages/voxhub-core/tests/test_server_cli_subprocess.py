@@ -94,7 +94,7 @@ class TestCommandSmoke:
         staging = tmp_path / 'subproc_staging'
         result = subprocess_server(
             'prepare-pull',
-            '--stores',
+            '--store',
             'alpha',
             '--staging-dir',
             str(staging),
@@ -103,7 +103,10 @@ class TestCommandSmoke:
         assert result.returncode == 0, result.stderr
         payload = _parse_json_stdout(result)
         assert Path(payload['staging_dir']) == staging
-        assert 'alpha' in payload['stores']
+        assert payload['store_name'] == 'alpha'
+        assert payload['raw_name'] == 'raw.nrrd'
+        assert (staging / 'raw.nrrd').is_file()
+        assert (staging / '.voxhub_pull.json').is_file()
 
     def test_integrate_annotations_full_roundtrip(
         self,
@@ -239,13 +242,13 @@ class TestProtocolContract:
     ):
         """A deliberately-failing invocation produces a structured
         ServerError envelope — never a raw traceback."""
-        # Point at a valid empty root, then ask for an unknown store —
-        # ``stage()`` raises FileNotFoundError → prepare_pull_failed envelope.
+        # Ask for a store that does not exist — prepare-pull validates the
+        # store upfront and surfaces ``store_not_found``.
         root = stores_dir_factory(('alpha',))
         server_config_env(root)
         result = subprocess_server(
             'prepare-pull',
-            '--stores',
+            '--store',
             'does-not-exist',
             '--staging-dir',
             str(tmp_path / 'staging'),
@@ -255,7 +258,7 @@ class TestProtocolContract:
         payload = _parse_json_stdout(result)
         assert payload['protocol_version'] == PROTOCOL_VERSION
         assert payload['error'] is True
-        assert payload['code'] == 'prepare_pull_failed'
+        assert payload['code'] == 'store_not_found'
         assert isinstance(payload['message'], str)
         # No traceback leaked onto stdout.
         assert 'Traceback' not in result.stdout

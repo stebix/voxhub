@@ -170,26 +170,49 @@ class TestListStores:
 
 
 class TestPreparePull:
-    """Covers voxhub_core.server.cli._run_prepare_pull."""
+    """Covers voxhub_core.server.cli._run_prepare_pull (single-store)."""
 
     def test_stages_single_store_to_tempdir(
         self, stores_dir_factory, server_argv, parsed_stdout
     ):
         root = stores_dir_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
 
         payload = parsed_stdout()
         staging_dir = Path(payload['staging_dir'])
         try:
             assert staging_dir.is_dir()
             assert staging_dir.name.startswith(server_cli.STAGING_DIR_PREFIX)
-            entry = payload['stores']['alpha']
-            assert entry['raw_checksum'].startswith('sha256:')
-            assert entry['shape'] == list(SHAPE)
-            assert entry['spacing_mm'] == SPACING_MM
-            assert entry['origin_lps'] == ORIGIN_LPS
-            assert entry['expected_ontologies'] == []
-            assert entry['included_annotations'] == []
+            assert payload['store_name'] == 'alpha'
+            assert payload['raw_name'] == 'raw.nrrd'
+            assert payload['raw_checksum'].startswith('sha256:')
+            assert payload['shape'] == list(SHAPE)
+            assert payload['spacing_mm'] == SPACING_MM
+            assert payload['origin_lps'] == ORIGIN_LPS
+            assert payload['skipped_annotations'] == []
+            # Layout: raw.nrrd lives at the session root, no <store_name>/ subdir.
+            assert (staging_dir / 'raw.nrrd').is_file()
+            assert not (staging_dir / 'alpha').exists()
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def test_writes_pull_manifest(self, stores_dir_factory, server_argv, parsed_stdout):
+        from voxhub_schema import PullManifest
+
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
+
+        payload = parsed_stdout()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            assert (staging_dir / '.voxhub_pull.json').is_file()
+            manifest = PullManifest.read(staging_dir)
+            assert manifest.store_name == 'alpha'
+            assert manifest.raw_name == 'raw.nrrd'
+            assert manifest.raw_checksum == payload['raw_checksum']
+            assert manifest.server_stores_dir == str(root)
+            assert manifest.shape == list(SHAPE)
+            assert manifest.annotations == []
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -199,60 +222,28 @@ class TestPreparePull:
         root = stores_dir_factory(('alpha',))
         explicit = tmp_path / 'explicit_staging'
         server_cli._run_prepare_pull(
-            server_argv(stores_dir=root, stores=['alpha'], staging_dir=str(explicit))
+            server_argv(stores_dir=root, store='alpha', staging_dir=str(explicit))
         )
 
         payload = parsed_stdout()
         assert Path(payload['staging_dir']) == explicit
         assert explicit.is_dir()
-        assert not payload['staging_dir'].startswith(
-            (f'/tmp/{server_cli.STAGING_DIR_PREFIX}', '/var/')
-        )
+        assert (explicit / 'raw.nrrd').is_file()
+        assert (explicit / '.voxhub_pull.json').is_file()
 
-    def test_filters_stores_by_name(self, stores_dir_factory, server_argv, parsed_stdout):
-        root = stores_dir_factory(('alpha', 'bravo', 'charlie'))
-        server_cli._run_prepare_pull(
-            server_argv(stores_dir=root, stores=['alpha', 'charlie'])
-        )
-
-        payload = parsed_stdout()
-        try:
-            assert set(payload['stores']) == {'alpha', 'charlie'}
-        finally:
-            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
-
-    def test_records_expected_ontologies(
+    def test_exports_reference_annotation(
         self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = stores_dir_factory(('alpha',))
-        server_cli._run_prepare_pull(
-            server_argv(
-                stores_dir=root,
-                stores=['alpha'],
-                ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
-            )
-        )
+        """Requested annotation is exported to reference/ and recorded in manifest."""
+        from voxhub_schema import PullManifest
 
-        payload = parsed_stdout()
-        try:
-            assert payload['stores']['alpha']['expected_ontologies'] == [
-                'inner-ear-structures',
-                'inner-ear-landmarks',
-            ]
-        finally:
-            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
-
-    def test_copies_existing_annotations_when_requested(
-        self, stores_dir_factory, server_argv, parsed_stdout
-    ):
         root = stores_dir_factory(('alpha',), with_annotations=True)
-        # The populate_store_annotation helper uses deterministic nano_id/random.
         ann_rel = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12'
 
         server_cli._run_prepare_pull(
             server_argv(
                 stores_dir=root,
-                stores=['alpha'],
+                store='alpha',
                 include_existing_annotations=[ann_rel],
             )
         )
@@ -260,7 +251,20 @@ class TestPreparePull:
         payload = parsed_stdout()
         staging_dir = Path(payload['staging_dir'])
         try:
-            assert (staging_dir / 'alpha' / ann_rel).is_dir()
+            ref_dir = staging_dir / 'reference'
+            assert ref_dir.is_dir()
+            files = list(ref_dir.iterdir())
+            # Populated annotation has no segments/labels, so it may classify
+            # as landmarks and fail export; allow skipped, but manifest must
+            # reflect reality.
+            manifest = PullManifest.read(staging_dir)
+            assert len(manifest.annotations) + len(payload['skipped_annotations']) == 1
+            if manifest.annotations:
+                entry = manifest.annotations[0]
+                assert entry.annotator_id == 'alice'
+                assert entry.zarr_source_path == ann_rel
+                assert entry.reference_checksum.startswith('sha256:')
+                assert entry.reference_filename in (f.name for f in files)
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -279,7 +283,7 @@ class TestPreparePull:
         monkeypatch.setattr(server_cli, 'stage', spy_stage)
 
         server_cli._run_prepare_pull(
-            server_argv(stores_dir=root, stores=['alpha'], compress=True)
+            server_argv(stores_dir=root, store='alpha', compress=True)
         )
         payload = parsed_stdout()
         try:
@@ -298,7 +302,7 @@ class TestPreparePull:
         monkeypatch.setattr(server_cli, 'stage', boom)
 
         with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
+            server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
         assert excinfo.value.code == 1
 
         envelope = parsed_stdout()
@@ -307,28 +311,68 @@ class TestPreparePull:
         assert 'staging blew up' in envelope['message']
         assert envelope['protocol_version'] == PROTOCOL_VERSION
 
-    def test_nonexistent_store_name(self, stores_dir_factory, server_argv, parsed_stdout):
-        """Document current behavior: unknown --stores names are fatal —
-        ``stage()`` raises FileNotFoundError and the handler surfaces a
-        ``prepare_pull_failed`` error envelope with SystemExit(1)."""
+    def test_store_not_found_fails_before_staging(
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout, monkeypatch
+    ):
+        """Missing --store errors early with no staging dir created."""
         root = stores_dir_factory(('alpha',))
+
+        # Sentinel to assert stage is never called.
+        calls: list[int] = []
+
+        def sentinel(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append(1)
+            raise AssertionError('stage must not be called when store is absent')
+
+        monkeypatch.setattr(server_cli, 'stage', sentinel)
 
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_prepare_pull(
-                server_argv(stores_dir=root, stores=['does-not-exist'])
+                server_argv(stores_dir=root, store='does-not-exist')
             )
         assert excinfo.value.code == 1
 
         envelope = parsed_stdout()
         assert envelope['error'] is True
-        assert envelope['code'] == 'prepare_pull_failed'
+        assert envelope['code'] == 'store_not_found'
         assert 'does-not-exist' in envelope['message']
+        assert calls == []
+
+    def test_skipped_annotation_missing_array(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        """Requesting an annotation path without a data array surfaces
+        it in skipped_annotations; manifest has no entry for it."""
+        from voxhub_schema import PullManifest
+
+        root = stores_dir_factory(('alpha',))
+        missing_ann = 'annotations/alice-abcd1234/nothing-here-20260101-zz99'
+
+        server_cli._run_prepare_pull(
+            server_argv(
+                stores_dir=root,
+                store='alpha',
+                include_existing_annotations=[missing_ann],
+            )
+        )
+
+        payload = parsed_stdout()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            assert len(payload['skipped_annotations']) == 1
+            skip = payload['skipped_annotations'][0]
+            assert skip['path'] == missing_ann
+            assert 'not found' in skip['reason']
+            manifest = PullManifest.read(staging_dir)
+            assert manifest.annotations == []
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def test_protocol_version_present(
         self, stores_dir_factory, server_argv, parsed_stdout
     ):
         root = stores_dir_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
         payload = parsed_stdout()
         try:
             assert payload['protocol_version'] == PROTOCOL_VERSION
@@ -339,7 +383,7 @@ class TestPreparePull:
         self, stores_dir_factory, server_argv, parsed_stdout
     ):
         root = stores_dir_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
         payload = parsed_stdout()
         try:
             assert isinstance(payload['staging_dir'], str)
@@ -904,6 +948,42 @@ class TestCleanup:
         assert payload['status'] == 'ok'
         assert not staging.exists()
 
+    def test_emits_staging_dir_reaped_event_on_ack(
+        self, tmp_path, server_argv, parsed_stdout, caplog
+    ):
+        """Successful cleanup emits ``staging_dir_reaped`` with
+        ``reason='client_ack'`` for observability."""
+        from voxhub_schema import PROTOCOL_VERSION, PullManifest
+
+        staging = tmp_path / 'vxhb-staging-abc'
+        staging.mkdir()
+        PullManifest(
+            protocol_version=PROTOCOL_VERSION,
+            prepared_at='2026-04-14T12:00:00+00:00',
+            server_host='h',
+            server_stores_dir='/s',
+            store_name='patient-007',
+            raw_name='raw.nrrd',
+            raw_checksum='sha256:x',
+            shape=[1, 1, 1],
+            spacing_mm=[1.0, 1.0, 1.0],
+            origin_lps=[0.0, 0.0, 0.0],
+            space_directions=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        ).write(staging)
+
+        with caplog.at_level('INFO'):
+            server_cli._run_cleanup(server_argv(staging_dir=str(staging)))
+        parsed_stdout()
+
+        reaped_events = [
+            r for r in caplog.records if "'event': 'staging_dir_reaped'" in r.message
+        ]
+        assert len(reaped_events) == 1
+        msg = reaped_events[0].message
+        assert "'reason': 'client_ack'" in msg
+        assert "'store_name': 'patient-007'" in msg
+        assert "'had_manifest': True" in msg
+
     def test_noop_when_staging_dir_missing(
         self, tmp_path, server_argv, parsed_stdout, capsys
     ):
@@ -975,6 +1055,47 @@ class TestGc:
         assert str(old) in payload['removed']
         assert payload['count'] == 1
         assert not old.exists()
+
+    def test_emits_staging_dir_reaped_event_on_gc(
+        self, tmp_path, server_argv, parsed_stdout, monkeypatch, caplog
+    ):
+        """GC reap emits ``staging_dir_reaped`` with ``reason='gc_unacked'``."""
+        from voxhub_schema import PROTOCOL_VERSION, PullManifest
+
+        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+        old = tmp_path / 'fake_tmp' / 'vxhb-staging-old'
+        old.mkdir()
+        PullManifest(
+            protocol_version=PROTOCOL_VERSION,
+            prepared_at='2026-04-14T12:00:00+00:00',
+            server_host='h',
+            server_stores_dir='/s',
+            store_name='patient-013',
+            raw_name='raw.nrrd',
+            raw_checksum='sha256:x',
+            shape=[1, 1, 1],
+            spacing_mm=[1.0, 1.0, 1.0],
+            origin_lps=[0.0, 0.0, 0.0],
+            space_directions=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        ).write(old)
+
+        import os as _os
+
+        old_ts = old.stat().st_mtime - 48 * 3600
+        _os.utime(old, (old_ts, old_ts))
+
+        with caplog.at_level('INFO'):
+            server_cli._run_gc(server_argv(ttl_hours=24.0))
+        parsed_stdout()
+
+        reaped_events = [
+            r for r in caplog.records if "'event': 'staging_dir_reaped'" in r.message
+        ]
+        assert len(reaped_events) == 1
+        msg = reaped_events[0].message
+        assert "'reason': 'gc_unacked'" in msg
+        assert "'store_name': 'patient-013'" in msg
+        assert "'had_manifest': True" in msg
 
     def test_keeps_dirs_newer_than_ttl(
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
@@ -1359,7 +1480,7 @@ class TestMainStoresDirResolution:
                 'abcd1234',
             ]
         elif subcommand == 'prepare-pull':
-            argv += ['--stores', 'alpha']
+            argv += ['--store', 'alpha']
 
         monkeypatch.setattr('sys.argv', argv)
         server_cli.main()

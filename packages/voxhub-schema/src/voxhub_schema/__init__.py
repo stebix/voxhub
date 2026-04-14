@@ -2,6 +2,8 @@
 
 from voxhub_schema.manifest import (
     ManifestStatus,
+    PullAnnotationEntry,
+    PullManifest,
     RemoteManifest,
     RemoteManifestEntry,
 )
@@ -17,7 +19,6 @@ from voxhub_schema.models import (
     IssueRecord,
     LengthUnit,
     Modality,
-    PreparedStore,
     PrepareRequest,
     PrepareResponse,
     Resolution,
@@ -25,6 +26,12 @@ from voxhub_schema.models import (
     StoreInfo,
     WriteMode,
     serialize,
+)
+from voxhub_schema.naming import (
+    NANO_ID_ALPHABET,
+    NANO_ID_LENGTH,
+    AnnotatorSlugError,
+    parse_annotator_slug,
 )
 from voxhub_schema.nano_id import (
     ALPHABET,
@@ -49,10 +56,14 @@ __all__ = [
     # nano_id
     'ALPHABET',
     'DEFAULT_SIZE',
+    # naming
+    'NANO_ID_ALPHABET',
+    'NANO_ID_LENGTH',
     # models
     'PROTOCOL_VERSION',
     'UNCONSTRAINED_SEGMENTATION',
     'AnnotationInfo',
+    'AnnotatorSlugError',
     # ontology
     'ChannelMode',
     'CleanupResponse',
@@ -71,7 +82,8 @@ __all__ = [
     'OntologyType',
     'PrepareRequest',
     'PrepareResponse',
-    'PreparedStore',
+    'PullAnnotationEntry',
+    'PullManifest',
     'RemoteManifest',
     'RemoteManifestEntry',
     'Resolution',
@@ -81,6 +93,7 @@ __all__ = [
     'generate_nano_id',
     'list_ontologies',
     'load_ontology',
+    'parse_annotator_slug',
     'serialize',
     # validation
     'validate_lmk_preflight',

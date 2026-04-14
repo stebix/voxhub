@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -23,6 +24,11 @@ from typing import Any
 import zarr
 from rich.console import Console
 
+from voxhub_core.annotation_export import (
+    ExportError,
+    export_landmarks,
+    export_segmentation,
+)
 from voxhub_core.attributes import (
     DATASET_ATTRIBUTES_KEY,
     get_dataset_attributes,
@@ -48,15 +54,18 @@ from voxhub_core.server.settings import SettingsError, load_settings
 from voxhub_core.staging import extract_spatial_metadata, stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
+    AnnotatorSlugError,
     IssueRecord,
     Ontology,
+    PullAnnotationEntry,
+    PullManifest,
     RemoteManifest,
     ServerError,
     generate_nano_id,
     load_ontology,
+    parse_annotator_slug,
     serialize,
 )
-
 
 STAGING_DIR_PREFIX: str = 'vxhb-staging-'
 
@@ -191,27 +200,114 @@ def _run_list_stores(args: argparse.Namespace) -> None:
 # -- prepare-pull ------------------------------------------------------------
 
 
+def _export_reference_annotations(
+    zarr_path: Path,
+    staging_dir: Path,
+    include_annotations: list[str],
+    log: Any,
+) -> tuple[list[PullAnnotationEntry], list[dict[str, str]]]:
+    """Export requested annotations to ``<staging_dir>/reference/``.
+
+    Returns ``(manifest_entries, skipped)``.  Failures on individual
+    annotations are non-fatal: they are appended to ``skipped`` with a
+    human-readable reason and the remaining annotations continue.
+    """
+    manifest_entries: list[PullAnnotationEntry] = []
+    skipped: list[dict[str, str]] = []
+
+    if not include_annotations:
+        return manifest_entries, skipped
+
+    ref_dir = staging_dir / 'reference'
+
+    for ann_path in include_annotations:
+        src_array = zarr_path / ann_path / 'data'
+        if not src_array.exists():
+            skipped.append({'path': ann_path, 'reason': 'array not found in store'})
+            log.warning('annotation_missing', path=ann_path)
+            continue
+
+        try:
+            grp = zarr.open_group(zarr_path / ann_path, mode='r')
+            arr = grp['data']
+            a = dict(arr.attrs)
+            kind = 'segmentation' if 'segments' in a else 'landmarks'
+        except Exception as exc:
+            skipped.append({'path': ann_path, 'reason': f'could not open: {exc}'})
+            log.warning('annotation_open_failed', path=ann_path, error=str(exc))
+            continue
+
+        instance_name = Path(ann_path).name
+        annotator_slug = Path(ann_path).parts[-2]
+        try:
+            annotator_id, _nano_id = parse_annotator_slug(annotator_slug)
+        except AnnotatorSlugError as exc:
+            skipped.append(
+                {'path': ann_path, 'reason': f'malformed annotator slug: {exc}'}
+            )
+            log.warning('malformed_slug', path=ann_path, error=str(exc))
+            continue
+
+        ext = '.seg.nrrd' if kind == 'segmentation' else '.mrk.json'
+        ref_filename = f'{annotator_slug}_{instance_name}{ext}'
+        ref_dir.mkdir(exist_ok=True)
+        ref_dest = ref_dir / ref_filename
+
+        try:
+            array_zarr_path = str(Path(ann_path) / 'data')
+            if kind == 'segmentation':
+                checksum = export_segmentation(zarr_path, array_zarr_path, ref_dest)
+            else:
+                checksum = export_landmarks(zarr_path, array_zarr_path, ref_dest)
+        except ExportError as exc:
+            log.warning('annotation_export_failed', path=ann_path, error=str(exc))
+            skipped.append({'path': ann_path, 'reason': str(exc)})
+            continue
+
+        manifest_entries.append(
+            PullAnnotationEntry(
+                zarr_source_path=ann_path,
+                kind=kind,
+                ontology=str(a.get('ontology', '')),
+                ontology_version=int(a.get('ontology_version', 0) or 0),
+                annotator_id=annotator_id,
+                integrated_at=str(a.get('integrated_at', '')),
+                reference_filename=ref_filename,
+                reference_checksum=checksum,
+            )
+        )
+
+    return manifest_entries, skipped
+
+
 def _run_prepare_pull(args: argparse.Namespace) -> None:
     log = get_logger(command='prepare-pull')
     t0 = time.monotonic()
 
     stores_dir = Path(args.stores_dir)
-    store_names = args.stores
-    ontologies = args.ontologies or []
-    compress = args.compress
-    include_annotations = args.include_existing_annotations or []
+    store_name: str = args.store
+    compress: bool = args.compress
+    include_annotations: list[str] = args.include_existing_annotations or []
 
     log.info(
         'prepare_pull_started',
         stores_dir=str(stores_dir),
-        stores=store_names,
-        ontologies=ontologies,
+        store=store_name,
+        include_annotations=include_annotations,
     )
+
+    # -- Task 1: upfront store validation (before mkdtemp) ------------------
+    zarr_path = stores_dir / f'{store_name}.zarr'
+    if not zarr_path.is_dir():
+        log.error('store_not_found', store=store_name, stores_dir=str(stores_dir))
+        _write_error('store_not_found', f'Store not found: {store_name!r}')
+        sys.exit(1)
 
     # Create a temp dir for staging.
     session_id = generate_nano_id()
     if args.staging_dir:
         staging_dir = Path(args.staging_dir)
+        staging_dir.mkdir(parents=True, exist_ok=True)
     else:
         staging_dir = Path(
             tempfile.mkdtemp(
@@ -219,12 +315,16 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
             )
         )
 
+    # -- Task 2a: stage raw volume at <staging_dir>/raw.nrrd ----------------
+    # ``stage`` writes to ``<staging_dir>/<store_name>/raw.nrrd``.  For a
+    # single-store pull we flatten that up one level so the session root
+    # holds ``raw.nrrd`` directly (matches the client-side layout too).
     try:
         console = Console(stderr=True, quiet=True)
         store_metadata = stage(
             stores_dir,
             staging_dir,
-            store_names=store_names,
+            store_names=[store_name],
             compress=compress,
             force=True,
             console=console,
@@ -234,37 +334,51 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         _write_error('prepare_pull_failed', str(exc))
         sys.exit(1)
 
-    # Copy existing annotations if requested.
-    for ann_path in include_annotations:
-        for store_name in store_metadata:
-            zarr_path = stores_dir / f'{store_name}.zarr'
-            src = zarr_path / ann_path
-            if src.exists():
-                dst = staging_dir / store_name / ann_path
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if src.is_dir():
-                    shutil.copytree(src, dst, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(src, dst)
+    nested_raw = staging_dir / store_name / 'raw.nrrd'
+    flat_raw = staging_dir / 'raw.nrrd'
+    try:
+        nested_raw.rename(flat_raw)
+        (staging_dir / store_name).rmdir()
+    except OSError as exc:
+        log.error('staging_flatten_failed', error=str(exc))
+        _write_error('prepare_pull_failed', f'failed to flatten staging dir: {exc}')
+        sys.exit(1)
 
-    # Build response.
-    stores_response: dict[str, dict[str, Any]] = {}
-    for store_name, meta in store_metadata.items():
-        stores_response[store_name] = {
-            'raw_checksum': meta['raw_checksum'],
-            'shape': meta['shape'],
-            'spacing_mm': meta['spacing_mm'],
-            'origin_lps': meta['origin_lps'],
-            'space_directions': meta['space_directions'],
-            'expected_ontologies': ontologies,
-            'included_annotations': include_annotations,
-        }
+    meta = store_metadata[store_name]
+
+    # -- Task 2b: export reference annotations ------------------------------
+    ann_entries, skipped_annotations = _export_reference_annotations(
+        zarr_path, staging_dir, include_annotations, log
+    )
+
+    # -- Task 3: write PullManifest to staging dir --------------------------
+    try:
+        PullManifest(
+            protocol_version=PROTOCOL_VERSION,
+            prepared_at=datetime.now(UTC).isoformat(),
+            server_host=socket.getfqdn(),
+            server_stores_dir=str(stores_dir),
+            store_name=store_name,
+            raw_name='raw.nrrd',
+            raw_checksum=meta['raw_checksum'],
+            shape=meta['shape'],
+            spacing_mm=meta['spacing_mm'],
+            origin_lps=meta['origin_lps'],
+            space_directions=meta['space_directions'],
+            annotations=ann_entries,
+        ).write(staging_dir)
+    except OSError as exc:
+        log.error('manifest_write_failed', error=str(exc))
+        _write_error('prepare_pull_failed', f'failed to write pull manifest: {exc}')
+        sys.exit(1)
 
     duration = time.monotonic() - t0
     log.info(
         'prepare_pull_completed',
-        stores=list(store_metadata.keys()),
+        store=store_name,
         staging_dir=str(staging_dir),
+        exported_annotations=len(ann_entries),
+        skipped_annotations=len(skipped_annotations),
         duration_s=round(duration, 3),
     )
 
@@ -272,8 +386,16 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         {
             'protocol_version': PROTOCOL_VERSION,
             'staging_dir': str(staging_dir),
+            'server_host': socket.getfqdn(),
             'server_stores_dir': str(stores_dir),
-            'stores': stores_response,
+            'store_name': store_name,
+            'raw_name': 'raw.nrrd',
+            'raw_checksum': meta['raw_checksum'],
+            'shape': meta['shape'],
+            'spacing_mm': meta['spacing_mm'],
+            'origin_lps': meta['origin_lps'],
+            'space_directions': meta['space_directions'],
+            'skipped_annotations': skipped_annotations,
         }
     )
 
@@ -613,6 +735,19 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 # -- cleanup -----------------------------------------------------------------
 
 
+def _read_pull_manifest_safely(staging_dir: Path) -> PullManifest | None:
+    """Best-effort read of the staging dir's ``.voxhub_pull.json``.
+
+    Used purely for observability — never raises.  Returns ``None`` if
+    the manifest is absent (prepare-pull crashed before writing it) or
+    unparseable.
+    """
+    try:
+        return PullManifest.read(staging_dir)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
 def _run_cleanup(args: argparse.Namespace) -> None:
     log = get_logger(command='cleanup')
     staging_dir = Path(args.staging_dir)
@@ -620,8 +755,20 @@ def _run_cleanup(args: argparse.Namespace) -> None:
     log.info('cleanup_started', staging_dir=str(staging_dir))
 
     if staging_dir.is_dir():
+        manifest = _read_pull_manifest_safely(staging_dir)
+        try:
+            age_seconds = int(time.time() - staging_dir.stat().st_mtime)
+        except OSError:
+            age_seconds = -1
         shutil.rmtree(staging_dir)
-        log.info('cleanup_completed', staging_dir=str(staging_dir))
+        log.info(
+            'staging_dir_reaped',
+            staging_dir=str(staging_dir),
+            age_seconds=age_seconds,
+            store_name=manifest.store_name if manifest else None,
+            had_manifest=manifest is not None,
+            reason='client_ack',
+        )
     else:
         log.warning('cleanup_not_found', staging_dir=str(staging_dir))
 
@@ -656,9 +803,18 @@ def _run_gc(args: argparse.Namespace) -> None:
         except OSError:
             continue
         if mtime < cutoff:
+            manifest = _read_pull_manifest_safely(entry)
+            age_seconds = int(time.time() - mtime)
             shutil.rmtree(entry, ignore_errors=True)
             removed.append(str(entry))
-            log.info('gc_removed', path=str(entry))
+            log.info(
+                'staging_dir_reaped',
+                staging_dir=str(entry),
+                age_seconds=age_seconds,
+                store_name=manifest.store_name if manifest else None,
+                had_manifest=manifest is not None,
+                reason='gc_unacked',
+            )
 
     log.info('gc_completed', removed_count=len(removed))
 
@@ -901,10 +1057,9 @@ def main() -> None:
     ls = subparsers.add_parser('list-stores')
     ls.set_defaults(func=_run_list_stores)
 
-    # prepare-pull
+    # prepare-pull (single-store)
     pp = subparsers.add_parser('prepare-pull')
-    pp.add_argument('--stores', nargs='*')
-    pp.add_argument('--ontologies', nargs='*')
+    pp.add_argument('--store', required=True, help='Store name to pull.')
     pp.add_argument('--staging-dir', default=None)
     pp.add_argument('--include-existing-annotations', nargs='*')
     pp.add_argument('--compress', action='store_true')
