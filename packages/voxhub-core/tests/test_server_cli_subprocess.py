@@ -70,6 +70,17 @@ class TestEntryPoint:
         assert result.returncode == 2
         assert 'invalid choice' in result.stderr.lower()
 
+    def test_list_stores_if_version_rejects_non_integer(
+        self, stores_dir_factory, server_config_env, subprocess_server
+    ):
+        """``--if-version`` is typed as int; argparse must reject a non-int
+        value with the standard exit-code 2."""
+        root = stores_dir_factory(('alpha',))
+        server_config_env(root)
+        result = subprocess_server('list-stores', '--if-version', 'not-a-number')
+        assert result.returncode == 2
+        assert 'invalid int' in result.stderr.lower()
+
 
 class TestCommandSmoke:
     """One happy-path test per subcommand via real subprocess."""

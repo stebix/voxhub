@@ -234,6 +234,8 @@ _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
     # catalog refresh
     'store': None,
     'catalog_action': None,
+    # list-stores client short-circuit (PR 5)
+    'if_version': None,
 }
 
 

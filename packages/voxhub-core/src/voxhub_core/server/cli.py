@@ -112,9 +112,35 @@ def _run_list_stores(args: argparse.Namespace) -> None:
     t0 = time.monotonic()
 
     stores_dir = Path(args.stores_dir)
-    log.info('list_stores_started', stores_dir=str(stores_dir))
+    if_version: int | None = getattr(args, 'if_version', None)
+    log.info(
+        'list_stores_started',
+        stores_dir=str(stores_dir),
+        if_version=if_version,
+    )
 
     snapshot = catalog_cache.read_catalog(stores_dir)
+
+    # Client short-circuit: if the caller already holds catalog_version N
+    # and the server still serves N, skip the payload entirely. The cache
+    # read is unavoidable -- we have to know the current version before we
+    # can decide to short-circuit.
+    if if_version is not None and if_version == snapshot.catalog_version:
+        duration = time.monotonic() - t0
+        log.info(
+            'list_stores_unchanged',
+            catalog_version=snapshot.catalog_version,
+            cache_age_s=round(_age_seconds(snapshot.built_at), 3),
+            duration_s=round(duration, 3),
+        )
+        _write_dict(
+            {
+                'protocol_version': PROTOCOL_VERSION,
+                'catalog_version': snapshot.catalog_version,
+                'unchanged': True,
+            }
+        )
+        return
 
     duration = time.monotonic() - t0
     log.info(
@@ -946,6 +972,17 @@ def main() -> None:
 
     # list-stores
     ls = subparsers.add_parser('list-stores')
+    ls.add_argument(
+        '--if-version',
+        type=int,
+        default=None,
+        help=(
+            'Client cache hint: if the server still serves this catalog '
+            'version, reply with {"unchanged": true} instead of the full '
+            'payload. Optimisation only -- omitting it always returns the '
+            'full catalog.'
+        ),
+    )
     ls.set_defaults(func=_run_list_stores)
 
     # prepare-pull

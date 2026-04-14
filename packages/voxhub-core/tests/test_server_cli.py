@@ -259,6 +259,56 @@ class TestListStores:
         assert second['catalog_version'] == first['catalog_version'] + 1
         assert {s['name'] for s in second['stores']} == {'alpha', 'bravo'}
 
+    # -- --if-version client short-circuit (PR 5) --------------------------
+
+    def test_if_version_matching_returns_unchanged_envelope(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha', 'bravo'))
+        # Prime the cache so we know the current catalog_version.
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        first = parsed_stdout()
+        version = first['catalog_version']
+
+        server_cli._run_list_stores(server_argv(stores_dir=root, if_version=version))
+        payload = parsed_stdout()
+
+        assert payload['protocol_version'] == PROTOCOL_VERSION
+        assert payload['catalog_version'] == version
+        assert payload['unchanged'] is True
+        assert 'stores' not in payload
+
+    def test_if_version_mismatching_returns_full_payload(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root))
+        first = parsed_stdout()
+        stale_version = first['catalog_version'] - 1
+
+        server_cli._run_list_stores(
+            server_argv(stores_dir=root, if_version=stale_version)
+        )
+        payload = parsed_stdout()
+
+        assert 'unchanged' not in payload
+        assert payload['catalog_version'] == first['catalog_version']
+        assert {s['name'] for s in payload['stores']} == {'alpha'}
+
+    def test_if_version_zero_against_first_call_does_not_short_circuit(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        """First-ever call has no on-disk cache. The cold rebuild assigns
+        catalog_version=1, so a client probing with --if-version 0 must
+        receive the full payload, not an unchanged envelope."""
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_list_stores(server_argv(stores_dir=root, if_version=0))
+        payload = parsed_stdout()
+
+        assert payload['catalog_version'] == 1
+        assert 'unchanged' not in payload
+        assert payload['stores'][0]['name'] == 'alpha'
+
 
 # ===========================================================================
 # _run_prepare_pull
