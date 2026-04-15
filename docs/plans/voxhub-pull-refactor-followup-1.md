@@ -6,44 +6,95 @@ code is inspected.
 
 ---
 
-## 1. Unify `export` / `stage` naming under "staging"
+## 1. Three-verb vocabulary: `export` / `extract` / `stage`
 
 ### Motivation
 
-"Export" is overloaded in `voxhub-core`:
+The codebase today uses two verbs — *export* and *stage* — for
+overlapping concepts, and the word *export* is used for two genuinely
+different pipelines:
 
-- `voxhub_core.export` — **DICOM → zarr** ingestion (author-facing, runs
-  once per source dataset).
-- `voxhub_core.annotation_export` — **zarr → NRRD/JSON** for reference
-  annotations emitted by `prepare-pull` (added in the main plan).
+- `voxhub_core.export` (`export.py`) — **DICOM → zarr** ingestion
+  (author-facing, runs once per source dataset).
+- `voxhub_core.annotation_export` — **zarr array → NRRD/JSON** for
+  reference annotations emitted by `prepare-pull` (added in the main
+  plan).
+- `voxhub_core.staging.stage()` — does **two** things: the same
+  zarr → NRRD transformation on raw volumes, *and* orchestrates the
+  staging-directory layout (dir creation, per-store metadata,
+  force/exists handling).
 
-Meanwhile the raw-volume side of the same `prepare-pull` flow lives in
-`voxhub_core.staging.stage()`, which does the conceptually identical
-zarr → NRRD transformation. The codebase now uses two verbs — *stage*
-and *export* — for the same semantic operation ("materialise a zarr
-array as a Slicer-readable on-disk file"), and the word *export* also
-means something else in the same package.
+Net result: one verb (*export*) covers two unrelated pipelines, and
+another verb (*stage*) conflates a transform with a choreography.
 
 ### Goal
 
-Collapse the "zarr → on-disk Slicer file" vocabulary to a single verb:
-**stage**. The DICOM → zarr pipeline keeps *export*, which becomes
-unambiguous again.
+Adopt three orthogonal verbs, one per concept:
 
-Concretely:
+| Verb        | Meaning                                              | Home                              |
+|-------------|------------------------------------------------------|-----------------------------------|
+| **export**  | DICOM → zarr ingestion                               | `voxhub_core/export.py` (unchanged) |
+| **extract** | zarr array → a single on-disk file (NRRD / JSON)     | new `voxhub_core/extraction.py`   |
+| **stage**   | assemble a staging directory (layout, manifest, dir) | `voxhub_core/staging.py` (shrinks) |
 
-- `voxhub_core/annotation_export.py` → rename to something like
-  `annotation_staging.py` (or fold into `staging.py` if cohesion
-  supports it — to be decided during implementation).
-- `export_segmentation` / `export_landmarks` → rename to
-  `stage_segmentation_reference` / `stage_landmarks_reference` (or
-  similar). The *reference* qualifier distinguishes them from the raw
-  volume `stage()` already in that module.
-- `ExportError` → `StagingError` (or the equivalent) and all call sites
-  (`server/cli.py::_export_reference_annotations`, tests).
-- Wire-protocol field `skipped_annotations` stays. The *reason* strings
-  inside it currently interpolate `ExportError` messages; that text is
-  not a contract but worth eyeballing during the rename.
+"Extract" is chosen over alternatives (`transduce`, `materialize`,
+`emit`, `render`) because: it already has a foothold in the codebase
+(`extract_spatial_metadata`), it is semantically precise for "pull one
+array out of a zarr container and express it as a standalone file", and
+it avoids re-using *transduce* (which CLAUDE.md explicitly distances
+the project from, `dicom-transducer` legacy).
+
+### Concretely
+
+**New module — `voxhub_core/extraction.py`** (houses all zarr → file
+transforms and their shared helpers):
+
+- `ExtractionError` (was `annotation_export.ExportError`)
+- `extract_segmentation(zarr_path, array_zarr_path, dest) -> str` (was
+  `annotation_export.export_segmentation`)
+- `extract_landmarks(zarr_path, array_zarr_path, dest) -> str` (was
+  `annotation_export.export_landmarks`)
+- `extract_volume(zarr_path, dest, *, compress) -> str` — **new**,
+  peeled out of the inner loop of `staging.stage()`; performs the
+  single-store raw-volume zarr → NRRD transform
+- `extract_spatial_metadata(attrs)` — moved from `staging.py`
+- `write_nrrd_raw(path, data, header, *, compress)` — promoted from
+  `staging._write_nrrd_raw` to public (shared between the extractors)
+- `compute_sha256(path)` — deduplicated from the two identical
+  private helpers in `staging.py` and `annotation_export.py`
+- `_build_raw_volume_header`, `_build_seg_nrrd_header` — stay private
+
+**Shrunk module — `voxhub_core/staging.py`**:
+
+- `stage(stores_dir, staging_dir, *, store_names, compress, force,
+  console)` — retains its signature and CLI contract, but becomes a
+  pure orchestrator: discovers zarr stores, creates the staging
+  directory, calls `extract_volume()` per store, collects metadata.
+- Loses `_write_nrrd_raw`, `_build_nrrd_header`, `_compute_sha256`,
+  and `extract_spatial_metadata` (all move to `extraction.py`).
+
+**Deleted module**: `voxhub_core/annotation_export.py`.
+
+**Server CLI glue (`voxhub_core/server/cli.py`)**:
+
+- Import site updates to pull from `voxhub_core.extraction`.
+- `_export_reference_annotations` → `_extract_reference_annotations`.
+- Structlog event key `'annotation_export_failed'` →
+  `'annotation_extraction_failed'`.
+- Wire-protocol field `skipped_annotations` stays. The *reason*
+  strings inside it currently interpolate `ExportError` messages;
+  those error texts are not changed by the rename (only the exception
+  class name), so the substring assertion in
+  `tests/test_server_cli.py` (`'not found' in skip['reason']`) keeps
+  passing.
+
+**Tests**:
+
+- `packages/voxhub-core/tests/test_annotation_export.py` →
+  `test_extraction.py` (rename + import updates).
+- Any staging test that imported `_write_nrrd_raw` or
+  `extract_spatial_metadata` from `staging` updates its import path.
+- No assertion-text changes needed.
 
 ### Non-goals
 
@@ -53,15 +104,46 @@ Concretely:
   (`reference/<filename>`, `.voxhub_pull.json`) or the `PullManifest`
   schema. The rename is internal to `voxhub-core` plus the server-CLI
   glue.
+- Do **not** change the `stage()` CLI surface (the local-workflow
+  `voxhub-core stage` command keeps its arguments and output).
+- No backward-compat re-exports from `staging.py` for the moved
+  symbols — greenfield policy (CLAUDE.md) applies; clean break.
+
+### Open questions for implementation
+
+1. **`write_nrrd_raw` public or private?** Used by both
+   `extract_volume` and (indirectly, via `nrrd.write`) the annotation
+   extractors. Leaning public to avoid duplication; confirm during
+   implementation.
+2. **Log-event rename blast radius.** Rename of
+   `annotation_export_failed` → `annotation_extraction_failed` is
+   safe given no external dashboards yet (Hetzner small-VPS, no
+   observability stack provisioned), but worth one last grep before
+   landing.
+
+### Commit structure
+
+Prefer a single atomic rename commit — the change is mechanical and
+atomicity preserves `git blame` coherence. If review prefers smaller
+units, split into:
+
+1. Create `extraction.py` (move from `annotation_export.py` + low-
+   level helpers from `staging.py`); delete `annotation_export.py`;
+   shrink `staging.py` to orchestrator.
+2. Update `server/cli.py` imports, function name, and event key.
+3. Rename test module and update imports; update this planning doc
+   and the main pull-refactor doc.
 
 ### Success criteria
 
-- No occurrence of "export" in the `voxhub-core` surface that refers to
-  zarr → Slicer-file materialisation.
-- `voxhub_core.export` remains and continues to mean DICOM → zarr
-  ingestion.
-- No change in wire-protocol responses, manifest schema, client code,
-  or test semantics — only names move.
+- No occurrence of "export" in the `voxhub-core` surface that refers
+  to zarr → Slicer-file materialisation. Remaining uses of "export"
+  refer exclusively to DICOM → zarr ingestion.
+- `voxhub_core.extraction` is the single home for zarr → on-disk-file
+  transforms. `voxhub_core.staging` is the single home for
+  staging-directory choreography.
+- No change in wire-protocol responses, manifest schema, on-disk
+  layout, client code, or test semantics — only names move.
 - `just check` and `just test` stay green with identical test counts.
 
 ---
@@ -224,3 +306,40 @@ But the doc should enumerate all three neutrally.
 - Linked from `docs/plans/voxhub-pull-refactor.md` (or its successor)
   so the push-redesign author finds it immediately.
 - No code or test changes in the commit that lands this doc.
+
+---
+
+## Follow-on opportunities (out of scope for §1)
+
+Two cleanups naturally enabled by the `extraction.py` split but kept
+out of the base rename commit so `git blame` for the rename stays
+mechanical:
+
+### A. Simplify `_run_prepare_pull` raw-volume staging
+
+`server/cli.py:_run_prepare_pull` currently calls `staging.stage()` to
+produce a single-store NRRD, then manually flattens the nested
+`<staging_dir>/<store_name>/raw.nrrd` up to `<staging_dir>/raw.nrrd`
+and `rmdir`s the now-empty subdir (`server/cli.py:337-345`). With
+`extraction.extract_volume()` available, the flow collapses to a
+direct call that writes `raw.nrrd` at the session root:
+
+```python
+meta = extract_volume(zarr_path, staging_dir / 'raw.nrrd', compress=compress)
+```
+
+The "flatten" kludge and its dedicated error envelope
+(`staging_flatten_failed`) disappear. The `stage()` CLI command
+(author-facing, multi-store) is untouched.
+
+### B. Dedup `server/cli.py::_compute_sha256`
+
+After the rename, `voxhub_core.extraction.compute_sha256` is a public
+helper with the same body as the private `_compute_sha256` at
+`server/cli.py:97`. Replace the private copy with an import from
+`extraction`. `tests/test_server_cli.py:589` currently reaches into
+`server_cli._compute_sha256`; update it to the new import site (or
+keep a thin `_compute_sha256 = compute_sha256` alias in the module if
+the test access pattern is load-bearing for other reasons).
+
+Both items are trivial follow-ons — expect a single commit each.

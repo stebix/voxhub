@@ -1,4 +1,4 @@
-"""Tests for :mod:`voxhub_core.annotation_export`."""
+"""Tests for :mod:`voxhub_core.extraction`."""
 
 import hashlib
 
@@ -13,10 +13,10 @@ from _core_helpers import (
     populate_store_annotation,
 )
 
-from voxhub_core.annotation_export import (
-    ExportError,
-    export_landmarks,
-    export_segmentation,
+from voxhub_core.extraction import (
+    ExtractionError,
+    extract_landmarks,
+    extract_segmentation,
 )
 from voxhub_core.slicer import parse_mrk_json, parse_seg_nrrd
 
@@ -69,14 +69,14 @@ _SAMPLE_SEGMENTS: list[dict] = [
 ]
 
 
-class TestExportSegmentation:
+class TestExtractSegmentation:
     def test_produces_parseable_seg_nrrd(self, tmp_path):
         zarr_path = tmp_path / 'store.zarr'
         create_zarr_store(zarr_path)
         ann_path = _seed_segmentation(zarr_path, segments=_SAMPLE_SEGMENTS)
 
         dest = tmp_path / 'out.seg.nrrd'
-        export_segmentation(zarr_path, f'{ann_path}/data', dest)
+        extract_segmentation(zarr_path, f'{ann_path}/data', dest)
 
         parsed = parse_seg_nrrd(dest)
         assert parsed.label_map.shape == SHAPE
@@ -93,7 +93,7 @@ class TestExportSegmentation:
         ann_path = _seed_segmentation(zarr_path, segments=_SAMPLE_SEGMENTS)
 
         dest = tmp_path / 'out.seg.nrrd'
-        digest = export_segmentation(zarr_path, f'{ann_path}/data', dest)
+        digest = extract_segmentation(zarr_path, f'{ann_path}/data', dest)
 
         expected = 'sha256:' + hashlib.sha256(dest.read_bytes()).hexdigest()
         assert digest == expected
@@ -102,8 +102,8 @@ class TestExportSegmentation:
         zarr_path = tmp_path / 'store.zarr'
         create_zarr_store(zarr_path)
         dest = tmp_path / 'out.seg.nrrd'
-        with pytest.raises(ExportError, match='not found'):
-            export_segmentation(
+        with pytest.raises(ExtractionError, match='not found'):
+            extract_segmentation(
                 zarr_path,
                 'annotations/alice-xyz45678/missing/data',
                 dest,
@@ -125,8 +125,8 @@ class TestExportSegmentation:
         arr.update_attributes({'segments': _SAMPLE_SEGMENTS})
 
         dest = tmp_path / 'out.seg.nrrd'
-        with pytest.raises(ExportError, match='integer dtype'):
-            export_segmentation(zarr_path, f'{ann_path}/data', dest)
+        with pytest.raises(ExtractionError, match='integer dtype'):
+            extract_segmentation(zarr_path, f'{ann_path}/data', dest)
 
     def test_missing_segments_attr_raises(self, tmp_path):
         zarr_path = tmp_path / 'store.zarr'
@@ -135,8 +135,8 @@ class TestExportSegmentation:
             zarr_path, kind='segmentation', segments=None, labels=None
         )
         dest = tmp_path / 'out.seg.nrrd'
-        with pytest.raises(ExportError, match="'segments' attribute"):
-            export_segmentation(zarr_path, f'{ann_path}/data', dest)
+        with pytest.raises(ExtractionError, match="'segments' attribute"):
+            extract_segmentation(zarr_path, f'{ann_path}/data', dest)
 
     def test_malformed_segments_entry_raises(self, tmp_path):
         zarr_path = tmp_path / 'store.zarr'
@@ -148,8 +148,8 @@ class TestExportSegmentation:
             zarr_path, kind='segmentation', segments=bad_segments
         )
         dest = tmp_path / 'out.seg.nrrd'
-        with pytest.raises(ExportError, match='missing keys'):
-            export_segmentation(zarr_path, f'{ann_path}/data', dest)
+        with pytest.raises(ExtractionError, match='missing keys'):
+            extract_segmentation(zarr_path, f'{ann_path}/data', dest)
 
 
 # -- Landmarks ---------------------------------------------------------------
@@ -178,7 +178,7 @@ def _seed_landmarks(zarr_path, *, labels, points):
     return ann_path
 
 
-class TestExportLandmarks:
+class TestExtractLandmarks:
     def test_produces_parseable_mrk_json(self, tmp_path):
         zarr_path = tmp_path / 'store.zarr'
         create_zarr_store(zarr_path)
@@ -190,7 +190,7 @@ class TestExportLandmarks:
         ann_path = _seed_landmarks(zarr_path, labels=labels, points=points)
 
         dest = tmp_path / 'out.mrk.json'
-        export_landmarks(zarr_path, f'{ann_path}/data', dest)
+        extract_landmarks(zarr_path, f'{ann_path}/data', dest)
 
         parsed = parse_mrk_json(dest)
         assert parsed.labels == labels
@@ -205,7 +205,7 @@ class TestExportLandmarks:
         ann_path = _seed_landmarks(zarr_path, labels=labels, points=points)
 
         dest = tmp_path / 'out.mrk.json'
-        digest = export_landmarks(zarr_path, f'{ann_path}/data', dest)
+        digest = extract_landmarks(zarr_path, f'{ann_path}/data', dest)
 
         expected = 'sha256:' + hashlib.sha256(dest.read_bytes()).hexdigest()
         assert digest == expected
@@ -214,8 +214,8 @@ class TestExportLandmarks:
         zarr_path = tmp_path / 'store.zarr'
         create_zarr_store(zarr_path)
         dest = tmp_path / 'out.mrk.json'
-        with pytest.raises(ExportError, match='not found'):
-            export_landmarks(
+        with pytest.raises(ExtractionError, match='not found'):
+            extract_landmarks(
                 zarr_path,
                 'annotations/alice-xyz45678/missing/data',
                 dest,
@@ -235,8 +235,8 @@ class TestExportLandmarks:
             data=np.zeros((2, 3), dtype=np.float64),
         )
         dest = tmp_path / 'out.mrk.json'
-        with pytest.raises(ExportError, match="'labels' attribute"):
-            export_landmarks(zarr_path, f'{ann_path}/data', dest)
+        with pytest.raises(ExtractionError, match="'labels' attribute"):
+            extract_landmarks(zarr_path, f'{ann_path}/data', dest)
 
     def test_shape_mismatch_raises(self, tmp_path):
         zarr_path = tmp_path / 'store.zarr'
@@ -254,8 +254,8 @@ class TestExportLandmarks:
         arr.update_attributes({'labels': ['a', 'b']})
 
         dest = tmp_path / 'out.mrk.json'
-        with pytest.raises(ExportError, match=r'shape \(N, 3\)'):
-            export_landmarks(zarr_path, f'{ann_path}/data', dest)
+        with pytest.raises(ExtractionError, match=r'shape \(N, 3\)'):
+            extract_landmarks(zarr_path, f'{ann_path}/data', dest)
 
     def test_labels_points_count_mismatch_raises(self, tmp_path):
         zarr_path = tmp_path / 'store.zarr'
@@ -273,5 +273,5 @@ class TestExportLandmarks:
         arr.update_attributes({'labels': ['a', 'b', 'c']})
 
         dest = tmp_path / 'out.mrk.json'
-        with pytest.raises(ExportError, match='does not match'):
-            export_landmarks(zarr_path, f'{ann_path}/data', dest)
+        with pytest.raises(ExtractionError, match='does not match'):
+            extract_landmarks(zarr_path, f'{ann_path}/data', dest)

@@ -24,17 +24,18 @@ from typing import Any
 import zarr
 from rich.console import Console
 
-from voxhub_core.annotation_export import (
-    ExportError,
-    export_landmarks,
-    export_segmentation,
-)
 from voxhub_core.attributes import (
     DATASET_ATTRIBUTES_KEY,
     get_dataset_attributes,
     validate_dataset_attributes,
 )
 from voxhub_core.catalog import discover_zarr_stores
+from voxhub_core.extraction import (
+    ExtractionError,
+    extract_landmarks,
+    extract_segmentation,
+    extract_spatial_metadata,
+)
 from voxhub_core.integrate import (
     find_annotation_files,
     parse_mrk_json,
@@ -51,7 +52,7 @@ from voxhub_core.server.provenance import (
     validate_provenance_jsonl,
 )
 from voxhub_core.server.settings import SettingsError, load_settings
-from voxhub_core.staging import extract_spatial_metadata, stage
+from voxhub_core.staging import stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
     AnnotatorSlugError,
@@ -200,13 +201,13 @@ def _run_list_stores(args: argparse.Namespace) -> None:
 # -- prepare-pull ------------------------------------------------------------
 
 
-def _export_reference_annotations(
+def _extract_reference_annotations(
     zarr_path: Path,
     staging_dir: Path,
     include_annotations: list[str],
     log: Any,
 ) -> tuple[list[PullAnnotationEntry], list[dict[str, str]]]:
-    """Export requested annotations to ``<staging_dir>/reference/``.
+    """Extract requested annotations to ``<staging_dir>/reference/``.
 
     Returns ``(manifest_entries, skipped)``.  Failures on individual
     annotations are non-fatal: they are appended to ``skipped`` with a
@@ -256,11 +257,11 @@ def _export_reference_annotations(
         try:
             array_zarr_path = str(Path(ann_path) / 'data')
             if kind == 'segmentation':
-                checksum = export_segmentation(zarr_path, array_zarr_path, ref_dest)
+                checksum = extract_segmentation(zarr_path, array_zarr_path, ref_dest)
             else:
-                checksum = export_landmarks(zarr_path, array_zarr_path, ref_dest)
-        except ExportError as exc:
-            log.warning('annotation_export_failed', path=ann_path, error=str(exc))
+                checksum = extract_landmarks(zarr_path, array_zarr_path, ref_dest)
+        except ExtractionError as exc:
+            log.warning('annotation_extraction_failed', path=ann_path, error=str(exc))
             skipped.append({'path': ann_path, 'reason': str(exc)})
             continue
 
@@ -346,8 +347,8 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
 
     meta = store_metadata[store_name]
 
-    # -- Task 2b: export reference annotations ------------------------------
-    ann_entries, skipped_annotations = _export_reference_annotations(
+    # -- Task 2b: extract reference annotations -----------------------------
+    ann_entries, skipped_annotations = _extract_reference_annotations(
         zarr_path, staging_dir, include_annotations, log
     )
 
@@ -377,7 +378,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         'prepare_pull_completed',
         store=store_name,
         staging_dir=str(staging_dir),
-        exported_annotations=len(ann_entries),
+        extracted_annotations=len(ann_entries),
         skipped_annotations=len(skipped_annotations),
         duration_s=round(duration, 3),
     )

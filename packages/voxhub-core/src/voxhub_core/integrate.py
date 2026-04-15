@@ -22,7 +22,7 @@ from voxhub_core.slicer import (
     parse_mrk_json,
     parse_seg_nrrd,
 )
-from voxhub_core.staging import extract_spatial_metadata
+from voxhub_core.extraction import extract_spatial_metadata
 from voxhub_schema import IssueRecord, Ontology, generate_nano_id
 
 

@@ -1,5 +1,15 @@
 # `voxhub pull` + `prepare-pull` redesign
 
+> **Rename note (post-landing):** the symbols `export_segmentation`,
+> `export_landmarks`, `ExportError` and the module `annotation_export`
+> described below were renamed to `extract_segmentation`,
+> `extract_landmarks`, `ExtractionError` and the module `extraction`
+> per `voxhub-pull-refactor-followup-1.md` §1. The structlog event
+> `annotation_export_failed` became `annotation_extraction_failed` and
+> the completion-log field `exported_annotations` became
+> `extracted_annotations`. This doc describes the original design; the
+> followup carries the current names.
+
 ## Context
 
 `voxhub pull` does not exist yet. The client package has transport primitives
