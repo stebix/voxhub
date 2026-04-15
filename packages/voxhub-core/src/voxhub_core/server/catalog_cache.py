@@ -6,9 +6,17 @@ cache isn't an option. Instead we persist the cached payload to
 guarded by:
 
 - a cheap top-level directory fingerprint (detects added/removed stores),
-- a TTL (catches out-of-band edits the fingerprint can't see), and
+- a TTL that bounds how long we trust the cache before re-checking the
+  fingerprint, and
 - explicit per-store invalidation hooked into the write paths (PR 3)
   plus an admin refresh command (PR 4).
+
+The read path is strictly read-only: ``read_catalog`` never acquires the
+writer lock and never rewrites the file. When the TTL expires it
+re-checks the fingerprint and either returns the existing snapshot
+unchanged (fingerprint matches) or triggers a full ``rebuild``
+(fingerprint differs). This keeps reads non-blocking even while a
+concurrent ``invalidate_store`` holds the writer lock.
 
 Deep edits inside an existing store are intentionally NOT caught by the
 fingerprint — the flat ``stores_dir/<name>.zarr`` layout only checks the
@@ -72,7 +80,8 @@ class CatalogSnapshot:
         ``invalidate_store``). Clients use this to short-circuit
         repeated requests in PR 5.
     built_at
-        ISO-8601 UTC timestamp of the last build or TTL refresh.
+        ISO-8601 UTC timestamp of the last actual build (``rebuild`` or
+        ``invalidate_store``). The read path never updates this field.
     stores_dir_fingerprint
         Hex SHA-1 over sorted ``(name, mtime_ns, size)`` for every
         top-level ``*.zarr`` directory directly under ``stores_dir``.
@@ -413,18 +422,19 @@ def read_catalog(
     now_func: Callable[[], float] = time.time,
     lock_timeout: float = DEFAULT_LOCK_TIMEOUT_S,
 ) -> CatalogSnapshot:
-    """Return the current catalog, rebuilding if stale.
+    """Return the current catalog, rebuilding only when stale and changed.
 
     Fast path (warm & fresh): one file read, one JSON parse. No lock.
 
     Slow paths:
 
     - Missing / unparseable / schema-mismatched cache → cold rebuild.
+    - TTL expired & fingerprint unchanged → return existing snapshot
+      as-is. No write, no lock, ``built_at`` stays put.
     - TTL expired & fingerprint changed → rebuild (bumps version).
-    - TTL expired & fingerprint unchanged → refresh ``built_at`` only
-      (no version bump). If the writer lock is contended, return the
-      existing snapshot without refreshing — another writer is handling
-      it.
+
+    ``lock_timeout`` is forwarded to ``rebuild`` for the rebuild branches;
+    the read path itself never acquires the writer lock.
     """
     _, catalog_path, _ = _catalog_paths(stores_dir)
 
@@ -432,22 +442,13 @@ def read_catalog(
     if existing is None:
         return rebuild(stores_dir, now_func=now_func, lock_timeout=lock_timeout)
 
-    age = _age_seconds(existing.built_at, now_func)
-    if age < ttl_s:
+    if _age_seconds(existing.built_at, now_func) < ttl_s:
         return existing
 
-    current_fp = fingerprint(stores_dir)
-    if current_fp != existing.stores_dir_fingerprint:
-        return rebuild(stores_dir, now_func=now_func, lock_timeout=lock_timeout)
-
-    try:
-        with _catalog_lock(stores_dir, timeout=lock_timeout):
-            refreshed = _load_catalog_file(catalog_path) or existing
-            renewed = attrs.evolve(refreshed, built_at=_now_iso(now_func))
-            _atomic_write(catalog_path, renewed)
-            return renewed
-    except Timeout:
+    if fingerprint(stores_dir) == existing.stores_dir_fingerprint:
         return existing
+
+    return rebuild(stores_dir, now_func=now_func, lock_timeout=lock_timeout)
 
 
 def peek_stats(
@@ -468,6 +469,9 @@ def peek_stats(
     - ``'ok'``: full detail dict including ``catalog_version``,
       ``built_at``, ``age_s``, ``fingerprint_match``, ``store_count``, and
       ``cache_file_size_bytes``.
+
+    ``age_s`` measures time since the last actual build (``rebuild`` or
+    ``invalidate_store``); the read path never refreshes ``built_at``.
 
     ``fingerprint_match`` compares the cached fingerprint against a live
     ``fingerprint(stores_dir)`` walk. A mismatch means the TTL-triggered

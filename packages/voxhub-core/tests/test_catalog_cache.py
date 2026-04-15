@@ -96,19 +96,88 @@ def test_warm_hit_within_ttl_does_not_rebuild(
     assert snap2.built_at == built_at_1
 
 
-def test_ttl_expiry_without_changes_refreshes_built_at_only(
+def test_ttl_expiry_without_changes_returns_existing_unchanged(
     stores: Path,
     clock: dict[str, float],
     now_func,
 ) -> None:
     snap1 = cc.read_catalog(stores, ttl_s=10.0, now_func=now_func)
+    _, catalog_path, _ = cc._catalog_paths(stores)
+    mtime_before = catalog_path.stat().st_mtime_ns
 
     clock['now'] += 1000.0
     snap2 = cc.read_catalog(stores, ttl_s=10.0, now_func=now_func)
 
     assert snap2.catalog_version == snap1.catalog_version
-    assert snap2.built_at != snap1.built_at
+    assert snap2.built_at == snap1.built_at
     assert snap2.stores_dir_fingerprint == snap1.stores_dir_fingerprint
+    # Read path must be strictly read-only: no rewrite, mtime unchanged.
+    assert catalog_path.stat().st_mtime_ns == mtime_before
+
+
+def test_read_after_ttl_does_not_acquire_lock(
+    stores: Path,
+    clock: dict[str, float],
+    now_func,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seed the cache, then trip TTL with no on-disk changes.
+    cc.read_catalog(stores, ttl_s=10.0, now_func=now_func)
+
+    lock_calls = 0
+    real_lock = cc._catalog_lock
+
+    def _counting_lock(*a: object, **kw: object):
+        nonlocal lock_calls
+        lock_calls += 1
+        return real_lock(*a, **kw)
+
+    monkeypatch.setattr(cc, '_catalog_lock', _counting_lock)
+
+    clock['now'] += 1000.0
+    cc.read_catalog(stores, ttl_s=10.0, now_func=now_func)
+
+    assert lock_calls == 0
+
+
+def test_read_during_concurrent_invalidate_does_not_block(
+    stores: Path,
+    clock: dict[str, float],
+    now_func,
+) -> None:
+    # Seed cache, then trip TTL.
+    cc.read_catalog(stores, ttl_s=10.0, now_func=now_func)
+    clock['now'] += 1000.0
+
+    # Hold the writer lock from another thread for the duration of the read.
+    release = threading.Event()
+    holding = threading.Event()
+
+    def _hold_lock() -> None:
+        with cc._catalog_lock(stores, timeout=5.0):
+            holding.set()
+            release.wait(timeout=5.0)
+
+    holder = threading.Thread(target=_hold_lock)
+    holder.start()
+    try:
+        assert holding.wait(timeout=2.0), 'holder thread failed to acquire lock'
+
+        t0 = time.monotonic()
+        snap = cc.read_catalog(
+            stores,
+            ttl_s=10.0,
+            now_func=now_func,
+            lock_timeout=5.0,
+        )
+        elapsed = time.monotonic() - t0
+
+        # Read returns immediately even though the writer lock is held.
+        assert elapsed < 1.0
+        assert snap.catalog_version == 1
+    finally:
+        release.set()
+        holder.join(timeout=2.0)
 
 
 def test_ttl_expiry_with_changes_triggers_rebuild(
