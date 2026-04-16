@@ -94,19 +94,6 @@ def _compute_sha256(path: Path) -> str:
 # -- list-stores -------------------------------------------------------------
 
 
-def _age_seconds(built_at: str) -> float:
-    """Return the age of an ISO-8601 ``built_at`` timestamp in seconds.
-
-    Unparseable input is treated as infinitely old — purely a log-line
-    signal, so a degraded value must not crash the handler.
-    """
-    try:
-        dt = datetime.fromisoformat(built_at)
-    except ValueError:
-        return float('inf')
-    return max(0.0, time.time() - dt.timestamp())
-
-
 def _run_list_stores(args: argparse.Namespace) -> None:
     log = get_logger(command='list-stores')
     t0 = time.monotonic()
@@ -130,7 +117,7 @@ def _run_list_stores(args: argparse.Namespace) -> None:
         log.info(
             'list_stores_unchanged',
             catalog_version=snapshot.catalog_version,
-            cache_age_s=round(_age_seconds(snapshot.built_at), 3),
+            cache_age_s=round(catalog_cache.age_seconds(snapshot.built_at), 3),
             duration_s=round(duration, 3),
         )
         _write_dict(
@@ -147,7 +134,7 @@ def _run_list_stores(args: argparse.Namespace) -> None:
         'list_stores_completed',
         store_count=len(snapshot.stores),
         catalog_version=snapshot.catalog_version,
-        cache_age_s=round(_age_seconds(snapshot.built_at), 3),
+        cache_age_s=round(catalog_cache.age_seconds(snapshot.built_at), 3),
         duration_s=round(duration, 3),
     )
 
@@ -732,9 +719,7 @@ def _run_catalog_refresh(args: argparse.Namespace) -> None:
         # "drop stale entry" use case.
         zarr_path = stores_dir / f'{store_name}.zarr'
         in_cache = False
-        existing = catalog_cache._load_catalog_file(
-            catalog_cache._catalog_paths(stores_dir)[1]
-        )
+        existing = catalog_cache.try_load(stores_dir)
         if existing is not None and store_name in existing.stores:
             in_cache = True
         if not zarr_path.is_dir() and not in_cache:

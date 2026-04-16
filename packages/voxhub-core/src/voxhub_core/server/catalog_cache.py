@@ -169,11 +169,16 @@ def _now_iso(now_func: Callable[[], float]) -> str:
     return datetime.fromtimestamp(now_func(), tz=UTC).isoformat()
 
 
-def _age_seconds(built_at: str, now_func: Callable[[], float]) -> float:
+def age_seconds(
+    built_at: str,
+    *,
+    now_func: Callable[[], float] = time.time,
+) -> float:
     """Return the age of a ``built_at`` timestamp in seconds.
 
     An unparseable timestamp is treated as infinitely old so the caller
-    triggers a rebuild.
+    triggers a rebuild (or, in diagnostic call sites, surfaces the
+    badness via an ``inf`` log line).
     """
     try:
         dt = datetime.fromisoformat(built_at)
@@ -206,6 +211,18 @@ def _load_catalog_file(catalog_path: Path) -> CatalogSnapshot | None:
     if snap.cache_schema_version != CACHE_SCHEMA_VERSION:
         return None
     return snap
+
+
+def try_load(stores_dir: Path) -> CatalogSnapshot | None:
+    """Return the current on-disk snapshot, or ``None`` if absent/corrupt.
+
+    Read-only; no lock is acquired and no rewrite is performed. Intended
+    for callers that want to consult the cache without triggering a
+    rebuild (e.g. the admin ``catalog refresh --store NAME`` typo
+    guard). Use ``read_catalog`` for the serving path.
+    """
+    _, catalog_path, _ = _catalog_paths(stores_dir)
+    return _load_catalog_file(catalog_path)
 
 
 def _atomic_write(catalog_path: Path, snapshot: CatalogSnapshot) -> None:
@@ -258,9 +275,7 @@ def build_store_entry(entry: ZarrEntry, zarr_path: Path) -> dict[str, Any]:
 
     Reads spatial metadata straight off ``entry.attributes`` (already
     populated by ``_probe_zarr``) and ``entry.dataset_attributes_raw``,
-    avoiding the re-open done by today's inline implementation. Falls
-    back to a single ``zarr.open_group`` only if ``entry.attributes`` is
-    empty (defensive; legacy probe results).
+    avoiding the re-open done by today's inline implementation.
     """
     store_name = zarr_path.name.removesuffix('.zarr')
     annotations = [
@@ -288,13 +303,6 @@ def build_store_entry(entry: ZarrEntry, zarr_path: Path) -> dict[str, Any]:
         }
 
     attrs_map = entry.attributes
-    if not attrs_map:
-        import zarr
-
-        root = zarr.open_group(zarr_path, mode='r')
-        arr = root['raw']['full']
-        attrs_map = dict(arr.attrs)
-
     try:
         origin, space_directions, spacing_mm = extract_spatial_metadata(attrs_map)
     except KeyError:
@@ -442,7 +450,7 @@ def read_catalog(
     if existing is None:
         return rebuild(stores_dir, now_func=now_func, lock_timeout=lock_timeout)
 
-    if _age_seconds(existing.built_at, now_func) < ttl_s:
+    if age_seconds(existing.built_at, now_func=now_func) < ttl_s:
         return existing
 
     if fingerprint(stores_dir) == existing.stores_dir_fingerprint:
@@ -494,7 +502,7 @@ def peek_stats(
         'status': 'ok',
         'catalog_version': snap.catalog_version,
         'built_at': snap.built_at,
-        'age_s': round(_age_seconds(snap.built_at, now_func), 3),
+        'age_s': round(age_seconds(snap.built_at, now_func=now_func), 3),
         'fingerprint_match': fingerprint(stores_dir) == snap.stores_dir_fingerprint,
         'store_count': len(snap.stores),
         'cache_file_size_bytes': size,

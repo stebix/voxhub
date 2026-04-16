@@ -253,9 +253,7 @@ def test_invalidate_store_on_missing_cache_falls_back_to_full_rebuild(
     assert catalog_path.is_file()
 
 
-def test_invalidate_store_for_removed_store_drops_entry(
-    stores: Path, now_func
-) -> None:
+def test_invalidate_store_for_removed_store_drops_entry(stores: Path, now_func) -> None:
     cc.read_catalog(stores, now_func=now_func)
 
     import shutil
@@ -306,6 +304,44 @@ def test_atomic_write_leaves_no_tmp_files(stores: Path, now_func) -> None:
     meta_dir, _, _ = cc._catalog_paths(stores)
     tmp_siblings = [p for p in meta_dir.iterdir() if p.name.endswith('.tmp')]
     assert tmp_siblings == []
+
+
+# ---------------------------------------------------------------------------
+# try_load
+# ---------------------------------------------------------------------------
+
+
+def test_try_load_returns_none_when_cache_absent(stores: Path) -> None:
+    _, catalog_path, _ = cc._catalog_paths(stores)
+    assert not catalog_path.exists()
+    assert cc.try_load(stores) is None
+
+
+def test_try_load_returns_snapshot_for_built_cache(stores: Path, now_func) -> None:
+    built = cc.rebuild(stores, now_func=now_func)
+    loaded = cc.try_load(stores)
+    assert loaded is not None
+    assert loaded.catalog_version == built.catalog_version
+    assert set(loaded.stores.keys()) == set(built.stores.keys())
+
+
+def test_try_load_returns_none_on_corrupt_cache(stores: Path) -> None:
+    _, catalog_path, _ = cc._catalog_paths(stores)
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_path.write_text('{not valid json')
+    assert cc.try_load(stores) is None
+
+
+def test_try_load_does_not_rebuild_when_stale(
+    stores: Path,
+    now_func,
+) -> None:
+    """try_load must never touch or rebuild; it's a read-only peek."""
+    cc.rebuild(stores, now_func=now_func)
+    _, catalog_path, _ = cc._catalog_paths(stores)
+    mtime_before = catalog_path.stat().st_mtime_ns
+    cc.try_load(stores)
+    assert catalog_path.stat().st_mtime_ns == mtime_before
 
 
 # ---------------------------------------------------------------------------
@@ -470,9 +506,7 @@ def _inline_payload(zarr_path: Path) -> dict[str, Any]:
 
 
 def test_build_store_entry_matches_inline_payload(stores: Path) -> None:
-    entries = {
-        e.path.name.removesuffix('.zarr'): e for e in discover_zarr_stores(stores)
-    }
+    entries = {e.path.name.removesuffix('.zarr'): e for e in discover_zarr_stores(stores)}
     for name, entry in entries.items():
         zarr_path = entry.path
         expected = _inline_payload(zarr_path)
