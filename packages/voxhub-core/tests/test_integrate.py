@@ -478,6 +478,84 @@ class TestIntegrate:
         assert 'alice-aaa11111' in annotators
         assert 'bob-bbb22222' in annotators
 
+    def test_neither_ontology_nor_unconstrained_raises_value_error(self, tmp_path):
+        """Explicit ontology policy: caller must declare intent."""
+        stores_dir, staging = self._setup(tmp_path)
+        with pytest.raises(ValueError, match='explicit ontology policy'):
+            integrate(
+                staging,
+                stores_dir,
+                annotator_id='alice',
+                nano_id='abc12345',
+            )
+
+    def test_both_ontology_and_unconstrained_raises_value_error(
+        self, tmp_path, inner_ear_ontology
+    ):
+        """Ambiguous intent: declared ontology *and* unconstrained is a
+        caller misuse."""
+        stores_dir, staging = self._setup(tmp_path)
+        with pytest.raises(ValueError, match='mutually exclusive'):
+            integrate(
+                staging,
+                stores_dir,
+                annotator_id='alice',
+                nano_id='abc12345',
+                ontology=inner_ear_ontology,
+                unconstrained=True,
+            )
+
+    def test_unconstrained_flag_records_unconstrained_in_provenance(self, tmp_path):
+        """Under `unconstrained=True`, both seg and lmk write
+        ``ontology='unconstrained'`` (no `'landmarks'` legacy default)."""
+        stores_dir, staging = self._setup(tmp_path, seg=True, lmk=True)
+        integrate(
+            staging,
+            stores_dir,
+            annotator_id='alice',
+            nano_id='abc12345',
+            unconstrained=True,
+        )
+
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
+        ann_dir = root['annotations']['alice-abc12345']
+        # Two sub-groups: one for seg, one for lmk. Both instance names
+        # should be prefixed with 'unconstrained-'.
+        instance_keys = list(ann_dir.group_keys())
+        assert len(instance_keys) == 2
+        for key in instance_keys:
+            assert key.startswith('unconstrained-'), key
+
+    def test_type_mismatch_records_error_not_silent_fallback(
+        self, tmp_path, inner_ear_ontology
+    ):
+        """Declared seg ontology + staged landmark file → error issue,
+        no annotation written (force=False)."""
+        stores_dir = tmp_path / 'zarr'
+        stores_dir.mkdir()
+        create_zarr_store(stores_dir / 'mystore.zarr')
+
+        staging = tmp_path / 'staging'
+        # Landmarks-only staging; declare a segmentation ontology.
+        build_staging_dir(
+            staging,
+            'mystore',
+            lmk_points=[[-4.0, -5.0, -6.0], [-3.0, -4.0, -5.0], [-2.0, -3.0, -4.0]],
+            lmk_labels=['round_window', 'oval_window', 'cochlear_apex'],
+        )
+
+        with pytest.raises(RuntimeError, match='Validation errors'):
+            integrate(
+                staging,
+                stores_dir,
+                annotator_id='alice',
+                nano_id='abc12345',
+                ontology=inner_ear_ontology,  # type: 'segmentation'
+            )
+
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
+        assert 'annotations' not in list(root)
+
     def test_seg_ontology_is_actually_enforced(self, tmp_path, inner_ear_ontology):
         """Regression: a seg label not defined in the declared ontology must
         surface as a validation error.

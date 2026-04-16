@@ -135,9 +135,7 @@ class TestSegmentationRoundTrip:
             nano_id='abcd1234',
             ontology=inner_ear_ontology,
         )
-        assert all(
-            i.severity != 'error' for i in result.get('scan-001', [])
-        )
+        assert all(i.severity != 'error' for i in result.get('scan-001', []))
 
         # 5. Verify annotation in zarr.
         root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
@@ -181,6 +179,7 @@ class TestSegmentationRoundTrip:
                 stores_dir,
                 annotator_id='alice',
                 nano_id='abcd1234',
+                unconstrained=True,
             )
 
 
@@ -219,9 +218,7 @@ class TestLandmarkRoundTrip:
             nano_id='efgh5678',
             ontology=landmark_ontology,
         )
-        assert all(
-            i.severity != 'error' for i in result.get('scan-001', [])
-        )
+        assert all(i.severity != 'error' for i in result.get('scan-001', []))
 
         root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         assert 'bob-efgh5678' in list(root['annotations'].group_keys())
@@ -240,6 +237,7 @@ class TestLandmarkRoundTrip:
             stores_dir,
             annotator_id='carol',
             nano_id='ijkl9012',
+            unconstrained=True,
         )
 
         root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
@@ -280,9 +278,7 @@ class TestSpatialMetadataIntegrity:
 
         # 3. Verify staging output matches direct extraction.
         np.testing.assert_allclose(stage_info['origin_lps'], origin.tolist())
-        np.testing.assert_allclose(
-            stage_info['space_directions'], dirs.tolist()
-        )
+        np.testing.assert_allclose(stage_info['space_directions'], dirs.tolist())
         np.testing.assert_allclose(stage_info['spacing_mm'], spacing)
         assert stage_info['shape'] == list(root['raw']['full'].shape)
 
@@ -302,9 +298,7 @@ class TestSpatialMetadataIntegrity:
             origin=[99.0, 99.0, 99.0],
         )
 
-        issues = validate_seg_preflight(
-            seg_path, entry, inner_ear_ontology
-        )
+        issues = validate_seg_preflight(seg_path, entry, inner_ear_ontology)
         errors = [i for i in issues if i.severity == 'error']
         assert any('origin' in e.message.lower() for e in errors)
 
@@ -509,13 +503,9 @@ class TestOntologyEnforcementE2E:
         lm[0, 0, 0] = 1
         # Only cochlea — missing vestibule and semicircular_canals.
         segments = [{'name': 'cochlea', 'label_value': 1}]
-        seg_path = write_seg_nrrd(
-            store_dir / 'incomplete.seg.nrrd', lm, segments
-        )
+        seg_path = write_seg_nrrd(store_dir / 'incomplete.seg.nrrd', lm, segments)
 
-        issues = validate_seg_preflight(
-            seg_path, entry, inner_ear_ontology
-        )
+        issues = validate_seg_preflight(seg_path, entry, inner_ear_ontology)
         errors = [i for i in issues if i.severity == 'error']
         assert len(errors) > 0
         error_text = ' '.join(i.message for i in errors)
@@ -544,13 +534,9 @@ class TestOntologyEnforcementE2E:
             {'name': 'a', 'label_value': 1},
             {'name': 'b', 'label_value': 5},
         ]
-        seg_path = write_seg_nrrd(
-            store_dir / 'non_seq.seg.nrrd', lm, segments
-        )
+        seg_path = write_seg_nrrd(store_dir / 'non_seq.seg.nrrd', lm, segments)
 
-        issues = validate_seg_preflight(
-            seg_path, entry, unconstrained_ontology
-        )
+        issues = validate_seg_preflight(seg_path, entry, unconstrained_ontology)
         errors = [i for i in issues if i.severity == 'error']
         assert len(errors) > 0
         assert any('sequential' in e.message.lower() for e in errors)
@@ -610,6 +596,4 @@ class TestManifestWorkflow:
 
         # After push+integration: update to 'integrated'.
         update_manifest_status(staging_dir, 'scan-001', 'integrated')
-        assert (
-            read_manifest(staging_dir).stores['scan-001'].status == 'integrated'
-        )
+        assert read_manifest(staging_dir).stores['scan-001'].status == 'integrated'
