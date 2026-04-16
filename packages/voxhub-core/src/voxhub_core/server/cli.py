@@ -57,6 +57,7 @@ from voxhub_schema import (
     PROTOCOL_VERSION,
     AnnotatorSlugError,
     IssueRecord,
+    ManifestError,
     Ontology,
     PullAnnotationEntry,
     PullManifest,
@@ -745,7 +746,7 @@ def _read_pull_manifest_safely(staging_dir: Path) -> PullManifest | None:
     """
     try:
         return PullManifest.read(staging_dir)
-    except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError):
+    except (FileNotFoundError, OSError, ManifestError):
         return None
 
 

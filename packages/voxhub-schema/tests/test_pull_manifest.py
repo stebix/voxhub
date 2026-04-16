@@ -1,8 +1,14 @@
 """Tests for :class:`PullManifest` and :class:`PullAnnotationEntry`."""
 
+import json
+
 import pytest
 
-from voxhub_schema.manifest import PullAnnotationEntry, PullManifest
+from voxhub_schema.manifest import (
+    ManifestError,
+    PullAnnotationEntry,
+    PullManifest,
+)
 
 
 def _sample_manifest(
@@ -167,3 +173,102 @@ class TestPullAnnotationEntry:
         e = PullAnnotationEntry.from_dict(d)
         assert e.kind == 'landmarks'
         assert e.ontology_version == 2
+
+
+def _minimal_dict() -> dict[str, object]:
+    return {
+        'protocol_version': 1,
+        'prepared_at': '2026-04-14T12:00:00+00:00',
+        'server_host': 'h',
+        'server_stores_dir': '/s',
+        'store_name': 'x',
+        'raw_name': 'raw.nrrd',
+        'raw_checksum': 'sha256:x',
+        'shape': [1, 1, 1],
+        'spacing_mm': [1.0, 1.0, 1.0],
+        'origin_lps': [0.0, 0.0, 0.0],
+        'space_directions': [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+
+
+class TestPullManifestErrors:
+    """``ManifestError`` is raised for malformed manifests and chains the cause."""
+
+    def test_from_dict_missing_required_key_raises_manifest_error(self):
+        d = _minimal_dict()
+        del d['raw_checksum']
+        with pytest.raises(ManifestError) as excinfo:
+            PullManifest.from_dict(d)
+        # Original cause preserved for debugging.
+        assert isinstance(excinfo.value.__cause__, KeyError)
+        assert 'raw_checksum' in str(excinfo.value.__cause__)
+
+    def test_from_dict_wrong_typed_protocol_version_raises_manifest_error(self):
+        d = _minimal_dict()
+        d['protocol_version'] = 'not-an-int'
+        with pytest.raises(ManifestError) as excinfo:
+            PullManifest.from_dict(d)
+        assert isinstance(excinfo.value.__cause__, ValueError)
+
+    def test_from_dict_malformed_nested_annotation_raises_manifest_error(self):
+        d = _minimal_dict()
+        # Annotation entry missing required fields.
+        d['annotations'] = [{'kind': 'segmentation'}]
+        with pytest.raises(ManifestError) as excinfo:
+            PullManifest.from_dict(d)
+        # The nested error chains through.
+        assert isinstance(excinfo.value.__cause__, (KeyError, ManifestError))
+
+    def test_from_json_invalid_json_raises_manifest_error(self):
+        with pytest.raises(ManifestError) as excinfo:
+            PullManifest.from_json('{not valid json')
+        assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
+
+    def test_from_json_valid_json_but_malformed_schema_raises_manifest_error(self):
+        # Valid JSON but missing schema fields.
+        with pytest.raises(ManifestError) as excinfo:
+            PullManifest.from_json('{"protocol_version": 1}')
+        # Schema-level errors chain via from_dict, so cause is KeyError.
+        assert isinstance(excinfo.value.__cause__, KeyError)
+
+    def test_read_corrupt_file_raises_manifest_error_not_filenotfound(self, tmp_path):
+        (tmp_path / '.voxhub_pull.json').write_text('not json at all')
+        with pytest.raises(ManifestError):
+            PullManifest.read(tmp_path)
+
+    def test_read_missing_file_still_raises_filenotfounderror(self, tmp_path):
+        # Regression guard: missing != malformed, distinct exception types.
+        with pytest.raises(FileNotFoundError):
+            PullManifest.read(tmp_path)
+
+
+class TestPullAnnotationEntryErrors:
+    def test_from_dict_missing_key_raises_manifest_error(self):
+        d: dict[str, object] = {
+            'zarr_source_path': 'annotations/alice-xyz45678/inst-20260101-ab12',
+            'kind': 'segmentation',
+            # 'ontology' missing
+            'ontology_version': 1,
+            'annotator_id': 'alice',
+            'integrated_at': '2026-01-01T08:00:00+00:00',
+            'reference_filename': 'x.seg.nrrd',
+            'reference_checksum': 'sha256:x',
+        }
+        with pytest.raises(ManifestError) as excinfo:
+            PullAnnotationEntry.from_dict(d)
+        assert isinstance(excinfo.value.__cause__, KeyError)
+
+    def test_from_dict_wrong_typed_ontology_version_raises_manifest_error(self):
+        d: dict[str, object] = {
+            'zarr_source_path': 'annotations/alice-xyz45678/inst-20260101-ab12',
+            'kind': 'segmentation',
+            'ontology': 'inner-ear-structures',
+            'ontology_version': 'not-an-int',
+            'annotator_id': 'alice',
+            'integrated_at': '2026-01-01T08:00:00+00:00',
+            'reference_filename': 'x.seg.nrrd',
+            'reference_checksum': 'sha256:x',
+        }
+        with pytest.raises(ManifestError) as excinfo:
+            PullAnnotationEntry.from_dict(d)
+        assert isinstance(excinfo.value.__cause__, ValueError)

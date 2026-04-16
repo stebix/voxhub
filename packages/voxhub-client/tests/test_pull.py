@@ -546,6 +546,39 @@ class TestRunPullFailurePaths:
         assert excinfo.value.code == 1
         assert all(c[0] != 'cleanup' for c in runner.calls)
 
+    def test_corrupt_manifest_exits_without_cleanup(
+        self,
+        tmp_path,
+        fake_identity,
+        fake_server,
+        isolate_pull_log,
+        monkeypatch,
+        capsys,
+    ):
+        """Manifest present but malformed: client exits 1, no cleanup ACK,
+        no traceback to the user."""
+        dest = tmp_path / 'dest'
+
+        def corrupt_seed(p: Path) -> None:
+            p.mkdir(parents=True, exist_ok=True)
+            # Manifest exists but the JSON is unparseable.
+            (p / '.voxhub_pull.json').write_text('{not valid json')
+
+        transfer = _FakeTransfer(seed_fn=corrupt_seed)
+        runner = _FakeRunner(responses=[_prepare_response()])
+        monkeypatch.setattr(client_cli, 'SshRunner', lambda target: runner)
+        monkeypatch.setattr(client_cli, 'RsyncTransfer', lambda target: transfer)
+
+        with pytest.raises(SystemExit) as excinfo:
+            _run_pull(_pull_args(dest=dest))
+        assert excinfo.value.code == 1
+        assert all(c[0] != 'cleanup' for c in runner.calls)
+
+        # User-facing message names the failure mode; no JSONDecodeError
+        # traceback leaks through.
+        captured = capsys.readouterr()
+        assert 'unreadable or malformed' in captured.err
+
     def test_cleanup_ack_failure_is_non_fatal(
         self,
         tmp_path,

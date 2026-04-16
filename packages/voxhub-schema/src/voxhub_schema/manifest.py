@@ -14,6 +14,20 @@ import attrs
 type ManifestStatus = Literal['pulled', 'pushed', 'integrated']
 
 
+class ManifestError(Exception):
+    """Raised when a manifest file is present but cannot be parsed.
+
+    Distinct from :class:`FileNotFoundError` (raised by ``read`` when the
+    file is absent), which signals a different recovery path: a missing
+    file usually means an upstream step did not run, while a malformed
+    file usually means transport corruption or schema drift.
+
+    Wraps the underlying ``json.JSONDecodeError``, ``KeyError``,
+    ``TypeError``, or ``ValueError`` via ``raise ... from exc`` so the
+    original cause stays in the traceback.
+    """
+
+
 @attrs.define
 class RemoteManifestEntry:
     """Per-store entry in the remote manifest."""
@@ -29,24 +43,33 @@ class RemoteManifestEntry:
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Self:
-        """Deserialize from a plain dict."""
-        return cls(
-            status=d['status'],  # type: ignore[arg-type]
-            raw_checksum=str(d['raw_checksum']),
-            shape=list(d['shape']),  # type: ignore[arg-type]
-            spacing_mm=list(d['spacing_mm']),  # type: ignore[arg-type]
-            origin_lps=list(d['origin_lps']),  # type: ignore[arg-type]
-            space_directions=[
-                list(row)  # type: ignore[arg-type]
-                for row in d['space_directions']  # type: ignore[union-attr]
-            ],
-            expected_ontologies=list(
-                d.get('expected_ontologies', [])  # type: ignore[arg-type]
-            ),
-            included_annotations=list(
-                d.get('included_annotations', [])  # type: ignore[arg-type]
-            ),
-        )
+        """Deserialize from a plain dict.
+
+        Raises
+        ------
+        ManifestError
+            If ``d`` is missing required keys or has wrong-typed values.
+        """
+        try:
+            return cls(
+                status=d['status'],  # type: ignore[arg-type]
+                raw_checksum=str(d['raw_checksum']),
+                shape=list(d['shape']),  # type: ignore[arg-type]
+                spacing_mm=list(d['spacing_mm']),  # type: ignore[arg-type]
+                origin_lps=list(d['origin_lps']),  # type: ignore[arg-type]
+                space_directions=[
+                    list(row)  # type: ignore[arg-type]
+                    for row in d['space_directions']  # type: ignore[union-attr]
+                ],
+                expected_ontologies=list(
+                    d.get('expected_ontologies', [])  # type: ignore[arg-type]
+                ),
+                included_annotations=list(
+                    d.get('included_annotations', [])  # type: ignore[arg-type]
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ManifestError(f'malformed RemoteManifestEntry: {exc}') from exc
 
 
 @attrs.define
@@ -75,20 +98,30 @@ class RemoteManifest:
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Self:
-        """Deserialize from a plain dict."""
-        stores_raw = d.get('stores', {})
-        stores = {
-            name: RemoteManifestEntry.from_dict(entry)  # type: ignore[arg-type]
-            for name, entry in stores_raw.items()  # type: ignore[union-attr]
-        }
-        return cls(
-            server_host=str(d['server_host']),
-            server_stores_dir=str(d['server_stores_dir']),
-            protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
-            pull_session_id=str(d['pull_session_id']),
-            pulled_at=str(d['pulled_at']),
-            stores=stores,
-        )
+        """Deserialize from a plain dict.
+
+        Raises
+        ------
+        ManifestError
+            If ``d`` is missing required keys, has wrong-typed values, or
+            contains a malformed nested ``RemoteManifestEntry``.
+        """
+        try:
+            stores_raw = d.get('stores', {})
+            stores = {
+                name: RemoteManifestEntry.from_dict(entry)  # type: ignore[arg-type]
+                for name, entry in stores_raw.items()  # type: ignore[union-attr]
+            }
+            return cls(
+                server_host=str(d['server_host']),
+                server_stores_dir=str(d['server_stores_dir']),
+                protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
+                pull_session_id=str(d['pull_session_id']),
+                pulled_at=str(d['pulled_at']),
+                stores=stores,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ManifestError(f'malformed RemoteManifest: {exc}') from exc
 
     def to_json(self) -> str:
         """Serialize to a JSON string."""
@@ -96,8 +129,19 @@ class RemoteManifest:
 
     @classmethod
     def from_json(cls, text: str) -> Self:
-        """Deserialize from a JSON string."""
-        return cls.from_dict(json.loads(text))
+        """Deserialize from a JSON string.
+
+        Raises
+        ------
+        ManifestError
+            If ``text`` is not valid JSON or does not deserialize to a
+            valid :class:`RemoteManifest`.
+        """
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ManifestError(f'invalid JSON in RemoteManifest: {exc}') from exc
+        return cls.from_dict(data)
 
     @classmethod
     def read(cls, staging_dir: Path) -> Self:
@@ -116,6 +160,8 @@ class RemoteManifest:
         ------
         FileNotFoundError
             If the manifest file does not exist.
+        ManifestError
+            If the file exists but is unreadable or malformed.
         """
         path = staging_dir / '.voxhub_manifest.json'
         if not path.exists():
@@ -180,17 +226,26 @@ class PullAnnotationEntry:
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Self:
-        """Deserialize from a plain dict."""
-        return cls(
-            zarr_source_path=str(d['zarr_source_path']),
-            kind=str(d['kind']),
-            ontology=str(d['ontology']),
-            ontology_version=int(d['ontology_version']),  # type: ignore[arg-type]
-            annotator_id=str(d['annotator_id']),
-            integrated_at=str(d['integrated_at']),
-            reference_filename=str(d['reference_filename']),
-            reference_checksum=str(d['reference_checksum']),
-        )
+        """Deserialize from a plain dict.
+
+        Raises
+        ------
+        ManifestError
+            If ``d`` is missing required keys or has wrong-typed values.
+        """
+        try:
+            return cls(
+                zarr_source_path=str(d['zarr_source_path']),
+                kind=str(d['kind']),
+                ontology=str(d['ontology']),
+                ontology_version=int(d['ontology_version']),  # type: ignore[arg-type]
+                annotator_id=str(d['annotator_id']),
+                integrated_at=str(d['integrated_at']),
+                reference_filename=str(d['reference_filename']),
+                reference_checksum=str(d['reference_checksum']),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ManifestError(f'malformed PullAnnotationEntry: {exc}') from exc
 
 
 @attrs.define
@@ -249,28 +304,38 @@ class PullManifest:
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Self:
-        """Deserialize from a plain dict."""
-        annotations_raw = d.get('annotations', []) or []
-        return cls(
-            protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
-            prepared_at=str(d['prepared_at']),
-            server_host=str(d['server_host']),
-            server_stores_dir=str(d['server_stores_dir']),
-            store_name=str(d['store_name']),
-            raw_name=str(d['raw_name']),
-            raw_checksum=str(d['raw_checksum']),
-            shape=list(d['shape']),  # type: ignore[arg-type]
-            spacing_mm=list(d['spacing_mm']),  # type: ignore[arg-type]
-            origin_lps=list(d['origin_lps']),  # type: ignore[arg-type]
-            space_directions=[
-                list(row)  # type: ignore[arg-type]
-                for row in d['space_directions']  # type: ignore[union-attr]
-            ],
-            annotations=[
-                PullAnnotationEntry.from_dict(entry)  # type: ignore[arg-type]
-                for entry in annotations_raw  # type: ignore[union-attr]
-            ],
-        )
+        """Deserialize from a plain dict.
+
+        Raises
+        ------
+        ManifestError
+            If ``d`` is missing required keys, has wrong-typed values, or
+            contains a malformed nested :class:`PullAnnotationEntry`.
+        """
+        try:
+            annotations_raw = d.get('annotations', []) or []
+            return cls(
+                protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
+                prepared_at=str(d['prepared_at']),
+                server_host=str(d['server_host']),
+                server_stores_dir=str(d['server_stores_dir']),
+                store_name=str(d['store_name']),
+                raw_name=str(d['raw_name']),
+                raw_checksum=str(d['raw_checksum']),
+                shape=list(d['shape']),  # type: ignore[arg-type]
+                spacing_mm=list(d['spacing_mm']),  # type: ignore[arg-type]
+                origin_lps=list(d['origin_lps']),  # type: ignore[arg-type]
+                space_directions=[
+                    list(row)  # type: ignore[arg-type]
+                    for row in d['space_directions']  # type: ignore[union-attr]
+                ],
+                annotations=[
+                    PullAnnotationEntry.from_dict(entry)  # type: ignore[arg-type]
+                    for entry in annotations_raw  # type: ignore[union-attr]
+                ],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ManifestError(f'malformed PullManifest: {exc}') from exc
 
     def to_json(self) -> str:
         """Serialize to a JSON string."""
@@ -278,8 +343,19 @@ class PullManifest:
 
     @classmethod
     def from_json(cls, text: str) -> Self:
-        """Deserialize from a JSON string."""
-        return cls.from_dict(json.loads(text))
+        """Deserialize from a JSON string.
+
+        Raises
+        ------
+        ManifestError
+            If ``text`` is not valid JSON or does not deserialize to a
+            valid :class:`PullManifest`.
+        """
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ManifestError(f'invalid JSON in PullManifest: {exc}') from exc
+        return cls.from_dict(data)
 
     @classmethod
     def read(cls, staging_dir: Path) -> Self:
@@ -298,6 +374,8 @@ class PullManifest:
         ------
         FileNotFoundError
             If the manifest file does not exist.
+        ManifestError
+            If the file exists but is unreadable or malformed.
         """
         path = staging_dir / '.voxhub_pull.json'
         if not path.exists():

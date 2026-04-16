@@ -1,6 +1,7 @@
 """voxhub-schema: protocol contract, ontology definitions, and validation."""
 
 from voxhub_schema.manifest import (
+    ManifestError,
     ManifestStatus,
     PullAnnotationEntry,
     PullManifest,
@@ -75,6 +76,7 @@ __all__ = [
     'IssueRecord',
     'LengthUnit',
     # manifest
+    'ManifestError',
     'ManifestStatus',
     'Modality',
     'Ontology',

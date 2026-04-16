@@ -24,7 +24,7 @@ from voxhub_client.server_config import (
 )
 from voxhub_client.ssh import RemoteError, SshRunner
 from voxhub_client.transfer import RsyncTransfer
-from voxhub_schema import PROTOCOL_VERSION, PullManifest
+from voxhub_schema import PROTOCOL_VERSION, ManifestError, PullManifest
 
 
 class ChecksumError(Exception):
@@ -274,6 +274,13 @@ def _run_pull(args: argparse.Namespace) -> None:
         err_console.print(
             f'[red]missing pull manifest after rsync:[/red] {exc}; '
             f'server staging dir left in place.'
+        )
+        sys.exit(1)
+    except ManifestError as exc:
+        err_console.print(
+            f'[red]pull manifest unreadable or malformed:[/red] {exc}; '
+            f'server staging dir left in place for diagnosis '
+            f'(rsync corruption or schema drift).'
         )
         sys.exit(1)
 
