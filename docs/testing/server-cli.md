@@ -101,11 +101,11 @@ Beyond the existing `create_zarr_store` helper, these tests need:
 
 **Happy path:**
 - `test_stages_single_store_to_tempdir` — one store in root → response has
-  `staging_dir` pointing at a `dt-pull-*` temp directory, `stores[name]` has
+  `staging_dir` pointing at a `vxhb-staging-*` temp directory, `stores[name]` has
   `raw_checksum` (sha256), `shape`, `spacing_mm`, `origin_lps`,
   `space_directions`, `expected_ontologies == []`, `included_annotations == []`.
 - `test_uses_explicit_staging_dir_when_provided` — `args.staging_dir=...` → response
-  points at exactly that directory, not a `dt-pull-*` tempdir.
+  points at exactly that directory, not a `vxhb-staging-*` tempdir.
 - `test_filters_stores_by_name` — root has 3 stores, `--stores a c` → only
   a and c appear in response.
 - `test_records_expected_ontologies` — `--ontologies x y z` →
@@ -209,22 +209,22 @@ This is the largest and most complex handler. Split the class by concern.
 - `test_refuses_to_remove_non_staging_path` — **security concern**:
   current implementation removes *any* path passed in. Document this as
   a finding. If the worktree owner wants to add a safety check (e.g.,
-  only remove paths matching `dt-*` or under `tempfile.gettempdir()`),
+  only remove paths matching `vxhb-staging-*` or under `tempfile.gettempdir()`),
   these tests would enforce it. Otherwise xfail with an explanation.
 
 ### 4.5 `_run_gc` — `TestGc`
 
-- `test_removes_dirs_older_than_ttl` — create `/tmp/dt-pull-xxx` with
+- `test_removes_dirs_older_than_ttl` — create `/tmp/vxhb-staging-xxx` with
   mtime 48h in the past, `--ttl-hours 24` → removed, listed in
   `response['removed']`.
 - `test_keeps_dirs_newer_than_ttl` — recent dir → kept.
-- `test_ignores_non_dt_prefix` — `/tmp/foo-bar` → ignored even if old.
-- `test_ignores_files_only_dirs` — file at `/tmp/dt-file` → ignored.
+- `test_ignores_non_staging_prefix` — `/tmp/foo-bar` → ignored even if old.
+- `test_ignores_files_only_dirs` — file at `/tmp/vxhb-staging-file` → ignored.
 - `test_count_matches_removed_length` — invariant check.
 - `test_default_ttl_24_hours` — no `--ttl-hours` → uses 24.0.
 - **Isolation concern:** these tests must not scan the real `/tmp`.
   Monkey-patch `tempfile.gettempdir()` to return a test-owned `tmp_path`
-  so the test doesn't clobber unrelated `dt-*` dirs.
+  so the test doesn't clobber unrelated `vxhb-staging-*` dirs.
 
 ### 4.6 `_run_validate_attributes` — `TestValidateAttributes`
 
@@ -322,4 +322,4 @@ fixture. Mark slow if they add > 1s total.
    641). Recommend the refactor in the worktree.
 4. **Cleanup safety check** — the current `_run_cleanup` does
    `shutil.rmtree(staging_dir)` on whatever path is passed. Should this be
-   hardened to only delete `dt-*` paths? If yes, test enforces it.
+   hardened to only delete `vxhb-staging-*` paths? If yes, test enforces it.

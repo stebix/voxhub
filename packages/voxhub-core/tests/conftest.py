@@ -15,7 +15,6 @@ import pytest
 from _core_helpers import (
     create_zarr_store,
     populate_store_annotation,
-    write_remote_manifest,
 )
 
 from voxhub_schema.ontology import load_ontology
@@ -129,23 +128,28 @@ def stores_dir_factory(
 
 
 @pytest.fixture
-def staging_dir_with_manifest(
+def staging_dir_with_annotations(
     tmp_path: Path,
 ) -> Callable[..., Path]:
-    """Build a staging directory containing per-store subdirs plus a manifest.
+    """Build a staging directory containing per-store annotation files.
 
-    Returns a callable ``(store_names=..., ontologies=..., include_seg=True,
+    Returns a callable ``(store_names=..., include_seg=True,
     include_lmk=False, seg_label_map=None, seg_segments=None,
     lmk_points=None, lmk_labels=None) -> Path`` producing the staging
-    directory.  The zarr root is paired independently — this fixture only
-    produces the client-side payload.
+    directory.  The zarr root is paired independently — this fixture
+    only produces the client-side payload.
+
+    No manifest file is written: ontology declaration is now passed to
+    ``integrate-annotations`` via ``--expected-ontology`` /
+    ``--unconstrained`` on the CLI, not via a staging-dir-embedded
+    file.  Tests express the ontology policy at the ``_integrate_argv``
+    call site.
     """
     from _core_helpers import build_staging_dir_entries
 
     def _build(
         store_names: Iterable[str] = ('default',),
         *,
-        ontologies: Iterable[str] = ('inner-ear-structures',),
         include_seg: bool = True,
         include_lmk: bool = False,
         seg_label_map: Any = None,
@@ -157,8 +161,7 @@ def staging_dir_with_manifest(
         staging_dir = tmp_path / 'staging'
         staging_dir.mkdir(exist_ok=True)
 
-        store_list = list(store_names)
-        for name in store_list:
+        for name in store_names:
             build_staging_dir_entries(
                 staging_dir / name,
                 include_seg=include_seg,
@@ -170,11 +173,6 @@ def staging_dir_with_manifest(
                 lmk_coordinate_system=lmk_coordinate_system,
             )
 
-        write_remote_manifest(
-            staging_dir,
-            store_names=store_list,
-            expected_ontologies=list(ontologies),
-        )
         return staging_dir
 
     return _build
@@ -217,18 +215,21 @@ _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
     # by main()) used by list-stores, prepare-pull, validate-attributes,
     # healthcheck, and integrate-annotations.
     'stores_dir': None,
-    # prepare-pull
-    'stores': None,
-    'ontologies': None,
+    # prepare-pull (single-store)
+    'store': None,
     'staging_dir': None,
     'include_existing_annotations': None,
     'compress': False,
+    # validate-attributes (multi-store)
+    'stores': None,
     # integrate-annotations
     'annotator_id': 'alice',
     'machine_id': 'machine-abc',
     'nano_id': 'abcd1234',
     'checksums': None,
     'force': False,
+    'expected_ontology': [],
+    'unconstrained': False,
     # gc
     'ttl_hours': 24.0,
     # catalog refresh
@@ -341,10 +342,15 @@ def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
     """Launch N ``integrate-annotations`` subprocesses in parallel.
 
     Each invocation is a dict with keys ``stores_dir``, ``staging_dir``,
-    ``annotator_id``, ``nano_id`` and optionally ``machine_id``, ``force``.
-    Returns a list of result dicts preserving invocation order, each carrying
-    ``returncode``, parsed JSON ``stdout`` (best-effort, may be ``None``),
-    ``raw_stdout``, ``stderr`` and the original ``invocation`` dict.
+    ``annotator_id``, ``nano_id`` and optionally ``machine_id``, ``force``,
+    ``expected_ontology`` (list[str]), ``unconstrained`` (bool).  The
+    ontology declaration defaults to ``['inner-ear-structures']`` —
+    concurrency suites don't care about the policy, they care about
+    locking, so the default matches the staging dirs they build.
+    Returns a list of result dicts preserving invocation order, each
+    carrying ``returncode``, parsed JSON ``stdout`` (best-effort, may
+    be ``None``), ``raw_stdout``, ``stderr`` and the original
+    ``invocation`` dict.
     """
 
     import tempfile as _tempfile
@@ -376,6 +382,14 @@ def concurrent_integrate_runner() -> Callable[..., list[dict[str, Any]]]:
             ]
             if inv.get('force'):
                 cmd.append('--force')
+            # Ontology policy: require explicit intent (matches the
+            # production CLI contract).  Default to a declared seg
+            # ontology so concurrency tests stay tight.
+            if inv.get('unconstrained'):
+                cmd.append('--unconstrained')
+            else:
+                for ont in inv.get('expected_ontology', ['inner-ear-structures']):
+                    cmd.extend(['--expected-ontology', ont])
             full_env = os.environ.copy()
             full_env['VOXHUB_SERVER_CONFIG'] = cfg_path
             if inv.get('env'):

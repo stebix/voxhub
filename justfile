@@ -54,7 +54,10 @@ test-client:
 # --- Test variants ---
 
 test-fast:
-    uv run pytest -m 'not slow'
+    uv run pytest -m 'not slow and not e2e'
+
+test-e2e:
+    uv run pytest -m e2e
 
 test-cov:
     uv run pytest --cov=packages --cov-report=term-missing

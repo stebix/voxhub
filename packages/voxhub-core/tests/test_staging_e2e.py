@@ -1,8 +1,9 @@
 """End-to-end tests for voxhub_core.staging.stage and extract_spatial_metadata.
 
-The low-level NRRD writer (_write_nrrd_raw) is already covered by
-test_staging.py; this file covers the public stage() entrypoint and the
-extract_spatial_metadata helper that feeds it.
+The low-level NRRD writer (``extraction.write_nrrd_raw``) is already
+covered by test_staging.py; this file covers the public stage()
+entrypoint and the ``extraction.extract_spatial_metadata`` helper that
+feeds it.
 
 Plan: docs/testing/catalog-staging-audit.md §4
 """
@@ -25,7 +26,8 @@ from _core_helpers import (
 )
 from rich.console import Console
 
-from voxhub_core.staging import extract_spatial_metadata, stage
+from voxhub_core.extraction import extract_spatial_metadata
+from voxhub_core.staging import stage
 
 _SHA256_HEX = re.compile(r'^sha256:[0-9a-f]{64}$')
 
@@ -54,7 +56,7 @@ def _strip_spatial_attrs(zarr_path: Path, keys: tuple[str, ...]) -> None:
 
 
 class TestExtractSpatialMetadata:
-    """Covers voxhub_core.staging.extract_spatial_metadata."""
+    """Covers voxhub_core.extraction.extract_spatial_metadata."""
 
     def test_canonical_axis_aligned_metadata(self, stores_dir_factory):
         """Identity-like orientation → origin/directions/spacing match the
@@ -177,7 +179,7 @@ class TestStageSingleStore:
         assert header['space'] == 'left-posterior-superior'
 
     def test_nrrd_data_matches_zarr_data(self, stores_dir_factory, tmp_path):
-        """nrrd.read on _write_nrrd_raw output returns the transpose of the
+        """nrrd.read on write_nrrd_raw output returns the transpose of the
         source ZYX array (see axis-order note in test_staging.py)."""
         root = stores_dir_factory(store_names=['foo'])
         staging = tmp_path / 'staging'

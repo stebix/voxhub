@@ -12,7 +12,7 @@ def _sample_manifest():
         server_host='alice@server',
         server_stores_dir='/data/zarr',
         protocol_version=PROTOCOL_VERSION,
-        pull_session_id='dt-pull-abc',
+        pull_session_id='vxhb-staging-abc',
         pulled_at='2026-01-01T00:00:00+00:00',
         stores={
             'store-a': RemoteManifestEntry(

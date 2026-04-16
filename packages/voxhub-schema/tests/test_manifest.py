@@ -1,8 +1,14 @@
 """Tests for manifest serialization and persistence."""
 
+import json
+
 import pytest
 
-from voxhub_schema.manifest import RemoteManifest, RemoteManifestEntry
+from voxhub_schema.manifest import (
+    ManifestError,
+    RemoteManifest,
+    RemoteManifestEntry,
+)
 
 
 def _sample_manifest() -> RemoteManifest:
@@ -86,3 +92,64 @@ class TestManifestEntry:
         entry = RemoteManifestEntry.from_dict(d)
         assert entry.expected_ontologies == []
         assert entry.included_annotations == []
+
+
+def _minimal_remote_dict() -> dict[str, object]:
+    return {
+        'server_host': 'h',
+        'server_stores_dir': '/s',
+        'protocol_version': 1,
+        'pull_session_id': 'sess1',
+        'pulled_at': '2026-01-01T00:00:00+00:00',
+        'stores': {},
+    }
+
+
+class TestRemoteManifestErrors:
+    """``ManifestError`` is raised for malformed manifests and chains the cause."""
+
+    def test_from_dict_missing_required_key_raises_manifest_error(self):
+        d = _minimal_remote_dict()
+        del d['server_host']
+        with pytest.raises(ManifestError) as excinfo:
+            RemoteManifest.from_dict(d)
+        assert isinstance(excinfo.value.__cause__, KeyError)
+
+    def test_from_dict_wrong_typed_protocol_version_raises_manifest_error(self):
+        d = _minimal_remote_dict()
+        d['protocol_version'] = 'not-an-int'
+        with pytest.raises(ManifestError) as excinfo:
+            RemoteManifest.from_dict(d)
+        assert isinstance(excinfo.value.__cause__, ValueError)
+
+    def test_from_dict_malformed_nested_entry_raises_manifest_error(self):
+        d = _minimal_remote_dict()
+        d['stores'] = {'store-a': {'status': 'pulled'}}  # missing required keys
+        with pytest.raises(ManifestError) as excinfo:
+            RemoteManifest.from_dict(d)
+        assert isinstance(excinfo.value.__cause__, (KeyError, ManifestError))
+
+    def test_from_json_invalid_json_raises_manifest_error(self):
+        with pytest.raises(ManifestError) as excinfo:
+            RemoteManifest.from_json('{not valid json')
+        assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
+
+    def test_read_corrupt_file_raises_manifest_error_not_filenotfound(self, tmp_path):
+        (tmp_path / '.voxhub_manifest.json').write_text('not json at all')
+        with pytest.raises(ManifestError):
+            RemoteManifest.read(tmp_path)
+
+
+class TestRemoteManifestEntryErrors:
+    def test_from_dict_missing_key_raises_manifest_error(self):
+        d: dict[str, object] = {
+            'status': 'pulled',
+            # 'raw_checksum' missing
+            'shape': [10, 12, 14],
+            'spacing_mm': [0.5, 0.5, 0.5],
+            'origin_lps': [-5.0, -6.0, -7.0],
+            'space_directions': [[0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]],
+        }
+        with pytest.raises(ManifestError) as excinfo:
+            RemoteManifestEntry.from_dict(d)
+        assert isinstance(excinfo.value.__cause__, KeyError)

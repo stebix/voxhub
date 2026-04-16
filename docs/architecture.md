@@ -427,7 +427,7 @@ Response:
 ```json
 {
   "protocol_version": 1,
-  "staging_dir": "/tmp/dt-pull-abc123",
+  "staging_dir": "/tmp/vxhb-staging-abc123",
   "server_stores_dir": "/srv/voxhub/zarr",
   "stores": {
     "gallivanting-groundhog": {
@@ -713,7 +713,7 @@ Every array written by the server carries:
   "annotator_id": "alice",
   "machine_id": "a3f1c9...",
   "nano_id": "x7f2kp01",
-  "pull_session_id": "dt-pull-abc123",
+  "pull_session_id": "vxhb-staging-abc123",
   "source_nrrd_checksum": "sha256:a3f1...",
   "source_file": "segmentation.seg.nrrd",
   "ontology": "inner-ear-structures",
@@ -727,7 +727,7 @@ Every array written by the server carries:
 events belong in server logs.
 
 ```
-{"event": "push", "session_id": "dt-push-xyz789", "pull_session_id": "dt-pull-abc123", "store": "gallivanting-groundhog", "annotation_path": "annotations/alice-x7f2kp01/inner-ear-structures-20260331-a3f1", "annotator_id": "alice", "machine_id": "a3f1c9...", "timestamp": "2026-03-31T15:00:00+00:00", "ontology": "inner-ear-structures", "ontology_version": 1, "issues": []}
+{"event": "push", "session_id": "dt-push-xyz789", "pull_session_id": "vxhb-staging-abc123", "store": "gallivanting-groundhog", "annotation_path": "annotations/alice-x7f2kp01/inner-ear-structures-20260331-a3f1", "annotator_id": "alice", "machine_id": "a3f1c9...", "timestamp": "2026-03-31T15:00:00+00:00", "ontology": "inner-ear-structures", "ontology_version": 1, "issues": []}
 ```
 
 At the expected scale (low two-digit annotations), a single JSONL file is sufficient.
@@ -851,7 +851,7 @@ Example log entries:
 
 ```json
 {"event": "prepare_pull_started", "stores": ["gallivanting-groundhog"], "annotator_id": "alice", "timestamp": "..."}
-{"event": "prepare_pull_completed", "stores": ["gallivanting-groundhog"], "staging_dir": "/tmp/dt-pull-abc123", "duration_s": 12.3, "timestamp": "..."}
+{"event": "prepare_pull_completed", "stores": ["gallivanting-groundhog"], "staging_dir": "/tmp/vxhb-staging-abc123", "duration_s": 12.3, "timestamp": "..."}
 {"event": "integrate_failed", "store": "gallivanting-groundhog", "error": "checksum_mismatch", "level": "error", "timestamp": "..."}
 {"event": "gc_completed", "removed": ["/tmp/dt-push-20260330..."], "count": 1, "timestamp": "..."}
 ```

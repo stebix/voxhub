@@ -16,13 +16,13 @@ import numpy as np
 import zarr
 from rich.console import Console
 
+from voxhub_core.extraction import extract_spatial_metadata
 from voxhub_core.slicer import (
     LandmarkData,
     SegmentationData,
     parse_mrk_json,
     parse_seg_nrrd,
 )
-from voxhub_core.staging import extract_spatial_metadata
 from voxhub_schema import IssueRecord, Ontology, generate_nano_id
 
 
@@ -430,6 +430,7 @@ def integrate(
     annotator_id: str,
     nano_id: str,
     ontology: Ontology | None = None,
+    unconstrained: bool = False,
     force: bool = False,
     validate_only: bool = False,
     console: Console | None = None,
@@ -438,6 +439,23 @@ def integrate(
 
     This is the **local** integration entrypoint.  It validates
     annotations then writes them to annotator-scoped zarr paths.
+
+    Ontology policy
+    ---------------
+    Callers must state intent explicitly via exactly one of:
+
+    * ``ontology=<Ontology>`` — the declared ontology is recorded in
+      provenance *and* enforced against the annotation's labels/points.
+      If the declared ontology's ``type`` does not match a staged
+      annotation's type (segmentation vs. landmarks), that annotation is
+      rejected with an error issue rather than silently unconstrained.
+    * ``unconstrained=True`` — explicit opt-in to no-ontology
+      integration.  Provenance records ``ontology='unconstrained'``.
+
+    Passing both or neither is a :class:`ValueError` at entry.  Silent
+    fallback to "unconstrained" would corrupt the ground-truth story by
+    making a missing declaration indistinguishable from a deliberate
+    no-ontology integration.
 
     Parameters
     ----------
@@ -450,7 +468,11 @@ def integrate(
     nano_id : str
         8-char nano-ID associated with the annotator.
     ontology : Ontology | None
-        Ontology to validate against and record.
+        Ontology to validate against and record.  Mutually exclusive
+        with ``unconstrained``.
+    unconstrained : bool
+        Explicit opt-in to unconstrained integration.  Mutually
+        exclusive with ``ontology``.
     force : bool
         Overwrite existing annotations / ignore errors.
     validate_only : bool
@@ -465,12 +487,42 @@ def integrate(
 
     Raises
     ------
+    ValueError
+        If the ontology policy is ambiguous: neither or both of
+        ``ontology`` and ``unconstrained`` specified.
     RuntimeError
         If validation errors prevent integration and *force* is False.
     """
+    if ontology is None and not unconstrained:
+        msg = (
+            'integrate() requires an explicit ontology policy: pass '
+            '`ontology=<Ontology>` for enforced integration, or '
+            '`unconstrained=True` to explicitly opt out.'
+        )
+        raise ValueError(msg)
+    if ontology is not None and unconstrained:
+        msg = (
+            '`ontology` and `unconstrained=True` are mutually exclusive; '
+            'pass one or the other.'
+        )
+        raise ValueError(msg)
+
     staging_dir = Path(staging_dir)
     stores_dir = Path(stores_dir)
     console = console or Console()
+
+    # Per-annotation-type ontology resolution.  Under --unconstrained
+    # both stay None by design.  Under a declared ontology, only the
+    # matching annotation type receives it; the other type triggers a
+    # type-mismatch error below rather than silently defaulting to
+    # unconstrained — that would misrepresent the provenance record.
+    if unconstrained:
+        seg_ontology: Ontology | None = None
+        lmk_ontology: Ontology | None = None
+    else:
+        assert ontology is not None  # entry-point check guarantees this
+        seg_ontology = ontology if ontology.type == 'segmentation' else None
+        lmk_ontology = ontology if ontology.type == 'landmarks' else None
 
     all_issues: dict[str, list[IssueRecord]] = {}
     stores_to_integrate: list[
@@ -519,42 +571,74 @@ def integrate(
         }
 
         if seg_file is not None:
-            try:
-                seg_data = parse_seg_nrrd(seg_file)
-                seg_issues = validate_segmentation(seg_data, manifest_entry)
-                issues.extend(seg_issues)
-                console.print(
-                    f'    segmentation: {seg_file.name}  '
-                    f'shape={seg_data.label_map.shape}  '
-                    f'segments={len(seg_data.segments)}'
-                )
-            except Exception as exc:
+            if not unconstrained and seg_ontology is None:
+                assert ontology is not None
                 issues.append(
                     IssueRecord(
                         severity='error',
-                        message=f'Failed to parse segmentation: {exc}',
+                        message=(
+                            f'Declared ontology {ontology.name!r} is type '
+                            f'{ontology.type!r} but staging contains a '
+                            f'segmentation file. Declare a segmentation '
+                            f'ontology or pass `unconstrained=True` to opt '
+                            f'out explicitly.'
+                        ),
                     )
                 )
+            else:
+                try:
+                    seg_data = parse_seg_nrrd(seg_file)
+                    seg_issues = validate_segmentation(
+                        seg_data, manifest_entry, ontology=seg_ontology
+                    )
+                    issues.extend(seg_issues)
+                    console.print(
+                        f'    segmentation: {seg_file.name}  '
+                        f'shape={seg_data.label_map.shape}  '
+                        f'segments={len(seg_data.segments)}'
+                    )
+                except Exception as exc:
+                    issues.append(
+                        IssueRecord(
+                            severity='error',
+                            message=f'Failed to parse segmentation: {exc}',
+                        )
+                    )
 
         if lmk_file is not None:
-            try:
-                lmk_data = parse_mrk_json(lmk_file)
-                lmk_issues = validate_landmarks(
-                    lmk_data, manifest_entry, ontology=ontology
-                )
-                issues.extend(lmk_issues)
-                console.print(
-                    f'    landmarks: {lmk_file.name}  '
-                    f'points={len(lmk_data.labels)}  '
-                    f'system={lmk_data.coordinate_system}'
-                )
-            except Exception as exc:
+            if not unconstrained and lmk_ontology is None:
+                assert ontology is not None
                 issues.append(
                     IssueRecord(
                         severity='error',
-                        message=f'Failed to parse landmarks: {exc}',
+                        message=(
+                            f'Declared ontology {ontology.name!r} is type '
+                            f'{ontology.type!r} but staging contains a '
+                            f'landmarks file. Declare a landmarks ontology '
+                            f'or pass `unconstrained=True` to opt out '
+                            f'explicitly.'
+                        ),
                     )
                 )
+            else:
+                try:
+                    lmk_data = parse_mrk_json(lmk_file)
+                    lmk_issues = validate_landmarks(
+                        lmk_data, manifest_entry, ontology=lmk_ontology
+                    )
+                    issues.extend(lmk_issues)
+                    console.print(
+                        f'    landmarks: {lmk_file.name}  '
+                        f'points={len(lmk_data.labels)}  '
+                        f'system={lmk_data.coordinate_system}'
+                    )
+                except Exception as exc:
+                    issues.append(
+                        IssueRecord(
+                            severity='error',
+                            message=f'Failed to parse landmarks: {exc}',
+                        )
+                    )
 
         for issue in issues:
             style = 'red' if issue.severity == 'error' else 'yellow'
@@ -598,28 +682,28 @@ def integrate(
         try:
             if seg_data is not None:
                 short_random = generate_nano_id(size=4)
-                ont_name = ontology.name if ontology else 'unconstrained'
+                ont_name = seg_ontology.name if seg_ontology else 'unconstrained'
                 instance_dir = f'{ont_name}-{date_str}-{short_random}'
                 seg_path = f'annotations/{annotator_dir}/{instance_dir}/data'
                 write_segmentation_to_zarr(
                     zarr_path,
                     seg_data,
                     seg_path,
-                    ontology=ontology,
+                    ontology=seg_ontology,
                     force=force,
                 )
                 console.print(f'    wrote segmentation -> {seg_path}')
 
             if lmk_data is not None:
                 short_random = generate_nano_id(size=4)
-                ont_name = ontology.name if ontology else 'landmarks'
+                ont_name = lmk_ontology.name if lmk_ontology else 'unconstrained'
                 instance_dir = f'{ont_name}-{date_str}-{short_random}'
                 lmk_path = f'annotations/{annotator_dir}/{instance_dir}/data'
                 write_landmarks_to_zarr(
                     zarr_path,
                     lmk_data,
                     lmk_path,
-                    ontology=ontology,
+                    ontology=lmk_ontology,
                     force=force,
                 )
                 console.print(f'    wrote landmarks -> {lmk_path}')

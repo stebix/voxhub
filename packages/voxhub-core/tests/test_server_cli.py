@@ -316,26 +316,49 @@ class TestListStores:
 
 
 class TestPreparePull:
-    """Covers voxhub_core.server.cli._run_prepare_pull."""
+    """Covers voxhub_core.server.cli._run_prepare_pull (single-store)."""
 
     def test_stages_single_store_to_tempdir(
         self, stores_dir_factory, server_argv, parsed_stdout
     ):
         root = stores_dir_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
 
         payload = parsed_stdout()
         staging_dir = Path(payload['staging_dir'])
         try:
             assert staging_dir.is_dir()
-            assert staging_dir.name.startswith('dt-pull-')
-            entry = payload['stores']['alpha']
-            assert entry['raw_checksum'].startswith('sha256:')
-            assert entry['shape'] == list(SHAPE)
-            assert entry['spacing_mm'] == SPACING_MM
-            assert entry['origin_lps'] == ORIGIN_LPS
-            assert entry['expected_ontologies'] == []
-            assert entry['included_annotations'] == []
+            assert staging_dir.name.startswith(server_cli.STAGING_DIR_PREFIX)
+            assert payload['store_name'] == 'alpha'
+            assert payload['raw_name'] == 'raw.nrrd'
+            assert payload['raw_checksum'].startswith('sha256:')
+            assert payload['shape'] == list(SHAPE)
+            assert payload['spacing_mm'] == SPACING_MM
+            assert payload['origin_lps'] == ORIGIN_LPS
+            assert payload['skipped_annotations'] == []
+            # Layout: raw.nrrd lives at the session root, no <store_name>/ subdir.
+            assert (staging_dir / 'raw.nrrd').is_file()
+            assert not (staging_dir / 'alpha').exists()
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def test_writes_pull_manifest(self, stores_dir_factory, server_argv, parsed_stdout):
+        from voxhub_schema import PullManifest
+
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
+
+        payload = parsed_stdout()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            assert (staging_dir / '.voxhub_pull.json').is_file()
+            manifest = PullManifest.read(staging_dir)
+            assert manifest.store_name == 'alpha'
+            assert manifest.raw_name == 'raw.nrrd'
+            assert manifest.raw_checksum == payload['raw_checksum']
+            assert manifest.server_stores_dir == str(root)
+            assert manifest.shape == list(SHAPE)
+            assert manifest.annotations == []
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -345,58 +368,28 @@ class TestPreparePull:
         root = stores_dir_factory(('alpha',))
         explicit = tmp_path / 'explicit_staging'
         server_cli._run_prepare_pull(
-            server_argv(stores_dir=root, stores=['alpha'], staging_dir=str(explicit))
+            server_argv(stores_dir=root, store='alpha', staging_dir=str(explicit))
         )
 
         payload = parsed_stdout()
         assert Path(payload['staging_dir']) == explicit
         assert explicit.is_dir()
-        assert not payload['staging_dir'].startswith(('/tmp/dt-pull', '/var/'))
+        assert (explicit / 'raw.nrrd').is_file()
+        assert (explicit / '.voxhub_pull.json').is_file()
 
-    def test_filters_stores_by_name(self, stores_dir_factory, server_argv, parsed_stdout):
-        root = stores_dir_factory(('alpha', 'bravo', 'charlie'))
-        server_cli._run_prepare_pull(
-            server_argv(stores_dir=root, stores=['alpha', 'charlie'])
-        )
-
-        payload = parsed_stdout()
-        try:
-            assert set(payload['stores']) == {'alpha', 'charlie'}
-        finally:
-            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
-
-    def test_records_expected_ontologies(
+    def test_exports_reference_annotation(
         self, stores_dir_factory, server_argv, parsed_stdout
     ):
-        root = stores_dir_factory(('alpha',))
-        server_cli._run_prepare_pull(
-            server_argv(
-                stores_dir=root,
-                stores=['alpha'],
-                ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
-            )
-        )
+        """Requested annotation is exported to reference/ and recorded in manifest."""
+        from voxhub_schema import PullManifest
 
-        payload = parsed_stdout()
-        try:
-            assert payload['stores']['alpha']['expected_ontologies'] == [
-                'inner-ear-structures',
-                'inner-ear-landmarks',
-            ]
-        finally:
-            shutil.rmtree(payload['staging_dir'], ignore_errors=True)
-
-    def test_copies_existing_annotations_when_requested(
-        self, stores_dir_factory, server_argv, parsed_stdout
-    ):
         root = stores_dir_factory(('alpha',), with_annotations=True)
-        # The populate_store_annotation helper uses deterministic nano_id/random.
         ann_rel = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12'
 
         server_cli._run_prepare_pull(
             server_argv(
                 stores_dir=root,
-                stores=['alpha'],
+                store='alpha',
                 include_existing_annotations=[ann_rel],
             )
         )
@@ -404,26 +397,39 @@ class TestPreparePull:
         payload = parsed_stdout()
         staging_dir = Path(payload['staging_dir'])
         try:
-            assert (staging_dir / 'alpha' / ann_rel).is_dir()
+            ref_dir = staging_dir / 'reference'
+            assert ref_dir.is_dir()
+            files = list(ref_dir.iterdir())
+            # Populated annotation has no segments/labels, so it may classify
+            # as landmarks and fail export; allow skipped, but manifest must
+            # reflect reality.
+            manifest = PullManifest.read(staging_dir)
+            assert len(manifest.annotations) + len(payload['skipped_annotations']) == 1
+            if manifest.annotations:
+                entry = manifest.annotations[0]
+                assert entry.annotator_id == 'alice'
+                assert entry.zarr_source_path == ann_rel
+                assert entry.reference_checksum.startswith('sha256:')
+                assert entry.reference_filename in (f.name for f in files)
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
-    def test_compression_flag_propagates_to_stage(
+    def test_compression_flag_propagates_to_extract_volume(
         self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
     ):
         root = stores_dir_factory(('alpha',))
         captured: dict[str, object] = {}
 
-        original_stage = server_cli.stage
+        original_extract_volume = server_cli.extract_volume
 
-        def spy_stage(*args, **kwargs):  # type: ignore[no-untyped-def]
+        def spy_extract_volume(*args, **kwargs):  # type: ignore[no-untyped-def]
             captured.update(kwargs)
-            return original_stage(*args, **kwargs)
+            return original_extract_volume(*args, **kwargs)
 
-        monkeypatch.setattr(server_cli, 'stage', spy_stage)
+        monkeypatch.setattr(server_cli, 'extract_volume', spy_extract_volume)
 
         server_cli._run_prepare_pull(
-            server_argv(stores_dir=root, stores=['alpha'], compress=True)
+            server_argv(stores_dir=root, store='alpha', compress=True)
         )
         payload = parsed_stdout()
         try:
@@ -431,48 +437,88 @@ class TestPreparePull:
         finally:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
-    def test_stage_failure_writes_error_envelope_and_exits(
+    def test_extract_volume_failure_writes_error_envelope_and_exits(
         self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
     ):
         root = stores_dir_factory(('alpha',))
 
         def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
-            raise RuntimeError('staging blew up')
+            raise RuntimeError('extraction blew up')
 
-        monkeypatch.setattr(server_cli, 'stage', boom)
+        monkeypatch.setattr(server_cli, 'extract_volume', boom)
 
         with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
+            server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
         assert excinfo.value.code == 1
 
         envelope = parsed_stdout()
         assert envelope['error'] is True
         assert envelope['code'] == 'prepare_pull_failed'
-        assert 'staging blew up' in envelope['message']
+        assert 'extraction blew up' in envelope['message']
         assert envelope['protocol_version'] == PROTOCOL_VERSION
 
-    def test_nonexistent_store_name(self, stores_dir_factory, server_argv, parsed_stdout):
-        """Document current behavior: unknown --stores names are fatal —
-        ``stage()`` raises FileNotFoundError and the handler surfaces a
-        ``prepare_pull_failed`` error envelope with SystemExit(1)."""
+    def test_store_not_found_fails_before_staging(
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout, monkeypatch
+    ):
+        """Missing --store errors early with no staging dir created."""
         root = stores_dir_factory(('alpha',))
+
+        # Sentinel to assert extract_volume is never called.
+        calls: list[int] = []
+
+        def sentinel(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append(1)
+            raise AssertionError('extract_volume must not be called when store is absent')
+
+        monkeypatch.setattr(server_cli, 'extract_volume', sentinel)
 
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_prepare_pull(
-                server_argv(stores_dir=root, stores=['does-not-exist'])
+                server_argv(stores_dir=root, store='does-not-exist')
             )
         assert excinfo.value.code == 1
 
         envelope = parsed_stdout()
         assert envelope['error'] is True
-        assert envelope['code'] == 'prepare_pull_failed'
+        assert envelope['code'] == 'store_not_found'
         assert 'does-not-exist' in envelope['message']
+        assert calls == []
+
+    def test_skipped_annotation_missing_array(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        """Requesting an annotation path without a data array surfaces
+        it in skipped_annotations; manifest has no entry for it."""
+        from voxhub_schema import PullManifest
+
+        root = stores_dir_factory(('alpha',))
+        missing_ann = 'annotations/alice-abcd1234/nothing-here-20260101-zz99'
+
+        server_cli._run_prepare_pull(
+            server_argv(
+                stores_dir=root,
+                store='alpha',
+                include_existing_annotations=[missing_ann],
+            )
+        )
+
+        payload = parsed_stdout()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            assert len(payload['skipped_annotations']) == 1
+            skip = payload['skipped_annotations'][0]
+            assert skip['path'] == missing_ann
+            assert 'not found' in skip['reason']
+            manifest = PullManifest.read(staging_dir)
+            assert manifest.annotations == []
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def test_protocol_version_present(
         self, stores_dir_factory, server_argv, parsed_stdout
     ):
         root = stores_dir_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
         payload = parsed_stdout()
         try:
             assert payload['protocol_version'] == PROTOCOL_VERSION
@@ -483,13 +529,108 @@ class TestPreparePull:
         self, stores_dir_factory, server_argv, parsed_stdout
     ):
         root = stores_dir_factory(('alpha',))
-        server_cli._run_prepare_pull(server_argv(stores_dir=root, stores=['alpha']))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
         payload = parsed_stdout()
         try:
             assert isinstance(payload['staging_dir'], str)
             assert not payload['staging_dir'].startswith('PosixPath(')
         finally:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
+
+    def test_reused_staging_dir_is_sanitised(
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout
+    ):
+        """--staging-dir pointed at a dir with prior prepare-pull debris:
+        orphans from the previous run are removed so the new manifest
+        and on-disk layout stay in agreement."""
+        from voxhub_schema import PullManifest
+
+        root = stores_dir_factory(('alpha',))
+        explicit = tmp_path / 'explicit_staging'
+        explicit.mkdir()
+
+        # Plant debris that a prior prepare-pull invocation might leave:
+        #   * orphan reference files (the within-run #4 fix deletes
+        #     *partial* writes; across runs we clear the whole tree),
+        #   * a stale manifest (shouldn't be trusted if the new run
+        #     fails to write its own),
+        #   * stale raw.nrrd.
+        ref_dir = explicit / 'reference'
+        ref_dir.mkdir()
+        leftover = ref_dir / 'orphan-from-prior-run.seg.nrrd'
+        leftover.write_bytes(b'stale contents')
+        (explicit / '.voxhub_pull.json').write_text('{"stale": true}')
+        (explicit / 'raw.nrrd').write_bytes(b'stale raw bytes')
+
+        server_cli._run_prepare_pull(
+            server_argv(stores_dir=root, store='alpha', staging_dir=str(explicit))
+        )
+
+        payload = parsed_stdout()
+        assert Path(payload['staging_dir']) == explicit
+
+        # Orphans are gone.
+        assert not leftover.exists()
+
+        # Fresh manifest is in place and agrees with on-disk state.
+        assert (explicit / '.voxhub_pull.json').is_file()
+        manifest = PullManifest.read(explicit)
+        assert manifest.store_name == 'alpha'
+        assert manifest.annotations == []
+
+        # Fresh raw is genuinely fresh (checksum matches the new manifest,
+        # not the planted stub).
+        raw_bytes = (explicit / 'raw.nrrd').read_bytes()
+        assert raw_bytes != b'stale raw bytes'
+        assert manifest.raw_checksum == payload['raw_checksum']
+
+    def test_partial_extraction_cleans_up_orphan_file(
+        self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
+    ):
+        """An ExtractionError partway through writing a reference file
+        must not leave a truncated file on disk — the annotation appears
+        in skipped_annotations and reference/ contains nothing for it."""
+        from voxhub_core.extraction import ExtractionError
+        from voxhub_schema import PullManifest
+
+        root = stores_dir_factory(('alpha',), with_annotations=True)
+        ann_rel = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12'
+
+        # Patch both extractors: we don't assert kind here, we just need
+        # whichever one runs to partial-write then fail.
+        def partial_then_fail(_zarr_path, _array_zarr_path, dest):  # type: ignore[no-untyped-def]
+            dest.write_bytes(b'partial bytes before failure')
+            raise ExtractionError('injected mid-write failure')
+
+        monkeypatch.setattr(server_cli, 'extract_segmentation', partial_then_fail)
+        monkeypatch.setattr(server_cli, 'extract_landmarks', partial_then_fail)
+
+        server_cli._run_prepare_pull(
+            server_argv(
+                stores_dir=root,
+                store='alpha',
+                include_existing_annotations=[ann_rel],
+            )
+        )
+
+        payload = parsed_stdout()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            skipped = payload['skipped_annotations']
+            assert len(skipped) == 1
+            assert skipped[0]['path'] == ann_rel
+            assert 'injected mid-write failure' in skipped[0]['reason']
+
+            # Manifest has no entry for the skipped annotation.
+            manifest = PullManifest.read(staging_dir)
+            assert manifest.annotations == []
+
+            # No orphan file left behind in reference/.
+            ref_dir = staging_dir / 'reference'
+            if ref_dir.exists():
+                assert list(ref_dir.iterdir()) == []
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 # ===========================================================================
@@ -507,7 +648,20 @@ def _integrate_argv(
     machine_id: str = 'machine-xyz',
     force: bool = False,
     checksums: list[str] | None = None,
+    expected_ontology: list[str] | None = None,
+    unconstrained: bool = False,
 ):
+    """Build an integrate-annotations Namespace with an ontology policy.
+
+    Mirrors the real CLI contract: exactly one of ``expected_ontology``
+    / ``unconstrained`` must be non-empty-non-False.  Default is
+    ``['inner-ear-structures']`` so the bulk of happy-path tests don't
+    have to spell it out; pass ``unconstrained=True`` to explicitly
+    test the opt-out path, or override ``expected_ontology=[...]`` for
+    a different ontology set.
+    """
+    if expected_ontology is None and not unconstrained:
+        expected_ontology = ['inner-ear-structures']
     return server_argv(
         stores_dir=stores_dir,
         staging_dir=str(staging_dir),
@@ -516,6 +670,8 @@ def _integrate_argv(
         machine_id=machine_id,
         force=force,
         checksums=checksums,
+        expected_ontology=expected_ontology or [],
+        unconstrained=unconstrained,
     )
 
 
@@ -542,12 +698,12 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_segmentation_writes_to_annotator_scoped_path(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
@@ -568,20 +724,24 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_landmarks_writes_to_annotator_scoped_path(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
-            ontologies=['inner-ear-landmarks'],
             include_seg=False,
             include_lmk=True,
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-landmarks'],
+            )
         )
 
         payload = parsed_stdout()
@@ -594,20 +754,24 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_both_seg_and_landmarks_in_single_call(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
-            ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             include_seg=True,
             include_lmk=True,
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-structures', 'inner-ear-landmarks'],
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -619,12 +783,12 @@ class TestIntegrateAnnotationsHappy:
     def test_provenance_recorded_on_success(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
@@ -653,40 +817,87 @@ class TestIntegrateAnnotationsHappy:
         assert arr_attrs['ontology'] == 'inner-ear-structures'
         assert arr_attrs['integrated_at']
 
-    def test_uses_ontology_from_manifest_not_cli(
+    def test_declared_ontology_from_cli_flows_into_zarr_attrs(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
+        """Ontology declared via --expected-ontology on the CLI shows up
+        in the integrated annotation's zarr attrs and the instance-dir
+        prefix — the CLI is the authoritative source under the new
+        explicit-intent policy (prior RemoteManifest read has been
+        dropped)."""
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
-            store_names=['alpha'], ontologies=['inner-ear-structures']
-        )
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-structures'],
+            )
         )
         parsed_stdout()
 
         written = _written_annotations(stores_dir / 'alpha.zarr')[0]
         arr = zarr.open_array(written / 'data', mode='r')
         assert dict(arr.attrs)['ontology'] == 'inner-ear-structures'
-        # Instance dir prefix matches the ontology loaded from manifest.
+        # Instance dir prefix matches the ontology declared on the CLI.
         assert written.name.startswith('inner-ear-structures-')
+
+    def test_integrate_does_not_require_voxhub_manifest_json(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Regression guard: after the RemoteManifest decoupling, the
+        server's integrate-annotations path must not read (or require)
+        ``.voxhub_manifest.json`` in the staging dir.  Prior to this
+        change, the server wrote ``.voxhub_pull.json`` during
+        prepare-pull but tried to read ``.voxhub_manifest.json`` during
+        integrate — a latent break that a test helper papered over in
+        CI.  Ontology declaration now comes from CLI args, so the two
+        files' schemas are decoupled from integrate entirely.
+
+        This test asserts the staging dir contains *no*
+        ``.voxhub_manifest.json``, then runs integrate successfully.
+        If someone re-adds a ``RemoteManifest.read(staging_dir)`` call
+        to the server path, this test fails with the old
+        ``manifest_missing`` error envelope."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        # Precondition: the fixture produces a bare staging dir — no
+        # manifest file of either schema should be present.
+        assert not (staging / '.voxhub_manifest.json').exists()
+        assert not (staging / '.voxhub_pull.json').exists()
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        )
+
+        payload = parsed_stdout()
+        # No structured error (no top-level ``error`` key on success).
+        assert 'error' not in payload or payload.get('error') is not True
+        assert payload['stores']['alpha']['status'] == 'integrated'
+        assert len(payload['stores']['alpha']['annotations']) == 1
 
     def test_checksum_matches_accepted(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
         seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
-        correct_checksum = server_cli._compute_sha256(seg_file)
+        correct_checksum = server_cli.compute_sha256(seg_file)
 
         server_cli._run_integrate_annotations(
             _integrate_argv(
@@ -709,35 +920,15 @@ class TestIntegrateAnnotationsHappy:
 class TestIntegrateAnnotationsErrors:
     """Covers error/rejection paths in _run_integrate_annotations."""
 
-    def test_missing_manifest_writes_error_envelope_and_exits(
-        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout
-    ):
-        stores_dir = stores_dir_factory(('alpha',))
-        # staging exists but lacks .voxhub_manifest.json.
-        bare_staging = tmp_path / 'bare_staging'
-        (bare_staging / 'alpha').mkdir(parents=True)
-
-        with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_integrate_annotations(
-                _integrate_argv(
-                    server_argv, stores_dir=stores_dir, staging_dir=bare_staging
-                )
-            )
-        assert excinfo.value.code == 1
-
-        envelope = parsed_stdout()
-        assert envelope['error'] is True
-        assert envelope['code'] == 'manifest_missing'
-
     def test_checksum_mismatch_writes_error_envelope_and_exits(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         bogus = f'sha256:{"0" * 64}'
         with pytest.raises(SystemExit) as excinfo:
@@ -756,40 +947,52 @@ class TestIntegrateAnnotationsErrors:
         # No annotation was written.
         assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
-    def test_unknown_ontology_produces_warning_but_continues(
+    def test_unknown_ontology_warns_then_errors_on_type_mismatch(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
+        """Declared ontology that can't be loaded produces a ``warning``
+        issue (resolution failure) AND, because no other declared
+        ontology remains to match the annotation's type, the per-
+        annotation integration errors.  Under the explicit-intent
+        policy we never silently downgrade to unconstrained — the
+        client has to opt in via ``--unconstrained``."""
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
-            store_names=['alpha'], ontologies=['does-not-exist']
-        )
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['does-not-exist'],
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
+
         warnings = [i for i in store_result['issues'] if i['severity'] == 'warning']
         assert any('does-not-exist' in w['message'] for w in warnings)
-        assert store_result['status'] == 'integrated'
-        # Falls back to unconstrained ontology name on write.
-        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
-        assert written.name.startswith('unconstrained-')
+
+        errors = [i for i in store_result['issues'] if i['severity'] == 'error']
+        assert any('No declared ontology matches' in e['message'] for e in errors)
+
+        assert store_result['status'] == 'failed'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
     def test_segmentation_validation_error_without_force_blocks_write(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
         # Shape mismatch: seg is (5,5,5), manifest declares SHAPE=(10,12,14).
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
@@ -808,12 +1011,12 @@ class TestIntegrateAnnotationsErrors:
     def test_force_allows_integration_despite_errors(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
@@ -832,12 +1035,12 @@ class TestIntegrateAnnotationsErrors:
     def test_parse_error_recorded_in_issues(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha', 'bravo'))
-        staging = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
+        staging = staging_dir_with_annotations(store_names=['alpha', 'bravo'])
         # Corrupt alpha's seg.nrrd.
         (staging / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
 
@@ -866,12 +1069,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_partial_failure_per_store_isolated(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha', 'bravo'))
-        staging = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
+        staging = staging_dir_with_annotations(store_names=['alpha', 'bravo'])
         # Bravo's seg has a shape mismatch.
         write_seg_nrrd(
             staging / 'bravo' / 'segmentation.seg.nrrd',
@@ -892,12 +1095,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_iteration_order_deterministic(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha', 'bravo', 'charlie'))
-        staging = staging_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
+        staging = staging_dir_with_annotations(store_names=['charlie', 'alpha', 'bravo'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
@@ -909,12 +1112,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_skips_hidden_directories(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
         hidden = staging / '.hidden'
         hidden.mkdir()
         (hidden / 'segmentation.seg.nrrd').write_bytes(b'junk')
@@ -929,12 +1132,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_skips_directories_without_matching_zarr_store(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha', 'orphan'])
+        staging = staging_dir_with_annotations(store_names=['alpha', 'orphan'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
@@ -956,20 +1159,24 @@ class TestIntegrateAnnotationsOntology:
     def test_segmentation_ontology_resolution_filters_by_type(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
-            ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             include_seg=True,
             include_lmk=True,
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-structures', 'inner-ear-landmarks'],
+            )
         )
 
         annotations = parsed_stdout()['stores']['alpha']['annotations']
@@ -980,53 +1187,158 @@ class TestIntegrateAnnotationsOntology:
     def test_first_matching_ontology_used(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        # Pin the documented behavior at server/cli.py:446 — the first
-        # matching segmentation ontology wins.
-        staging = staging_dir_with_manifest(
-            store_names=['alpha'],
-            ontologies=[
-                'inner-ear-structures',
-                'inner-ear-total-fluid-space',
-            ],
-        )
+        # Pin the documented behavior: given two ontologies that both
+        # match the annotation's type, the first one declared wins.
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=[
+                    'inner-ear-structures',
+                    'inner-ear-total-fluid-space',
+                ],
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['annotations'][0]['ontology'] == ('inner-ear-structures')
 
-    def test_no_matching_ontology_uses_unconstrained_fallback(
+    def test_declared_ontology_type_mismatch_errors_no_silent_fallback(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
+        """Declaring only a landmarks ontology while the session ships a
+        segmentation must error — silent unconstrained-fallback would
+        corrupt the ground-truth provenance record.  The error message
+        points the client at ``--unconstrained`` as the explicit escape
+        hatch."""
         stores_dir = stores_dir_factory(('alpha',))
-        # Only a landmarks ontology declared, but staging ships a segmentation.
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
-            ontologies=['inner-ear-landmarks'],
             include_seg=True,
             include_lmk=False,
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-landmarks'],
+            )
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'failed'
+        errors = [i for i in store_result['issues'] if i['severity'] == 'error']
+        assert any(
+            'No declared ontology matches annotation type segmentation' in e['message']
+            for e in errors
+        )
+        assert any('--unconstrained' in e['message'] for e in errors)
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_unconstrained_flag_integrates_without_ontology(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Explicit --unconstrained opts the session out of ontology
+        enforcement.  Integration succeeds and provenance records the
+        ontology as ``'unconstrained'`` (not a silent default)."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                unconstrained=True,
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'integrated'
         ann = store_result['annotations'][0]
         assert ann['ontology'] == 'unconstrained'
-        assert ann['ontology_version'] == 1
+
+        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
+        arr = zarr.open_array(written / 'data', mode='r')
+        assert dict(arr.attrs)['ontology'] == 'unconstrained'
+
+    def test_neither_ontology_flag_nor_unconstrained_errors(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Omitting both --expected-ontology and --unconstrained is a
+        client bug (no declared intent) — integrate exits with a
+        structured ``ontology_not_declared`` envelope rather than
+        silently defaulting."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    expected_ontology=[],
+                    unconstrained=False,
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'ontology_not_declared'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_both_ontology_flag_and_unconstrained_errors(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """--expected-ontology and --unconstrained are mutually
+        exclusive; passing both is ambiguous and rejected."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    expected_ontology=['inner-ear-structures'],
+                    unconstrained=True,
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'ambiguous_ontology_spec'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
 
 # ===========================================================================
@@ -1181,7 +1493,7 @@ class TestCleanup:
     """Covers voxhub_core.server.cli._run_cleanup."""
 
     def test_removes_existing_staging_dir(self, tmp_path, server_argv, parsed_stdout):
-        staging = tmp_path / 'dt-pull-abc'
+        staging = tmp_path / 'vxhb-staging-abc'
         staging.mkdir()
         (staging / 'payload').write_text('data')
 
@@ -1190,6 +1502,42 @@ class TestCleanup:
         payload = parsed_stdout()
         assert payload['status'] == 'ok'
         assert not staging.exists()
+
+    def test_emits_staging_dir_reaped_event_on_ack(
+        self, tmp_path, server_argv, parsed_stdout, caplog
+    ):
+        """Successful cleanup emits ``staging_dir_reaped`` with
+        ``reason='client_ack'`` for observability."""
+        from voxhub_schema import PROTOCOL_VERSION, PullManifest
+
+        staging = tmp_path / 'vxhb-staging-abc'
+        staging.mkdir()
+        PullManifest(
+            protocol_version=PROTOCOL_VERSION,
+            prepared_at='2026-04-14T12:00:00+00:00',
+            server_host='h',
+            server_stores_dir='/s',
+            store_name='patient-007',
+            raw_name='raw.nrrd',
+            raw_checksum='sha256:x',
+            shape=[1, 1, 1],
+            spacing_mm=[1.0, 1.0, 1.0],
+            origin_lps=[0.0, 0.0, 0.0],
+            space_directions=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        ).write(staging)
+
+        with caplog.at_level('INFO'):
+            server_cli._run_cleanup(server_argv(staging_dir=str(staging)))
+        parsed_stdout()
+
+        reaped_events = [
+            r for r in caplog.records if "'event': 'staging_dir_reaped'" in r.message
+        ]
+        assert len(reaped_events) == 1
+        msg = reaped_events[0].message
+        assert "'reason': 'client_ack'" in msg
+        assert "'store_name': 'patient-007'" in msg
+        assert "'had_manifest': True" in msg
 
     def test_noop_when_staging_dir_missing(
         self, tmp_path, server_argv, parsed_stdout, capsys
@@ -1248,7 +1596,7 @@ class TestGc:
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        old = tmp_path / 'fake_tmp' / 'dt-pull-old'
+        old = tmp_path / 'fake_tmp' / 'vxhb-staging-old'
         old.mkdir()
         # 48 hours in the past.
         import os as _os
@@ -1263,11 +1611,52 @@ class TestGc:
         assert payload['count'] == 1
         assert not old.exists()
 
+    def test_emits_staging_dir_reaped_event_on_gc(
+        self, tmp_path, server_argv, parsed_stdout, monkeypatch, caplog
+    ):
+        """GC reap emits ``staging_dir_reaped`` with ``reason='gc_unacked'``."""
+        from voxhub_schema import PROTOCOL_VERSION, PullManifest
+
+        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+        old = tmp_path / 'fake_tmp' / 'vxhb-staging-old'
+        old.mkdir()
+        PullManifest(
+            protocol_version=PROTOCOL_VERSION,
+            prepared_at='2026-04-14T12:00:00+00:00',
+            server_host='h',
+            server_stores_dir='/s',
+            store_name='patient-013',
+            raw_name='raw.nrrd',
+            raw_checksum='sha256:x',
+            shape=[1, 1, 1],
+            spacing_mm=[1.0, 1.0, 1.0],
+            origin_lps=[0.0, 0.0, 0.0],
+            space_directions=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        ).write(old)
+
+        import os as _os
+
+        old_ts = old.stat().st_mtime - 48 * 3600
+        _os.utime(old, (old_ts, old_ts))
+
+        with caplog.at_level('INFO'):
+            server_cli._run_gc(server_argv(ttl_hours=24.0))
+        parsed_stdout()
+
+        reaped_events = [
+            r for r in caplog.records if "'event': 'staging_dir_reaped'" in r.message
+        ]
+        assert len(reaped_events) == 1
+        msg = reaped_events[0].message
+        assert "'reason': 'gc_unacked'" in msg
+        assert "'store_name': 'patient-013'" in msg
+        assert "'had_manifest': True" in msg
+
     def test_keeps_dirs_newer_than_ttl(
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        recent = tmp_path / 'fake_tmp' / 'dt-pull-recent'
+        recent = tmp_path / 'fake_tmp' / 'vxhb-staging-recent'
         recent.mkdir()
 
         server_cli._run_gc(server_argv(ttl_hours=24.0))
@@ -1276,7 +1665,7 @@ class TestGc:
         assert payload['count'] == 0
         assert recent.exists()
 
-    def test_ignores_non_dt_prefix(
+    def test_ignores_non_staging_prefix(
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
@@ -1297,18 +1686,18 @@ class TestGc:
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
     ):
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        dt_file = tmp_path / 'fake_tmp' / 'dt-file'
-        dt_file.write_text('data')
+        staging_file = tmp_path / 'fake_tmp' / 'vxhb-staging-file'
+        staging_file.write_text('data')
         import os as _os
 
-        old_ts = dt_file.stat().st_mtime - 48 * 3600
-        _os.utime(dt_file, (old_ts, old_ts))
+        old_ts = staging_file.stat().st_mtime - 48 * 3600
+        _os.utime(staging_file, (old_ts, old_ts))
 
         server_cli._run_gc(server_argv(ttl_hours=24.0))
 
         payload = parsed_stdout()
         assert payload['count'] == 0
-        assert dt_file.exists()
+        assert staging_file.exists()
 
     def test_count_matches_removed_length(
         self, tmp_path, server_argv, parsed_stdout, monkeypatch
@@ -1316,7 +1705,7 @@ class TestGc:
         self._isolate(monkeypatch, tmp_path / 'fake_tmp')
         import os as _os
 
-        for name in ('dt-pull-a', 'dt-pull-b', 'dt-pull-c'):
+        for name in ('vxhb-staging-a', 'vxhb-staging-b', 'vxhb-staging-c'):
             p = tmp_path / 'fake_tmp' / name
             p.mkdir()
             _os.utime(p, (p.stat().st_mtime - 48 * 3600,) * 2)
@@ -1646,7 +2035,7 @@ class TestMainStoresDirResolution:
                 'abcd1234',
             ]
         elif subcommand == 'prepare-pull':
-            argv += ['--stores', 'alpha']
+            argv += ['--store', 'alpha']
 
         monkeypatch.setattr('sys.argv', argv)
         server_cli.main()

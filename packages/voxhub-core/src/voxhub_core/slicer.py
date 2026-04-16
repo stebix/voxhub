@@ -90,9 +90,7 @@ class LandmarkData:
 # -- Parsing -----------------------------------------------------------------
 
 
-def _require_header(
-    header: dict[str, Any], key: str, path: Path
-) -> Any:
+def _require_header(header: dict[str, Any], key: str, path: Path) -> Any:
     if key not in header:
         raise SegNrrdParseError(path, f"missing '{key}' header", field=key)
     return header[key]
@@ -230,9 +228,7 @@ def parse_seg_nrrd(path: str | Path) -> SegmentationData:
     try:
         data, header = nrrd.read(str(path))
     except Exception as exc:
-        raise SegNrrdParseError(
-            path, f'failed to read NRRD file: {exc}'
-        ) from exc
+        raise SegNrrdParseError(path, f'failed to read NRRD file: {exc}') from exc
 
     if not isinstance(data, np.ndarray):
         raise SegNrrdParseError(
@@ -267,9 +263,7 @@ def parse_seg_nrrd(path: str | Path) -> SegmentationData:
     )
 
 
-def _parse_control_point(
-    cp: Any, idx: int, path: Path
-) -> tuple[list[float], str]:
+def _parse_control_point(cp: Any, idx: int, path: Path) -> tuple[list[float], str]:
     field_prefix = f'controlPoints[{idx}]'
     if not isinstance(cp, dict):
         raise MrkJsonParseError(

@@ -10,7 +10,6 @@ from voxhub_schema.models import (
     IntegrateResponse,
     IntegrateResult,
     IssueRecord,
-    PreparedStore,
     PrepareRequest,
     PrepareResponse,
     ServerError,
@@ -48,30 +47,50 @@ class TestAnnotationInfo:
 
 
 class TestPrepareResponse:
-    def test_round_trip_with_stores(self):
+    def test_round_trip(self):
         orig = PrepareResponse(
             protocol_version=PROTOCOL_VERSION,
             staging_dir='/tmp/staging',
+            server_host='server.example.com',
             server_stores_dir='/srv/voxhub/zarr',
-            stores={
-                'store-a': PreparedStore(
-                    raw_checksum='sha256:abc',
-                    shape=[10, 12, 14],
-                    spacing_mm=[0.5, 0.5, 0.5],
-                    origin_lps=[-5.0, -6.0, -7.0],
-                    space_directions=[[0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]],
-                    expected_ontologies=['inner-ear-structures'],
-                    included_annotations=[],
-                ),
-            },
+            store_name='store-a',
+            raw_name='raw.nrrd',
+            raw_checksum='sha256:abc',
+            shape=[10, 12, 14],
+            spacing_mm=[0.5, 0.5, 0.5],
+            origin_lps=[-5.0, -6.0, -7.0],
+            space_directions=[[0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]],
         )
         rt = _round_trip(orig, PrepareResponse)
         assert rt.protocol_version == PROTOCOL_VERSION
         assert rt.server_stores_dir == '/srv/voxhub/zarr'
-        assert 'store-a' in rt.stores
-        s = rt.stores['store-a']
-        assert s.shape == [10, 12, 14]
-        assert s.expected_ontologies == ['inner-ear-structures']
+        assert rt.store_name == 'store-a'
+        assert rt.raw_name == 'raw.nrrd'
+        assert rt.raw_checksum == 'sha256:abc'
+        assert rt.shape == [10, 12, 14]
+        assert rt.skipped_annotations == []
+
+    def test_round_trip_with_skipped_annotations(self):
+        orig = PrepareResponse(
+            protocol_version=PROTOCOL_VERSION,
+            staging_dir='/tmp/staging',
+            server_host='server.example.com',
+            server_stores_dir='/srv/voxhub/zarr',
+            store_name='store-a',
+            raw_name='raw.nrrd',
+            raw_checksum='sha256:abc',
+            shape=[10, 12, 14],
+            spacing_mm=[0.5, 0.5, 0.5],
+            origin_lps=[-5.0, -6.0, -7.0],
+            space_directions=[[0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]],
+            skipped_annotations=[
+                {'path': 'annotations/alice-xyz/bad', 'reason': 'malformed'},
+            ],
+        )
+        rt = _round_trip(orig, PrepareResponse)
+        assert rt.skipped_annotations == [
+            {'path': 'annotations/alice-xyz/bad', 'reason': 'malformed'},
+        ]
 
 
 class TestIntegrateResponse:
@@ -119,11 +138,12 @@ class TestServerError:
 
 class TestPrepareRequest:
     def test_optional_fields_serialize_as_none(self):
-        req = PrepareRequest()
+        req = PrepareRequest(store_name='store-a')
         d = json.loads(serialize(req))
-        assert d['store_names'] is None
-        assert d['ontologies'] is None
+        assert d['store_name'] == 'store-a'
         assert d['staging_dir'] is None
+        assert d['include_existing_annotations'] is None
+        assert d['compress'] is False
 
 
 class TestCleanupAndGc:

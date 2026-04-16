@@ -6,6 +6,7 @@ Plan: docs/testing/catalog-staging-audit.md §3
 import io
 import json
 
+import numpy as np
 import zarr
 from _core_helpers import (
     ORIGIN_LPS,
@@ -298,6 +299,57 @@ class TestDiscoverAnnotations:
         assert ann.path == (
             'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12'
         )
+
+    def test_annotator_id_derived_from_slug_not_attrs(self, stores_dir_factory):
+        """annotator_id comes from the slug's prefix, not from zarr attrs.
+
+        Guards the catalog.py fix: real integrate code does not write
+        annotator_id into zarr array attrs.  Discovery must still report
+        the correct annotator_id by parsing the annotator-slug directory.
+        """
+        root = stores_dir_factory(store_names=['foo'])
+        zarr_path = root / 'foo.zarr'
+        populate_store_annotation(
+            zarr_path,
+            annotator_id='dr-smith',
+            nano_id='abcd1234',
+        )
+        # Remove the annotator_id attr to simulate real integrate output.
+        store = zarr.open_group(zarr_path, mode='r+')
+        arr_path = 'annotations/dr-smith-abcd1234/inner-ear-structures-20260101-ab12/data'
+        arr = store[arr_path]
+        existing = dict(arr.attrs)
+        existing.pop('annotator_id', None)
+        arr.attrs.clear()
+        arr.update_attributes(existing)
+
+        [entry] = discover_zarr_stores(root)
+        [ann] = entry.annotations
+        assert ann.annotator_id == 'dr-smith'
+
+    def test_malformed_annotator_slug_skipped(self, stores_dir_factory):
+        """A malformed annotator-slug subgroup is skipped (not crashed on).
+
+        Well-formed siblings still appear in the result.
+        """
+        root = stores_dir_factory(store_names=['foo'])
+        zarr_path = root / 'foo.zarr'
+        populate_store_annotation(
+            zarr_path,
+            annotator_id='alice',
+            nano_id='abcd1234',
+        )
+        # Create a malformed annotator directory (missing nano_id separator).
+        store = zarr.open_group(zarr_path, mode='r+')
+        store.create_array(
+            'annotations/not-a-valid-slug-ABCD/inst-20260101-zz99/data',
+            data=np.zeros((2, 2, 2), dtype=np.int16),
+            overwrite=True,
+        )
+
+        [entry] = discover_zarr_stores(root)
+        ids = sorted(a.annotator_id for a in entry.annotations)
+        assert ids == ['alice']
 
 
 # ===========================================================================

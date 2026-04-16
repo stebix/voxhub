@@ -22,9 +22,10 @@ from _workflow_helpers import (
 )
 
 from voxhub_client.manifest import read_manifest, update_manifest_status, write_manifest
+from voxhub_core.extraction import extract_spatial_metadata
 from voxhub_core.integrate import integrate
 from voxhub_core.server.provenance import record_provenance
-from voxhub_core.staging import extract_spatial_metadata, stage
+from voxhub_core.staging import stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
     RemoteManifest,
@@ -134,9 +135,7 @@ class TestSegmentationRoundTrip:
             nano_id='abcd1234',
             ontology=inner_ear_ontology,
         )
-        assert all(
-            i.severity != 'error' for i in result.get('scan-001', [])
-        )
+        assert all(i.severity != 'error' for i in result.get('scan-001', []))
 
         # 5. Verify annotation in zarr.
         root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
@@ -180,6 +179,7 @@ class TestSegmentationRoundTrip:
                 stores_dir,
                 annotator_id='alice',
                 nano_id='abcd1234',
+                unconstrained=True,
             )
 
 
@@ -218,9 +218,7 @@ class TestLandmarkRoundTrip:
             nano_id='efgh5678',
             ontology=landmark_ontology,
         )
-        assert all(
-            i.severity != 'error' for i in result.get('scan-001', [])
-        )
+        assert all(i.severity != 'error' for i in result.get('scan-001', []))
 
         root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
         assert 'bob-efgh5678' in list(root['annotations'].group_keys())
@@ -239,6 +237,7 @@ class TestLandmarkRoundTrip:
             stores_dir,
             annotator_id='carol',
             nano_id='ijkl9012',
+            unconstrained=True,
         )
 
         root = zarr.open_group(stores_dir / 'scan-001.zarr', mode='r')
@@ -279,9 +278,7 @@ class TestSpatialMetadataIntegrity:
 
         # 3. Verify staging output matches direct extraction.
         np.testing.assert_allclose(stage_info['origin_lps'], origin.tolist())
-        np.testing.assert_allclose(
-            stage_info['space_directions'], dirs.tolist()
-        )
+        np.testing.assert_allclose(stage_info['space_directions'], dirs.tolist())
         np.testing.assert_allclose(stage_info['spacing_mm'], spacing)
         assert stage_info['shape'] == list(root['raw']['full'].shape)
 
@@ -301,9 +298,7 @@ class TestSpatialMetadataIntegrity:
             origin=[99.0, 99.0, 99.0],
         )
 
-        issues = validate_seg_preflight(
-            seg_path, entry, inner_ear_ontology
-        )
+        issues = validate_seg_preflight(seg_path, entry, inner_ear_ontology)
         errors = [i for i in issues if i.severity == 'error']
         assert any('origin' in e.message.lower() for e in errors)
 
@@ -344,7 +339,7 @@ class TestProvenanceCompleteness:
             annotator_id='alice',
             machine_id='ff' * 8,
             nano_id='abcd1234',
-            pull_session_id='dt-pull-test',
+            pull_session_id='vxhb-staging-test',
             ontology=ontology.name,
             ontology_version=ontology.version,
             source_nrrd_checksum='sha256:test123',
@@ -383,7 +378,7 @@ class TestProvenanceCompleteness:
         assert attrs['annotator_id'] == 'alice'
         assert attrs['ontology'] == 'inner-ear-structures'
         assert attrs['ontology_version'] == 1
-        assert attrs['pull_session_id'] == 'dt-pull-test'
+        assert attrs['pull_session_id'] == 'vxhb-staging-test'
 
     def test_provenance_jsonl_contains_matching_entry(
         self, stores_dir, staging_dir, inner_ear_ontology
@@ -475,7 +470,7 @@ class TestMultiAnnotatorIsolation:
                 annotator_id=name,
                 machine_id='ff' * 8,
                 nano_id=nano,
-                pull_session_id=f'dt-pull-{name}',
+                pull_session_id=f'vxhb-staging-{name}',
                 ontology=ontology.name,
                 ontology_version=ontology.version,
                 source_nrrd_checksum='sha256:test',
@@ -508,13 +503,9 @@ class TestOntologyEnforcementE2E:
         lm[0, 0, 0] = 1
         # Only cochlea — missing vestibule and semicircular_canals.
         segments = [{'name': 'cochlea', 'label_value': 1}]
-        seg_path = write_seg_nrrd(
-            store_dir / 'incomplete.seg.nrrd', lm, segments
-        )
+        seg_path = write_seg_nrrd(store_dir / 'incomplete.seg.nrrd', lm, segments)
 
-        issues = validate_seg_preflight(
-            seg_path, entry, inner_ear_ontology
-        )
+        issues = validate_seg_preflight(seg_path, entry, inner_ear_ontology)
         errors = [i for i in issues if i.severity == 'error']
         assert len(errors) > 0
         error_text = ' '.join(i.message for i in errors)
@@ -543,13 +534,9 @@ class TestOntologyEnforcementE2E:
             {'name': 'a', 'label_value': 1},
             {'name': 'b', 'label_value': 5},
         ]
-        seg_path = write_seg_nrrd(
-            store_dir / 'non_seq.seg.nrrd', lm, segments
-        )
+        seg_path = write_seg_nrrd(store_dir / 'non_seq.seg.nrrd', lm, segments)
 
-        issues = validate_seg_preflight(
-            seg_path, entry, unconstrained_ontology
-        )
+        issues = validate_seg_preflight(seg_path, entry, unconstrained_ontology)
         errors = [i for i in issues if i.severity == 'error']
         assert len(errors) > 0
         assert any('sequential' in e.message.lower() for e in errors)
@@ -571,7 +558,7 @@ class TestManifestWorkflow:
             server_host='alice@server',
             server_stores_dir='/data/zarr',
             protocol_version=PROTOCOL_VERSION,
-            pull_session_id='dt-pull-test',
+            pull_session_id='vxhb-staging-test',
             pulled_at='2026-01-01T00:00:00+00:00',
             stores={
                 'scan-001': _manifest_entry_from_stage(info),
@@ -581,7 +568,7 @@ class TestManifestWorkflow:
         rt = read_manifest(staging_dir)
 
         assert rt.protocol_version == PROTOCOL_VERSION
-        assert rt.pull_session_id == 'dt-pull-test'
+        assert rt.pull_session_id == 'vxhb-staging-test'
         s = rt.stores['scan-001']
         np.testing.assert_allclose(s.origin_lps, ORIGIN_LPS)
         np.testing.assert_allclose(s.space_directions, SPACE_DIRECTIONS)
@@ -596,7 +583,7 @@ class TestManifestWorkflow:
             server_host='alice@server',
             server_stores_dir='/data/zarr',
             protocol_version=PROTOCOL_VERSION,
-            pull_session_id='dt-pull-test',
+            pull_session_id='vxhb-staging-test',
             pulled_at='2026-01-01T00:00:00+00:00',
             stores={
                 'scan-001': _manifest_entry_from_stage(info),
@@ -609,6 +596,4 @@ class TestManifestWorkflow:
 
         # After push+integration: update to 'integrated'.
         update_manifest_status(staging_dir, 'scan-001', 'integrated')
-        assert (
-            read_manifest(staging_dir).stores['scan-001'].status == 'integrated'
-        )
+        assert read_manifest(staging_dir).stores['scan-001'].status == 'integrated'

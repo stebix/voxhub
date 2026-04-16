@@ -1,15 +1,12 @@
 """Test helpers for voxhub-core — builder functions for test data."""
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import nrrd
 import numpy as np
 import zarr
-
-from voxhub_schema.manifest import RemoteManifest, RemoteManifestEntry
 
 # Canonical small volume geometry used across tests.
 SHAPE: tuple[int, int, int] = (10, 12, 14)
@@ -207,47 +204,6 @@ def build_staging_dir_entries(
 
 
 # -- Manifest + annotation helpers -------------------------------------------
-
-
-def write_remote_manifest(
-    staging_dir: Path,
-    *,
-    store_names: list[str],
-    expected_ontologies: list[str] | None = None,
-    included_annotations: list[str] | None = None,
-    pull_session_id: str = 'dt-pull-test-session',
-    server_host: str = 'test.example.com',
-    server_stores_dir: str = '/srv/voxhub',
-    protocol_version: int = 1,
-) -> Path:
-    """Write a ``.voxhub_manifest.json`` covering the given stores.
-
-    Returns the staging directory.
-    """
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    stores = {
-        name: RemoteManifestEntry(
-            status='pulled',
-            raw_checksum=f'sha256:{"0" * 64}',
-            shape=list(SHAPE),
-            spacing_mm=list(SPACING_MM),
-            origin_lps=list(ORIGIN_LPS),
-            space_directions=[list(row) for row in SPACE_DIRECTIONS],
-            expected_ontologies=list(expected_ontologies or []),
-            included_annotations=list(included_annotations or []),
-        )
-        for name in store_names
-    }
-    manifest = RemoteManifest(
-        server_host=server_host,
-        server_stores_dir=server_stores_dir,
-        protocol_version=protocol_version,
-        pull_session_id=pull_session_id,
-        pulled_at=datetime.now(UTC).isoformat(),
-        stores=stores,
-    )
-    manifest.write(staging_dir)
-    return staging_dir
 
 
 def populate_store_annotation(

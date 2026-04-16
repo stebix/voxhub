@@ -38,7 +38,7 @@ def _call_record_provenance(
     annotator_id: str = 'bob',
     machine_id: str = 'machine-7',
     nano_id: str = 'deadbeef',
-    pull_session_id: str = 'dt-pull-session',
+    pull_session_id: str = 'vxhb-staging-session',
     ontology: str = 'inner-ear-structures',
     ontology_version: int = 1,
     source_nrrd_checksum: str = 'sha256:' + '0' * 64,
@@ -103,7 +103,7 @@ class TestRecordProvenance:
         assert attrs['annotator_id'] == 'bob'
         assert attrs['machine_id'] == 'machine-7'
         assert attrs['nano_id'] == 'deadbeef'
-        assert attrs['pull_session_id'] == 'dt-pull-session'
+        assert attrs['pull_session_id'] == 'vxhb-staging-session'
         assert attrs['ontology'] == 'inner-ear-structures'
         assert attrs['ontology_version'] == 1
         assert isinstance(attrs['integrated_at'], str)

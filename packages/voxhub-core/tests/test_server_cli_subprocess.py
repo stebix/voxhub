@@ -105,7 +105,7 @@ class TestCommandSmoke:
         staging = tmp_path / 'subproc_staging'
         result = subprocess_server(
             'prepare-pull',
-            '--stores',
+            '--store',
             'alpha',
             '--staging-dir',
             str(staging),
@@ -114,23 +114,27 @@ class TestCommandSmoke:
         assert result.returncode == 0, result.stderr
         payload = _parse_json_stdout(result)
         assert Path(payload['staging_dir']) == staging
-        assert 'alpha' in payload['stores']
+        assert payload['store_name'] == 'alpha'
+        assert payload['raw_name'] == 'raw.nrrd'
+        assert (staging / 'raw.nrrd').is_file()
+        assert (staging / '.voxhub_pull.json').is_file()
 
     def test_integrate_annotations_full_roundtrip(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_config_env,
         subprocess_server,
     ):
         """End-to-end: stage → build annotation → integrate → verify.
 
         This is the critical server-path smoke test that exercises real
-        argparse, real I/O, and the installed entrypoint.
+        argparse, real I/O, and the installed entrypoint.  Exercises the
+        explicit ``--expected-ontology`` surface (production contract).
         """
         stores_dir = stores_dir_factory(('alpha',))
         server_config_env(stores_dir)
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         result = subprocess_server(
             'integrate-annotations',
@@ -141,6 +145,8 @@ class TestCommandSmoke:
             'machine-abc',
             '--nano-id',
             'sub12345',
+            '--expected-ontology',
+            'inner-ear-structures',
         )
 
         assert result.returncode == 0, result.stderr
@@ -155,7 +161,7 @@ class TestCommandSmoke:
         assert annotator_dirs[0].name == 'alice-sub12345'
 
     def test_cleanup(self, tmp_path, subprocess_server):
-        staging = tmp_path / 'dt-pull-smoke'
+        staging = tmp_path / 'vxhb-staging-smoke'
         staging.mkdir()
         (staging / 'payload').write_text('x')
 
@@ -170,8 +176,8 @@ class TestCommandSmoke:
         the subprocess doesn't touch the real /tmp."""
         fake_tmp = tmp_path / 'fake_tmp'
         fake_tmp.mkdir()
-        # Seed an old dt-* dir that must be reaped.
-        old = fake_tmp / 'dt-pull-old'
+        # Seed an old staging dir that must be reaped.
+        old = fake_tmp / 'vxhb-staging-old'
         old.mkdir()
         old_ts = old.stat().st_mtime - 48 * 3600
         os.utime(old, (old_ts, old_ts))
@@ -250,13 +256,13 @@ class TestProtocolContract:
     ):
         """A deliberately-failing invocation produces a structured
         ServerError envelope — never a raw traceback."""
-        # Point at a valid empty root, then ask for an unknown store —
-        # ``stage()`` raises FileNotFoundError → prepare_pull_failed envelope.
+        # Ask for a store that does not exist — prepare-pull validates the
+        # store upfront and surfaces ``store_not_found``.
         root = stores_dir_factory(('alpha',))
         server_config_env(root)
         result = subprocess_server(
             'prepare-pull',
-            '--stores',
+            '--store',
             'does-not-exist',
             '--staging-dir',
             str(tmp_path / 'staging'),
@@ -266,7 +272,7 @@ class TestProtocolContract:
         payload = _parse_json_stdout(result)
         assert payload['protocol_version'] == PROTOCOL_VERSION
         assert payload['error'] is True
-        assert payload['code'] == 'prepare_pull_failed'
+        assert payload['code'] == 'store_not_found'
         assert isinstance(payload['message'], str)
         # No traceback leaked onto stdout.
         assert 'Traceback' not in result.stdout

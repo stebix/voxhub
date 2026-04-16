@@ -294,9 +294,7 @@ class TestParseMrkJsonErrors:
 
     def test_missing_coord_system_raises(self, tmp_path):
         path = tmp_path / 'bad.mrk.json'
-        path.write_text(
-            json.dumps({'markups': [{'controlPoints': []}]})
-        )
+        path.write_text(json.dumps({'markups': [{'controlPoints': []}]}))
         with pytest.raises(MrkJsonParseError, match='coordinateSystem'):
             parse_mrk_json(path)
 
@@ -308,9 +306,7 @@ class TestParseMrkJsonErrors:
                     'markups': [
                         {
                             'coordinateSystem': 'LPS',
-                            'controlPoints': [
-                                {'label': 'a', 'position': [1.0, 2.0]}
-                            ],
+                            'controlPoints': [{'label': 'a', 'position': [1.0, 2.0]}],
                         }
                     ]
                 }
@@ -347,9 +343,7 @@ class TestParseMrkJsonErrors:
                     'markups': [
                         {
                             'coordinateSystem': 'LPS',
-                            'controlPoints': [
-                                {'position': [1.0, 2.0, 3.0]}
-                            ],
+                            'controlPoints': [{'position': [1.0, 2.0, 3.0]}],
                         }
                     ]
                 }

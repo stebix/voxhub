@@ -6,6 +6,7 @@ overviews using ``rich``.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,13 @@ from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
-from voxhub_schema import DatasetAttributes
+from voxhub_schema import (
+    AnnotatorSlugError,
+    DatasetAttributes,
+    parse_annotator_slug,
+)
+
+log = logging.getLogger(__name__)
 
 
 @attrs.define
@@ -47,7 +54,14 @@ class ZarrEntry:
 
 
 def _discover_annotations(root: zarr.Group) -> list[AnnotationEntry]:
-    """Walk ``annotations/`` subgroups to find integrated annotations."""
+    """Walk ``annotations/`` subgroups to find integrated annotations.
+
+    The annotator_id is derived from the annotator-slug directory name
+    (``<annotator_id>-<nano_id>``) via :func:`parse_annotator_slug`, which is
+    the single source of truth.  Subgroups whose names violate the slug
+    schema are skipped with a warning — they do not short-circuit discovery
+    of well-formed siblings.
+    """
     results: list[AnnotationEntry] = []
     try:
         ann_group = root['annotations']
@@ -58,35 +72,37 @@ def _discover_annotations(root: zarr.Group) -> list[AnnotationEntry]:
         annotator_group = ann_group[annotator_name]
         if not isinstance(annotator_group, zarr.Group):
             continue
+        try:
+            annotator_id, _ = parse_annotator_slug(annotator_name)
+        except AnnotatorSlugError as exc:
+            log.warning('skipping malformed annotator slug: %s', exc)
+            continue
+
         for instance_name in annotator_group:
             instance = annotator_group[instance_name]
+            attrs_source: zarr.Array | None = None
             if isinstance(instance, zarr.Group):
-                # Look for the array inside the instance group.
                 for arr_name in instance:
                     child = instance[arr_name]
                     if isinstance(child, zarr.Array):
-                        a = dict(child.attrs)
-                        results.append(
-                            AnnotationEntry(
-                                path=(f'annotations/{annotator_name}/{instance_name}'),
-                                ontology=a.get('ontology', ''),
-                                ontology_version=int(a.get('ontology_version', 0)),
-                                annotator_id=a.get('annotator_id', ''),
-                                integrated_at=a.get('integrated_at', ''),
-                            )
-                        )
+                        attrs_source = child
                         break
             elif isinstance(instance, zarr.Array):
-                a = dict(instance.attrs)
-                results.append(
-                    AnnotationEntry(
-                        path=(f'annotations/{annotator_name}/{instance_name}'),
-                        ontology=a.get('ontology', ''),
-                        ontology_version=int(a.get('ontology_version', 0)),
-                        annotator_id=a.get('annotator_id', ''),
-                        integrated_at=a.get('integrated_at', ''),
-                    )
+                attrs_source = instance
+
+            if attrs_source is None:
+                continue
+
+            a = dict(attrs_source.attrs)
+            results.append(
+                AnnotationEntry(
+                    path=f'annotations/{annotator_name}/{instance_name}',
+                    ontology=a.get('ontology', ''),
+                    ontology_version=int(a.get('ontology_version', 0)),
+                    annotator_id=annotator_id,
+                    integrated_at=a.get('integrated_at', ''),
                 )
+            )
     return results
 
 

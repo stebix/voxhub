@@ -150,10 +150,24 @@ def _build_integrate_parser(
         required=True,
         help='8-char nano-ID for the annotator.',
     )
-    parser.add_argument(
+    ontology_group = parser.add_mutually_exclusive_group(required=True)
+    ontology_group.add_argument(
         '--ontology',
         default=None,
-        help='Ontology name to validate against.',
+        metavar='NAME',
+        help=(
+            'Ontology name to validate against and record. Mutually '
+            'exclusive with --unconstrained; exactly one must be '
+            'specified.'
+        ),
+    )
+    ontology_group.add_argument(
+        '--unconstrained',
+        action='store_true',
+        help=(
+            'Explicit opt-in to unconstrained integration (no ontology '
+            'enforcement). Mutually exclusive with --ontology.'
+        ),
     )
     parser.add_argument(
         '--force',
@@ -252,10 +266,11 @@ def _run_integrate(args: argparse.Namespace) -> None:
             annotator_id=args.annotator_id,
             nano_id=args.nano_id,
             ontology=ontology,
+            unconstrained=args.unconstrained,
             force=args.force,
             validate_only=args.validate_only,
         )
-    except (RuntimeError, FileNotFoundError) as exc:
+    except (RuntimeError, FileNotFoundError, ValueError) as exc:
         print(f'Error: {exc}', file=sys.stderr)
         sys.exit(1)
 

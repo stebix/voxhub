@@ -1,4 +1,4 @@
-"""Tests for the fast NRRD writer in staging.py.
+"""Tests for the fast NRRD writer in extraction.py.
 
 Covers correctness (equivalence with pynrrd) and performance (benchmarks).
 
@@ -9,7 +9,7 @@ varies fastest in the file) and on read returns a C-order numpy array with
 shape equal to the header sizes.  For a ZYX numpy array of shape (Z, Y, X):
 
 - ``nrrd.write`` records sizes = [Z, Y, X]; ``nrrd.read`` returns shape (Z, Y, X)
-- ``_write_nrrd_raw`` records sizes = [X, Y, Z] (reversed), so
+- ``write_nrrd_raw`` records sizes = [X, Y, Z] (reversed), so
   ``nrrd.read`` returns shape (X, Y, Z) = data.T
 
 The invariant that proves both writers encode the same volume:
@@ -23,7 +23,7 @@ import nrrd
 import numpy as np
 import pytest
 
-from voxhub_core.staging import _build_nrrd_header, _write_nrrd_raw
+from voxhub_core.extraction import build_raw_volume_header, write_nrrd_raw
 
 # -- Shared geometry ---------------------------------------------------------
 
@@ -57,7 +57,7 @@ def bench_data():
 
 @pytest.fixture(scope='module')
 def bench_header():
-    return _build_nrrd_header(
+    return build_raw_volume_header(
         _BENCH_SHAPE,
         np.array(_ORIGIN),
         np.array(_SPACE_DIRECTIONS),
@@ -70,10 +70,10 @@ def bench_header():
 
 
 class TestNrrdWriterEquivalence:
-    """_write_nrrd_raw and nrrd.write encode the same volume data.
+    """write_nrrd_raw and nrrd.write encode the same volume data.
 
     pynrrd reads NRRD files using the spec's F-order convention (first listed
-    size varies fastest in the file), so reading a _write_nrrd_raw file (which
+    size varies fastest in the file), so reading a write_nrrd_raw file (which
     has reversed sizes) yields the transpose of the original array:
 
         data_fast == data_ref.T
@@ -91,7 +91,7 @@ class TestNrrdWriterEquivalence:
 
         p_fast = tmp_path / 'fast.nrrd'
         p_ref = tmp_path / 'ref.nrrd'
-        _write_nrrd_raw(p_fast, data, header)
+        write_nrrd_raw(p_fast, data, header)
         nrrd.write(str(p_ref), data, header)
 
         data_fast, _ = nrrd.read(str(p_fast))
@@ -100,13 +100,13 @@ class TestNrrdWriterEquivalence:
         np.testing.assert_array_equal(data_fast, data_ref.T)
 
     def test_shape_is_reversed_in_header(self, tmp_path):
-        """_write_nrrd_raw lists sizes in reversed (fastest-axis-first) order."""
+        """write_nrrd_raw lists sizes in reversed (fastest-axis-first) order."""
         data = np.zeros((8, 10, 12), dtype='float32')
         header = _make_header()
 
         p_fast = tmp_path / 'fast.nrrd'
         p_ref = tmp_path / 'ref.nrrd'
-        _write_nrrd_raw(p_fast, data, header)
+        write_nrrd_raw(p_fast, data, header)
         nrrd.write(str(p_ref), data, header)
 
         data_fast, _ = nrrd.read(str(p_fast))
@@ -121,7 +121,7 @@ class TestNrrdWriterEquivalence:
 
         p_fast = tmp_path / 'fast.nrrd'
         p_ref = tmp_path / 'ref.nrrd'
-        _write_nrrd_raw(p_fast, data, header)
+        write_nrrd_raw(p_fast, data, header)
         nrrd.write(str(p_ref), data, header)
 
         _, h_fast = nrrd.read(str(p_fast))
@@ -137,7 +137,7 @@ class TestNrrdWriterEquivalence:
 
         p_fast = tmp_path / 'fast.nrrd'
         p_ref = tmp_path / 'ref.nrrd'
-        _write_nrrd_raw(p_fast, data, header)
+        write_nrrd_raw(p_fast, data, header)
         nrrd.write(str(p_ref), data, header)
 
         _, h_fast = nrrd.read(str(p_fast))
@@ -156,7 +156,7 @@ class TestNrrdWriterEquivalence:
 
         p_fast = tmp_path / 'fast.nrrd'
         p_ref = tmp_path / 'ref.nrrd'
-        _write_nrrd_raw(p_fast, data, header, compress=True)
+        write_nrrd_raw(p_fast, data, header, compress=True)
         nrrd.write(str(p_ref), data, {**header, 'encoding': 'gzip'})
 
         data_fast, _ = nrrd.read(str(p_fast))
@@ -170,7 +170,7 @@ class TestNrrdWriterEquivalence:
         header = {**_make_header(), 'MyCustomField': 'hello'}
 
         p_fast = tmp_path / 'fast.nrrd'
-        _write_nrrd_raw(p_fast, data, header)
+        write_nrrd_raw(p_fast, data, header)
         _, h_fast = nrrd.read(str(p_fast))
 
         assert h_fast.get('MyCustomField') == 'hello'
@@ -179,7 +179,7 @@ class TestNrrdWriterEquivalence:
         """complex64 voxels raise ValueError immediately."""
         data = np.zeros((4, 4, 4), dtype='complex64')
         with pytest.raises(ValueError, match='Unsupported dtype'):
-            _write_nrrd_raw(tmp_path / 'bad.nrrd', data, _make_header())
+            write_nrrd_raw(tmp_path / 'bad.nrrd', data, _make_header())
 
 
 # ===================================================================
@@ -188,9 +188,9 @@ class TestNrrdWriterEquivalence:
 
 
 def test_benchmark_handrolled_write(benchmark, tmp_path, bench_data, bench_header):
-    """Benchmark _write_nrrd_raw on a ~4 M-voxel float32 volume."""
+    """Benchmark write_nrrd_raw on a ~4 M-voxel float32 volume."""
     out = tmp_path / 'fast.nrrd'
-    benchmark(lambda: _write_nrrd_raw(out, bench_data, bench_header))
+    benchmark(lambda: write_nrrd_raw(out, bench_data, bench_header))
 
 
 def test_benchmark_pynrrd_write(benchmark, tmp_path, bench_data, bench_header):
@@ -202,7 +202,7 @@ def test_benchmark_pynrrd_write(benchmark, tmp_path, bench_data, bench_header):
 def test_handrolled_faster_than_pynrrd(tmp_path, bench_data, bench_header):
     """Hand-rolled writer is at least 10× faster than pynrrd for large volumes.
 
-    The docstring in staging.py claims ~80×; 10× is used here as a
+    The docstring in extraction.py claims ~80×; 10× is used here as a
     conservative bound so the assertion holds on slow CI runners.
     """
     fast_path = tmp_path / 'fast.nrrd'
@@ -210,7 +210,7 @@ def test_handrolled_faster_than_pynrrd(tmp_path, bench_data, bench_header):
 
     n = 3
     t_fast = timeit.timeit(
-        lambda: _write_nrrd_raw(fast_path, bench_data, bench_header),
+        lambda: write_nrrd_raw(fast_path, bench_data, bench_header),
         number=n,
     )
     t_ref = timeit.timeit(
