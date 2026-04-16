@@ -391,6 +391,106 @@ class TestPreparePull:
         finally:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
+    def test_reused_staging_dir_is_sanitised(
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout
+    ):
+        """--staging-dir pointed at a dir with prior prepare-pull debris:
+        orphans from the previous run are removed so the new manifest
+        and on-disk layout stay in agreement."""
+        from voxhub_schema import PullManifest
+
+        root = stores_dir_factory(('alpha',))
+        explicit = tmp_path / 'explicit_staging'
+        explicit.mkdir()
+
+        # Plant debris that a prior prepare-pull invocation might leave:
+        #   * orphan reference files (the within-run #4 fix deletes
+        #     *partial* writes; across runs we clear the whole tree),
+        #   * a stale manifest (shouldn't be trusted if the new run
+        #     fails to write its own),
+        #   * a nested <store>/ dir (from a crash mid-flatten),
+        #   * stale raw.nrrd.
+        ref_dir = explicit / 'reference'
+        ref_dir.mkdir()
+        leftover = ref_dir / 'orphan-from-prior-run.seg.nrrd'
+        leftover.write_bytes(b'stale contents')
+        (explicit / '.voxhub_pull.json').write_text('{"stale": true}')
+        (explicit / 'raw.nrrd').write_bytes(b'stale raw bytes')
+        nested = explicit / 'alpha'
+        nested.mkdir()
+        (nested / 'raw.nrrd').write_bytes(b'stale nested raw')
+
+        server_cli._run_prepare_pull(
+            server_argv(stores_dir=root, store='alpha', staging_dir=str(explicit))
+        )
+
+        payload = parsed_stdout()
+        assert Path(payload['staging_dir']) == explicit
+
+        # Orphans are gone.
+        assert not leftover.exists()
+        assert not nested.exists()
+
+        # Fresh manifest is in place and agrees with on-disk state.
+        assert (explicit / '.voxhub_pull.json').is_file()
+        manifest = PullManifest.read(explicit)
+        assert manifest.store_name == 'alpha'
+        assert manifest.annotations == []
+
+        # Fresh raw is genuinely fresh (checksum matches the new manifest,
+        # not the planted stub).
+        raw_bytes = (explicit / 'raw.nrrd').read_bytes()
+        assert raw_bytes != b'stale raw bytes'
+        assert manifest.raw_checksum == payload['raw_checksum']
+
+    def test_partial_extraction_cleans_up_orphan_file(
+        self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
+    ):
+        """An ExtractionError partway through writing a reference file
+        must not leave a truncated file on disk — the annotation appears
+        in skipped_annotations and reference/ contains nothing for it."""
+        from voxhub_core.extraction import ExtractionError
+        from voxhub_schema import PullManifest
+
+        root = stores_dir_factory(('alpha',), with_annotations=True)
+        ann_rel = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12'
+
+        # Patch both extractors: we don't assert kind here, we just need
+        # whichever one runs to partial-write then fail.
+        def partial_then_fail(_zarr_path, _array_zarr_path, dest):  # type: ignore[no-untyped-def]
+            dest.write_bytes(b'partial bytes before failure')
+            raise ExtractionError('injected mid-write failure')
+
+        monkeypatch.setattr(server_cli, 'extract_segmentation', partial_then_fail)
+        monkeypatch.setattr(server_cli, 'extract_landmarks', partial_then_fail)
+
+        server_cli._run_prepare_pull(
+            server_argv(
+                stores_dir=root,
+                store='alpha',
+                include_existing_annotations=[ann_rel],
+            )
+        )
+
+        payload = parsed_stdout()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            skipped = payload['skipped_annotations']
+            assert len(skipped) == 1
+            assert skipped[0]['path'] == ann_rel
+            assert 'injected mid-write failure' in skipped[0]['reason']
+
+            # Manifest has no entry for the skipped annotation.
+            manifest = PullManifest.read(staging_dir)
+            assert manifest.annotations == []
+
+            # No orphan file left behind in reference/.
+            ref_dir = staging_dir / 'reference'
+            if ref_dir.exists():
+                assert list(ref_dir.iterdir()) == []
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
 
 # ===========================================================================
 # _run_integrate_annotations — helpers

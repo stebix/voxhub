@@ -262,6 +262,10 @@ def _extract_reference_annotations(
             else:
                 checksum = extract_landmarks(zarr_path, array_zarr_path, ref_dest)
         except ExtractionError as exc:
+            # Extraction may have written partial bytes before failing;
+            # remove any orphan so the session dir only contains files
+            # the manifest will list.
+            ref_dest.unlink(missing_ok=True)
             log.warning('annotation_extraction_failed', path=ann_path, error=str(exc))
             skipped.append({'path': ann_path, 'reason': str(exc)})
             continue
@@ -316,6 +320,24 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
                 prefix=f'{STAGING_DIR_PREFIX}{session_id}-',
             )
         )
+
+    # Sanitise prior prepare-pull output under ``--staging-dir``:
+    # ``reference/`` files from an earlier run are not touched by
+    # ``stage(force=True)`` and would otherwise rsync down as orphans
+    # that are absent from the fresh manifest.  ``raw.nrrd`` and the
+    # prior ``.voxhub_pull.json`` get overwritten downstream, but we
+    # clear them explicitly so the session dir is in a known state
+    # before we write anything.  The nested ``<store_name>/`` survives
+    # only if a prior run crashed between ``stage()`` and the flatten
+    # rename.  All removals use ``missing_ok``-style semantics.
+    ref_dir = staging_dir / 'reference'
+    if ref_dir.exists():
+        shutil.rmtree(ref_dir)
+    (staging_dir / 'raw.nrrd').unlink(missing_ok=True)
+    (staging_dir / '.voxhub_pull.json').unlink(missing_ok=True)
+    nested_store_dir = staging_dir / store_name
+    if nested_store_dir.exists():
+        shutil.rmtree(nested_store_dir)
 
     # -- Task 2a: stage raw volume at <staging_dir>/raw.nrrd ----------------
     # ``stage`` writes to ``<staging_dir>/<store_name>/raw.nrrd``.  For a
