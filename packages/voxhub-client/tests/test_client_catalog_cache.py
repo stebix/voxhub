@@ -13,6 +13,7 @@ import pytest
 from voxhub_client.catalog_cache import (
     CACHE_FILENAME,
     ClientCatalogCache,
+    _sanitise_key,
     list_stores_cached,
     server_key_for,
 )
@@ -69,19 +70,19 @@ class TestRead:
 
     def test_corrupt_returns_none(self, cache: ClientCatalogCache) -> None:
         # Lay down a cache file by hand with non-JSON contents.
-        path = cache.cache_root / 'voxhub_at_host' / CACHE_FILENAME
+        path = cache.cache_root / _sanitise_key('voxhub_at_host') / CACHE_FILENAME
         path.parent.mkdir(parents=True)
         path.write_text('{not json at all')
         assert cache.read('voxhub_at_host') is None
 
     def test_wrong_top_level_type_returns_none(self, cache: ClientCatalogCache) -> None:
-        path = cache.cache_root / 'voxhub_at_host' / CACHE_FILENAME
+        path = cache.cache_root / _sanitise_key('voxhub_at_host') / CACHE_FILENAME
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps([1, 2, 3]))
         assert cache.read('voxhub_at_host') is None
 
     def test_missing_required_field_returns_none(self, cache: ClientCatalogCache) -> None:
-        path = cache.cache_root / 'voxhub_at_host' / CACHE_FILENAME
+        path = cache.cache_root / _sanitise_key('voxhub_at_host') / CACHE_FILENAME
         path.parent.mkdir(parents=True)
         # Missing ``stores``.
         path.write_text(json.dumps({'catalog_version': 7}))
@@ -110,7 +111,7 @@ class TestWriteRead:
         self, cache: ClientCatalogCache
     ) -> None:
         cache.write('voxhub_at_host', 1, [{'name': 'alpha'}])
-        server_dir = cache.cache_root / 'voxhub_at_host'
+        server_dir = cache.cache_root / _sanitise_key('voxhub_at_host')
         leftovers = [p for p in server_dir.iterdir() if p.suffix == '.tmp']
         assert leftovers == []
         # The actual cache file is exactly the one we expect.
@@ -119,7 +120,9 @@ class TestWriteRead:
     def test_creates_per_server_directory(self, cache: ClientCatalogCache) -> None:
         assert not cache.cache_root.exists()
         cache.write('voxhub_at_host', 1, [])
-        assert (cache.cache_root / 'voxhub_at_host' / CACHE_FILENAME).is_file()
+        assert (
+            cache.cache_root / _sanitise_key('voxhub_at_host') / CACHE_FILENAME
+        ).is_file()
 
 
 class TestMultiServerIsolation:
@@ -181,6 +184,29 @@ class TestSanitisation:
         read = cache.read('../escape')
         assert read is not None
         assert read['catalog_version'] == 1
+
+
+class TestSanitiseKeyInjectivity:
+    def test_distinguishes_collision_pairs(self) -> None:
+        """Raws that clean to the same characters must still produce distinct keys.
+
+        Under the old char-substitution-only sanitiser, these two raws
+        both collapsed to ``user_host_2222`` and clobbered each other
+        on disk. The blake2b suffix breaks the collision.
+        """
+        assert _sanitise_key('user@host:2222') != _sanitise_key('user@host_2222')
+
+    def test_deterministic_for_same_input(self) -> None:
+        # Same raw → same key, stable across calls (cache keying relies
+        # on this for warm-hit behaviour).
+        assert _sanitise_key('user@host:2222') == _sanitise_key('user@host:2222')
+
+    def test_rejects_empty_raw(self) -> None:
+        # The empty-raw path is the only input that still trips the
+        # guard — a non-empty raw now always produces a non-empty
+        # cleaned prefix because the suffix is unconditional.
+        with pytest.raises(ValueError, match='sanitises to empty'):
+            _sanitise_key('')
 
 
 # ===================================================================

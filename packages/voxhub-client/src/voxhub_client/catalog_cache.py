@@ -22,6 +22,7 @@ This module is fully self-contained — it must not import
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -81,12 +82,20 @@ def server_key_for(target: SshTarget) -> str:
 
 
 def _sanitise_key(raw: str) -> str:
-    """Replace any character outside ``[A-Za-z0-9._-]`` with ``_``."""
+    """Produce a filesystem-safe, injective key from *raw*.
+
+    Characters outside ``[A-Za-z0-9._-]`` are replaced with ``_`` and an
+    8-hex-char ``blake2b`` digest of the raw input is appended so that
+    distinct inputs which happen to clean to the same characters (e.g.
+    ``user@host:2222`` and ``user@host_2222``) still produce distinct
+    directory names.
+    """
     cleaned = _SAFE_KEY_RE.sub('_', raw)
     if not cleaned:
         msg = f'server_key sanitises to empty string: {raw!r}'
         raise ValueError(msg)
-    return cleaned
+    digest = hashlib.blake2b(raw.encode(), digest_size=4).hexdigest()
+    return f'{cleaned}-{digest}'
 
 
 @attrs.define
