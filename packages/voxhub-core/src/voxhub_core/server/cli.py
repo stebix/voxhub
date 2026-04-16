@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import zarr
-from rich.console import Console
 
 from voxhub_core.attributes import (
     DATASET_ATTRIBUTES_KEY,
@@ -35,6 +34,7 @@ from voxhub_core.extraction import (
     extract_landmarks,
     extract_segmentation,
     extract_spatial_metadata,
+    extract_volume,
 )
 from voxhub_core.integrate import (
     find_annotation_files,
@@ -52,7 +52,6 @@ from voxhub_core.server.provenance import (
     validate_provenance_jsonl,
 )
 from voxhub_core.server.settings import SettingsError, load_settings
-from voxhub_core.staging import stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
     AnnotatorSlugError,
@@ -321,53 +320,26 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         )
 
     # Sanitise prior prepare-pull output under ``--staging-dir``:
-    # ``reference/`` files from an earlier run are not touched by
-    # ``stage(force=True)`` and would otherwise rsync down as orphans
-    # that are absent from the fresh manifest.  ``raw.nrrd`` and the
-    # prior ``.voxhub_pull.json`` get overwritten downstream, but we
-    # clear them explicitly so the session dir is in a known state
-    # before we write anything.  The nested ``<store_name>/`` survives
-    # only if a prior run crashed between ``stage()`` and the flatten
-    # rename.  All removals use ``missing_ok``-style semantics.
+    # ``reference/`` files from an earlier run are not touched by the
+    # extraction step and would otherwise rsync down as orphans that
+    # are absent from the fresh manifest.  ``raw.nrrd`` and the prior
+    # ``.voxhub_pull.json`` get overwritten downstream, but we clear
+    # them explicitly so the session dir is in a known state before
+    # we write anything.  All removals use ``missing_ok``-style
+    # semantics.
     ref_dir = staging_dir / 'reference'
     if ref_dir.exists():
         shutil.rmtree(ref_dir)
     (staging_dir / 'raw.nrrd').unlink(missing_ok=True)
     (staging_dir / '.voxhub_pull.json').unlink(missing_ok=True)
-    nested_store_dir = staging_dir / store_name
-    if nested_store_dir.exists():
-        shutil.rmtree(nested_store_dir)
 
-    # -- Task 2a: stage raw volume at <staging_dir>/raw.nrrd ----------------
-    # ``stage`` writes to ``<staging_dir>/<store_name>/raw.nrrd``.  For a
-    # single-store pull we flatten that up one level so the session root
-    # holds ``raw.nrrd`` directly (matches the client-side layout too).
+    # -- Task 2a: extract raw volume at <staging_dir>/raw.nrrd --------------
     try:
-        console = Console(stderr=True, quiet=True)
-        store_metadata = stage(
-            stores_dir,
-            staging_dir,
-            store_names=[store_name],
-            compress=compress,
-            force=True,
-            console=console,
-        )
+        meta = extract_volume(zarr_path, staging_dir / 'raw.nrrd', compress=compress)
     except Exception as exc:
         log.error('prepare_pull_failed', error=str(exc))
         _write_error('prepare_pull_failed', str(exc))
         sys.exit(1)
-
-    nested_raw = staging_dir / store_name / 'raw.nrrd'
-    flat_raw = staging_dir / 'raw.nrrd'
-    try:
-        nested_raw.rename(flat_raw)
-        (staging_dir / store_name).rmdir()
-    except OSError as exc:
-        log.error('staging_flatten_failed', error=str(exc))
-        _write_error('prepare_pull_failed', f'failed to flatten staging dir: {exc}')
-        sys.exit(1)
-
-    meta = store_metadata[store_name]
 
     # -- Task 2b: extract reference annotations -----------------------------
     ann_entries, skipped_annotations = _extract_reference_annotations(

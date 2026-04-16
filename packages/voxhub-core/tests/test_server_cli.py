@@ -268,19 +268,19 @@ class TestPreparePull:
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
-    def test_compression_flag_propagates_to_stage(
+    def test_compression_flag_propagates_to_extract_volume(
         self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
     ):
         root = stores_dir_factory(('alpha',))
         captured: dict[str, object] = {}
 
-        original_stage = server_cli.stage
+        original_extract_volume = server_cli.extract_volume
 
-        def spy_stage(*args, **kwargs):  # type: ignore[no-untyped-def]
+        def spy_extract_volume(*args, **kwargs):  # type: ignore[no-untyped-def]
             captured.update(kwargs)
-            return original_stage(*args, **kwargs)
+            return original_extract_volume(*args, **kwargs)
 
-        monkeypatch.setattr(server_cli, 'stage', spy_stage)
+        monkeypatch.setattr(server_cli, 'extract_volume', spy_extract_volume)
 
         server_cli._run_prepare_pull(
             server_argv(stores_dir=root, store='alpha', compress=True)
@@ -291,15 +291,15 @@ class TestPreparePull:
         finally:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
-    def test_stage_failure_writes_error_envelope_and_exits(
+    def test_extract_volume_failure_writes_error_envelope_and_exits(
         self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
     ):
         root = stores_dir_factory(('alpha',))
 
         def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
-            raise RuntimeError('staging blew up')
+            raise RuntimeError('extraction blew up')
 
-        monkeypatch.setattr(server_cli, 'stage', boom)
+        monkeypatch.setattr(server_cli, 'extract_volume', boom)
 
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
@@ -308,7 +308,7 @@ class TestPreparePull:
         envelope = parsed_stdout()
         assert envelope['error'] is True
         assert envelope['code'] == 'prepare_pull_failed'
-        assert 'staging blew up' in envelope['message']
+        assert 'extraction blew up' in envelope['message']
         assert envelope['protocol_version'] == PROTOCOL_VERSION
 
     def test_store_not_found_fails_before_staging(
@@ -317,14 +317,14 @@ class TestPreparePull:
         """Missing --store errors early with no staging dir created."""
         root = stores_dir_factory(('alpha',))
 
-        # Sentinel to assert stage is never called.
+        # Sentinel to assert extract_volume is never called.
         calls: list[int] = []
 
         def sentinel(*_args, **_kwargs):  # type: ignore[no-untyped-def]
             calls.append(1)
-            raise AssertionError('stage must not be called when store is absent')
+            raise AssertionError('extract_volume must not be called when store is absent')
 
-        monkeypatch.setattr(server_cli, 'stage', sentinel)
+        monkeypatch.setattr(server_cli, 'extract_volume', sentinel)
 
         with pytest.raises(SystemExit) as excinfo:
             server_cli._run_prepare_pull(
@@ -408,7 +408,6 @@ class TestPreparePull:
         #     *partial* writes; across runs we clear the whole tree),
         #   * a stale manifest (shouldn't be trusted if the new run
         #     fails to write its own),
-        #   * a nested <store>/ dir (from a crash mid-flatten),
         #   * stale raw.nrrd.
         ref_dir = explicit / 'reference'
         ref_dir.mkdir()
@@ -416,9 +415,6 @@ class TestPreparePull:
         leftover.write_bytes(b'stale contents')
         (explicit / '.voxhub_pull.json').write_text('{"stale": true}')
         (explicit / 'raw.nrrd').write_bytes(b'stale raw bytes')
-        nested = explicit / 'alpha'
-        nested.mkdir()
-        (nested / 'raw.nrrd').write_bytes(b'stale nested raw')
 
         server_cli._run_prepare_pull(
             server_argv(stores_dir=root, store='alpha', staging_dir=str(explicit))
@@ -429,7 +425,6 @@ class TestPreparePull:
 
         # Orphans are gone.
         assert not leftover.exists()
-        assert not nested.exists()
 
         # Fresh manifest is in place and agrees with on-disk state.
         assert (explicit / '.voxhub_pull.json').is_file()
