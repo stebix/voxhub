@@ -129,3 +129,72 @@ implementation adds them when fleshing out the tests.
 4. Remove `pytest.mark.skip` as each test becomes real.
 5. Run `uv run pytest packages/voxhub-core/tests/test_X.py -v` to verify.
 6. Commit the fleshed-out tests + any new fixtures together.
+
+## Client end-to-end loopback suite
+
+Complementary to the voxhub-core plans above, the client package ships an
+end-to-end suite that drives the **real** `voxhub pull` orchestrator against
+the **real** `voxhub-server` subprocess, with ssh/rsync replaced by in-process
+shims.  No `ssh`, `sshd`, `rsync`, or network listener is required — the suite
+runs on a disconnected machine.
+
+### Layout
+
+```
+packages/voxhub-client/tests/
+├── conftest.py         fixtures: loopback_pull_env, raw_only_store, store_with_annotations
+├── loopback.py         LoopbackSshRunner, LoopbackRsyncTransfer transport shims
+└── test_pull_e2e.py    the suite itself (pytest.mark.e2e, pytest.mark.slow)
+```
+
+### What the shims do
+
+- `LoopbackSshRunner` dispatches `run(*args)` to
+  `[sys.executable, '-m', 'voxhub_core.server.cli', *args]` with
+  `VOXHUB_SERVER_CONFIG` pointed at a fixture-provided TOML.  It preserves the
+  production error taxonomy — `RemoteError('ssh_failed', ...)`,
+  `RemoteError('parse_error', ...)`, the structured error envelope,
+  `ProtocolMismatchError` — so client branches are exercised the same way they
+  would be over SSH.  Stderr structlog events are captured per call for tests
+  that assert on observable server behaviour (e.g.
+  `staging_dir_reaped` with `reason='client_ack'`).
+- `LoopbackRsyncTransfer.pull(remote, local)` uses `shutil.copytree` with
+  `dirs_exist_ok=True`, matching the trailing-slash directory-contents semantics
+  of the real rsync invocation.
+
+Production code is unchanged; the shims are installed via `monkeypatch` onto
+`voxhub_client.cli` module-scope names (`SshRunner`, `RsyncTransfer`,
+`get_identity`, `get_server`).
+
+### Properties under test
+
+Beyond happy-path pulls (raw only, raw + segmentation + landmark references),
+the suite locks down a few properties not provable at the unit level:
+
+- **rename-then-verify**: moving the session directory after a successful pull
+  must not invalidate the `.voxhub_pull.sha256` sidecar (it hashes a sibling by
+  relative path, not an absolute one).
+- **schema parity**: the raw server stdout parses as a `PrepareResponse` —
+  catches wire drift between server and schema.
+- **cleanup ACK**: the staging directory is reaped on the server after the
+  client's ACK, and exactly one `staging_dir_reaped` / `reason='client_ack'`
+  event is emitted.
+- **skipped annotations** surface on both the response and the user-facing
+  summary.
+- **error path**: a missing store exits 1 with a descriptive message and leaves
+  no partial artefacts in the destination.
+
+### Running it
+
+The `e2e` marker is registered in the top-level `pyproject.toml` and split out
+of the fast path:
+
+```bash
+just test-fast    # excludes both `slow` and `e2e`
+just test-e2e     # runs only the e2e suite
+uv run pytest     # runs everything
+```
+
+Each e2e test spawns a fresh `voxhub-server` subprocess per SSH call, so the
+suite is noticeably slower than the unit tests — expect it to live in CI's
+integration lane rather than the pre-commit hook.
