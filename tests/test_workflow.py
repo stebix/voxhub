@@ -22,9 +22,10 @@ from _workflow_helpers import (
 )
 
 from voxhub_client.manifest import read_manifest, update_manifest_status, write_manifest
+from voxhub_core.extraction import extract_spatial_metadata
 from voxhub_core.integrate import integrate
 from voxhub_core.server.provenance import record_provenance
-from voxhub_core.staging import extract_spatial_metadata, stage
+from voxhub_core.staging import stage
 from voxhub_schema import (
     PROTOCOL_VERSION,
     RemoteManifest,
