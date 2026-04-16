@@ -74,10 +74,20 @@ class RemoteManifestEntry:
 
 @attrs.define
 class RemoteManifest:
-    """Manifest written to the staging directory after ``pull``.
+    """Client-owned manifest tracking a local pull session's workflow state.
 
     Records the server target, protocol version, pull session ID,
     and per-store metadata + expected ontologies.
+
+    **Ownership**: The *server* no longer reads or writes this file.
+    ``prepare-pull`` emits the :class:`PullManifest` artefact
+    (``.voxhub_pull.json``) as its server-authoritative record, and
+    ``integrate-annotations`` gets ontology declarations directly from
+    the client via CLI args rather than from a staging-dir file.  This
+    class is retained in the schema for the *client-owned* workflow
+    state the push redesign will need — session ID bookkeeping,
+    integration-status transitions, etc.  It lives on the client side
+    of the server/local hard wall.
 
     Parameters
     ----------

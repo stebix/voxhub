@@ -61,7 +61,6 @@ from voxhub_schema import (
     Ontology,
     PullAnnotationEntry,
     PullManifest,
-    RemoteManifest,
     ServerError,
     generate_nano_id,
     load_ontology,
@@ -437,7 +436,8 @@ def _resolve_ontologies(
     Parameters
     ----------
     expected_ontologies : list[str]
-        Ontology names from the pull manifest.
+        Ontology names the client declared for this integration via
+        ``--expected-ontology``.
     annotation_type : str
         ``'segmentation'`` or ``'landmarks'`` -- used to filter.
     log
@@ -446,7 +446,12 @@ def _resolve_ontologies(
     Returns
     -------
     tuple[list[Ontology], list[IssueRecord]]
-        Loaded ontologies and any issues encountered during loading.
+        Loaded ontologies matching ``annotation_type`` and any issues
+        encountered during loading.  A named-but-unfindable ontology
+        becomes a ``warning`` issue (the client declared intent; the
+        server reports the resolution failure); it is the caller's
+        responsibility to error if the resulting list is empty when one
+        was expected.
     """
     ontologies: list[Ontology] = []
     issues: list[IssueRecord] = []
@@ -458,10 +463,7 @@ def _resolve_ontologies(
             issues.append(
                 IssueRecord(
                     severity='warning',
-                    message=(
-                        f'Expected ontology {ont_name!r} not found; '
-                        f'skipping ontology-aware validation'
-                    ),
+                    message=(f'Expected ontology {ont_name!r} not found on server'),
                 )
             )
             log.warning('ontology_not_found', ontology=ont_name)
@@ -484,33 +486,39 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     nano_id = args.nano_id
     force = args.force
     checksums = args.checksums or []
+    declared_ontologies: list[str] = list(args.expected_ontology or [])
+    unconstrained: bool = bool(args.unconstrained)
+
+    # Ontology policy: the client must state intent.  Silent fallback to
+    # "unconstrained" would corrupt the downstream ground-truth story,
+    # since a missing declaration is indistinguishable from a deliberate
+    # no-ontology integration in the provenance record.  Require exactly
+    # one of --expected-ontology / --unconstrained.
+    if not declared_ontologies and not unconstrained:
+        msg = (
+            'integrate-annotations requires an ontology declaration: pass '
+            '--expected-ontology <name> (repeatable) for enforced '
+            'integration, or --unconstrained to explicitly opt out.'
+        )
+        log.error('ontology_not_declared')
+        _write_error('ontology_not_declared', msg)
+        sys.exit(1)
+    if declared_ontologies and unconstrained:
+        msg = (
+            '--expected-ontology and --unconstrained are mutually '
+            'exclusive; pass one or the other.'
+        )
+        log.error('ambiguous_ontology_spec')
+        _write_error('ambiguous_ontology_spec', msg)
+        sys.exit(1)
 
     log.info(
         'integrate_started',
         stores_dir=str(stores_dir),
         staging_dir=str(staging_dir),
         annotator_id=annotator_id,
-    )
-
-    # Read the pull manifest from the staging directory.  The manifest was
-    # written by ``prepare-pull`` and rsync'd alongside the annotation
-    # files.  It carries the authoritative ontology declarations.
-    try:
-        manifest = RemoteManifest.read(staging_dir)
-    except FileNotFoundError:
-        msg = (
-            f'No pull manifest found in {staging_dir}. '
-            f'The staging directory must contain .voxhub_manifest.json '
-            f'from the original pull.'
-        )
-        log.error('manifest_missing', staging_dir=str(staging_dir))
-        _write_error('manifest_missing', msg)
-        sys.exit(1)
-
-    log.info(
-        'manifest_loaded',
-        pull_session_id=manifest.pull_session_id,
-        store_count=len(manifest.stores),
+        ontology_policy='unconstrained' if unconstrained else 'declared',
+        declared_ontologies=declared_ontologies,
     )
 
     # Parse expected checksums.
@@ -524,6 +532,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
     date_str = datetime.now(UTC).strftime('%Y%m%d')
     annotator_dir = f'{annotator_id}-{nano_id}'
+    pull_session_id = staging_dir.name
 
     stores_result: dict[str, dict[str, Any]] = {}
 
@@ -573,16 +582,20 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
             'spacing_mm': spacing_mm,
         }
 
-        # Resolve ontologies from the pull manifest for this store.
-        store_manifest = manifest.stores.get(store_name)
-        expected_ontologies = store_manifest.expected_ontologies if store_manifest else []
-
-        seg_ontologies, seg_ont_issues = _resolve_ontologies(
-            expected_ontologies, 'segmentation', log
-        )
-        lmk_ontologies, lmk_ont_issues = _resolve_ontologies(
-            expected_ontologies, 'landmarks', log
-        )
+        # Resolve the declared ontologies per annotation type.  Skipped
+        # under the explicit --unconstrained policy (seg/lmk stay None).
+        if unconstrained:
+            seg_ontologies: list[Ontology] = []
+            lmk_ontologies: list[Ontology] = []
+            seg_ont_issues: list[IssueRecord] = []
+            lmk_ont_issues: list[IssueRecord] = []
+        else:
+            seg_ontologies, seg_ont_issues = _resolve_ontologies(
+                declared_ontologies, 'segmentation', log
+            )
+            lmk_ontologies, lmk_ont_issues = _resolve_ontologies(
+                declared_ontologies, 'landmarks', log
+            )
 
         issues: list[IssueRecord] = []
         issues.extend(seg_ont_issues)
@@ -592,148 +605,193 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         with store_lock(zarr_path):
             # Integrate segmentation.
             if seg_file is not None:
-                # Use the first matching segmentation ontology, or None.
-                seg_ontology = seg_ontologies[0] if seg_ontologies else None
-                try:
-                    seg_data = parse_seg_nrrd(seg_file)
-                    seg_issues = validate_segmentation(
-                        seg_data,
-                        manifest_entry,
-                        ontology=seg_ontology,
-                    )
-                    issues.extend(seg_issues)
-
-                    errors = [i for i in seg_issues if i.severity == 'error']
-                    if errors and not force:
-                        log.warning(
-                            'seg_validation_errors',
-                            store=store_name,
-                            errors=[i.message for i in errors],
-                        )
-                    else:
-                        ont_name = seg_ontology.name if seg_ontology else 'unconstrained'
-                        ont_version = seg_ontology.version if seg_ontology else 1
-
-                        short_random = generate_nano_id(size=4)
-                        instance_dir = f'{ont_name}-{date_str}-{short_random}'
-                        seg_path = f'annotations/{annotator_dir}/{instance_dir}/data'
-
-                        write_segmentation_to_zarr(
-                            zarr_path,
-                            seg_data,
-                            seg_path,
-                            ontology=seg_ontology,
-                            force=force,
-                        )
-
-                        seg_checksum = _compute_sha256(seg_file)
-                        record_provenance(
-                            stores_dir,
-                            store_name,
-                            seg_path,
-                            annotator_id=annotator_id,
-                            machine_id=machine_id,
-                            nano_id=nano_id,
-                            pull_session_id=staging_dir.name,
-                            ontology=ont_name,
-                            ontology_version=ont_version,
-                            source_nrrd_checksum=seg_checksum,
-                            source_file=seg_file.name,
-                            issues=[i for i in seg_issues if i.severity == 'warning'],
-                        )
-
-                        annotations_written.append(
-                            {
-                                'path': seg_path,
-                                'ontology': ont_name,
-                                'ontology_version': ont_version,
-                            }
-                        )
-
-                except Exception as exc:
+                # Under --unconstrained, seg_ontology is None by design.
+                # Under declared, we require at least one matching
+                # ontology — silent-fallback to unconstrained would
+                # misrepresent the provenance record.
+                if not unconstrained and not seg_ontologies:
                     issues.append(
                         IssueRecord(
                             severity='error',
-                            message=(f'Segmentation integration failed: {exc}'),
+                            message=(
+                                'No declared ontology matches annotation '
+                                'type segmentation. Declared: '
+                                f'{declared_ontologies!r}. Re-run with a '
+                                'matching --expected-ontology or pass '
+                                '--unconstrained to opt out explicitly.'
+                            ),
                         )
                     )
                     log.error(
-                        'seg_integrate_failed',
+                        'seg_ontology_type_mismatch',
                         store=store_name,
-                        error=str(exc),
+                        declared=declared_ontologies,
                     )
+                else:
+                    seg_ontology = seg_ontologies[0] if seg_ontologies else None
+                    try:
+                        seg_data = parse_seg_nrrd(seg_file)
+                        seg_issues = validate_segmentation(
+                            seg_data,
+                            manifest_entry,
+                            ontology=seg_ontology,
+                        )
+                        issues.extend(seg_issues)
+
+                        errors = [i for i in seg_issues if i.severity == 'error']
+                        if errors and not force:
+                            log.warning(
+                                'seg_validation_errors',
+                                store=store_name,
+                                errors=[i.message for i in errors],
+                            )
+                        else:
+                            ont_name = (
+                                seg_ontology.name if seg_ontology else 'unconstrained'
+                            )
+                            ont_version = seg_ontology.version if seg_ontology else 1
+
+                            short_random = generate_nano_id(size=4)
+                            instance_dir = f'{ont_name}-{date_str}-{short_random}'
+                            seg_path = f'annotations/{annotator_dir}/{instance_dir}/data'
+
+                            write_segmentation_to_zarr(
+                                zarr_path,
+                                seg_data,
+                                seg_path,
+                                ontology=seg_ontology,
+                                force=force,
+                            )
+
+                            seg_checksum = _compute_sha256(seg_file)
+                            record_provenance(
+                                stores_dir,
+                                store_name,
+                                seg_path,
+                                annotator_id=annotator_id,
+                                machine_id=machine_id,
+                                nano_id=nano_id,
+                                pull_session_id=pull_session_id,
+                                ontology=ont_name,
+                                ontology_version=ont_version,
+                                source_nrrd_checksum=seg_checksum,
+                                source_file=seg_file.name,
+                                issues=[i for i in seg_issues if i.severity == 'warning'],
+                            )
+
+                            annotations_written.append(
+                                {
+                                    'path': seg_path,
+                                    'ontology': ont_name,
+                                    'ontology_version': ont_version,
+                                }
+                            )
+
+                    except Exception as exc:
+                        issues.append(
+                            IssueRecord(
+                                severity='error',
+                                message=(f'Segmentation integration failed: {exc}'),
+                            )
+                        )
+                        log.error(
+                            'seg_integrate_failed',
+                            store=store_name,
+                            error=str(exc),
+                        )
 
             # Integrate landmarks.
             if lmk_file is not None:
-                lmk_ontology = lmk_ontologies[0] if lmk_ontologies else None
-                try:
-                    lmk_data = parse_mrk_json(lmk_file)
-                    lmk_issues = validate_landmarks(
-                        lmk_data,
-                        manifest_entry,
-                        ontology=lmk_ontology,
-                    )
-                    issues.extend(lmk_issues)
-
-                    errors = [i for i in lmk_issues if i.severity == 'error']
-                    if errors and not force:
-                        log.warning(
-                            'lmk_validation_errors',
-                            store=store_name,
-                            errors=[i.message for i in errors],
-                        )
-                    else:
-                        ont_name = lmk_ontology.name if lmk_ontology else 'landmarks'
-                        ont_version = lmk_ontology.version if lmk_ontology else 1
-
-                        short_random = generate_nano_id(size=4)
-                        instance_dir = f'{ont_name}-{date_str}-{short_random}'
-                        lmk_path = f'annotations/{annotator_dir}/{instance_dir}/data'
-
-                        write_landmarks_to_zarr(
-                            zarr_path,
-                            lmk_data,
-                            lmk_path,
-                            ontology=lmk_ontology,
-                            force=force,
-                        )
-
-                        lmk_checksum = _compute_sha256(lmk_file)
-                        record_provenance(
-                            stores_dir,
-                            store_name,
-                            lmk_path,
-                            annotator_id=annotator_id,
-                            machine_id=machine_id,
-                            nano_id=nano_id,
-                            pull_session_id=staging_dir.name,
-                            ontology=ont_name,
-                            ontology_version=ont_version,
-                            source_nrrd_checksum=lmk_checksum,
-                            source_file=lmk_file.name,
-                            issues=[i for i in lmk_issues if i.severity == 'warning'],
-                        )
-
-                        annotations_written.append(
-                            {
-                                'path': lmk_path,
-                                'ontology': ont_name,
-                                'ontology_version': ont_version,
-                            }
-                        )
-
-                except Exception as exc:
+                if not unconstrained and not lmk_ontologies:
                     issues.append(
                         IssueRecord(
                             severity='error',
-                            message=f'Landmark integration failed: {exc}',
+                            message=(
+                                'No declared ontology matches annotation '
+                                'type landmarks. Declared: '
+                                f'{declared_ontologies!r}. Re-run with a '
+                                'matching --expected-ontology or pass '
+                                '--unconstrained to opt out explicitly.'
+                            ),
                         )
                     )
                     log.error(
-                        'lmk_integrate_failed',
+                        'lmk_ontology_type_mismatch',
                         store=store_name,
-                        error=str(exc),
+                        declared=declared_ontologies,
                     )
+                else:
+                    lmk_ontology = lmk_ontologies[0] if lmk_ontologies else None
+                    try:
+                        lmk_data = parse_mrk_json(lmk_file)
+                        lmk_issues = validate_landmarks(
+                            lmk_data,
+                            manifest_entry,
+                            ontology=lmk_ontology,
+                        )
+                        issues.extend(lmk_issues)
+
+                        errors = [i for i in lmk_issues if i.severity == 'error']
+                        if errors and not force:
+                            log.warning(
+                                'lmk_validation_errors',
+                                store=store_name,
+                                errors=[i.message for i in errors],
+                            )
+                        else:
+                            ont_name = (
+                                lmk_ontology.name if lmk_ontology else 'unconstrained'
+                            )
+                            ont_version = lmk_ontology.version if lmk_ontology else 1
+
+                            short_random = generate_nano_id(size=4)
+                            instance_dir = f'{ont_name}-{date_str}-{short_random}'
+                            lmk_path = f'annotations/{annotator_dir}/{instance_dir}/data'
+
+                            write_landmarks_to_zarr(
+                                zarr_path,
+                                lmk_data,
+                                lmk_path,
+                                ontology=lmk_ontology,
+                                force=force,
+                            )
+
+                            lmk_checksum = _compute_sha256(lmk_file)
+                            record_provenance(
+                                stores_dir,
+                                store_name,
+                                lmk_path,
+                                annotator_id=annotator_id,
+                                machine_id=machine_id,
+                                nano_id=nano_id,
+                                pull_session_id=pull_session_id,
+                                ontology=ont_name,
+                                ontology_version=ont_version,
+                                source_nrrd_checksum=lmk_checksum,
+                                source_file=lmk_file.name,
+                                issues=[i for i in lmk_issues if i.severity == 'warning'],
+                            )
+
+                            annotations_written.append(
+                                {
+                                    'path': lmk_path,
+                                    'ontology': ont_name,
+                                    'ontology_version': ont_version,
+                                }
+                            )
+
+                    except Exception as exc:
+                        issues.append(
+                            IssueRecord(
+                                severity='error',
+                                message=f'Landmark integration failed: {exc}',
+                            )
+                        )
+                        log.error(
+                            'lmk_integrate_failed',
+                            store=store_name,
+                            error=str(exc),
+                        )
 
         stores_result[store_name] = {
             'status': ('integrated' if annotations_written else 'failed'),
@@ -1097,6 +1155,26 @@ def main() -> None:
     ia.add_argument('--nano-id', required=True)
     ia.add_argument('--checksums', nargs='*')
     ia.add_argument('--force', action='store_true')
+    ia.add_argument(
+        '--expected-ontology',
+        action='append',
+        default=[],
+        metavar='NAME',
+        help=(
+            'Ontology name the client declares for this integration. '
+            'Repeatable for multi-ontology sessions. Mutually exclusive '
+            'with --unconstrained; exactly one must be specified.'
+        ),
+    )
+    ia.add_argument(
+        '--unconstrained',
+        action='store_true',
+        help=(
+            'Explicit opt-in to unconstrained integration (no ontology '
+            'enforcement). Mutually exclusive with --expected-ontology; '
+            'exactly one must be specified.'
+        ),
+    )
     ia.set_defaults(func=_run_integrate_annotations)
 
     # cleanup

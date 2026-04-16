@@ -507,7 +507,20 @@ def _integrate_argv(
     machine_id: str = 'machine-xyz',
     force: bool = False,
     checksums: list[str] | None = None,
+    expected_ontology: list[str] | None = None,
+    unconstrained: bool = False,
 ):
+    """Build an integrate-annotations Namespace with an ontology policy.
+
+    Mirrors the real CLI contract: exactly one of ``expected_ontology``
+    / ``unconstrained`` must be non-empty-non-False.  Default is
+    ``['inner-ear-structures']`` so the bulk of happy-path tests don't
+    have to spell it out; pass ``unconstrained=True`` to explicitly
+    test the opt-out path, or override ``expected_ontology=[...]`` for
+    a different ontology set.
+    """
+    if expected_ontology is None and not unconstrained:
+        expected_ontology = ['inner-ear-structures']
     return server_argv(
         stores_dir=stores_dir,
         staging_dir=str(staging_dir),
@@ -516,6 +529,8 @@ def _integrate_argv(
         machine_id=machine_id,
         force=force,
         checksums=checksums,
+        expected_ontology=expected_ontology or [],
+        unconstrained=unconstrained,
     )
 
 
@@ -542,12 +557,12 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_segmentation_writes_to_annotator_scoped_path(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
@@ -568,20 +583,24 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_landmarks_writes_to_annotator_scoped_path(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
-            ontologies=['inner-ear-landmarks'],
             include_seg=False,
             include_lmk=True,
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-landmarks'],
+            )
         )
 
         payload = parsed_stdout()
@@ -594,20 +613,24 @@ class TestIntegrateAnnotationsHappy:
     def test_integrates_both_seg_and_landmarks_in_single_call(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
-            ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             include_seg=True,
             include_lmk=True,
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-structures', 'inner-ear-landmarks'],
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
@@ -619,12 +642,12 @@ class TestIntegrateAnnotationsHappy:
     def test_provenance_recorded_on_success(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
@@ -653,38 +676,85 @@ class TestIntegrateAnnotationsHappy:
         assert arr_attrs['ontology'] == 'inner-ear-structures'
         assert arr_attrs['integrated_at']
 
-    def test_uses_ontology_from_manifest_not_cli(
+    def test_declared_ontology_from_cli_flows_into_zarr_attrs(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
+        """Ontology declared via --expected-ontology on the CLI shows up
+        in the integrated annotation's zarr attrs and the instance-dir
+        prefix — the CLI is the authoritative source under the new
+        explicit-intent policy (prior RemoteManifest read has been
+        dropped)."""
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
-            store_names=['alpha'], ontologies=['inner-ear-structures']
-        )
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-structures'],
+            )
         )
         parsed_stdout()
 
         written = _written_annotations(stores_dir / 'alpha.zarr')[0]
         arr = zarr.open_array(written / 'data', mode='r')
         assert dict(arr.attrs)['ontology'] == 'inner-ear-structures'
-        # Instance dir prefix matches the ontology loaded from manifest.
+        # Instance dir prefix matches the ontology declared on the CLI.
         assert written.name.startswith('inner-ear-structures-')
+
+    def test_integrate_does_not_require_voxhub_manifest_json(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Regression guard: after the RemoteManifest decoupling, the
+        server's integrate-annotations path must not read (or require)
+        ``.voxhub_manifest.json`` in the staging dir.  Prior to this
+        change, the server wrote ``.voxhub_pull.json`` during
+        prepare-pull but tried to read ``.voxhub_manifest.json`` during
+        integrate — a latent break that a test helper papered over in
+        CI.  Ontology declaration now comes from CLI args, so the two
+        files' schemas are decoupled from integrate entirely.
+
+        This test asserts the staging dir contains *no*
+        ``.voxhub_manifest.json``, then runs integrate successfully.
+        If someone re-adds a ``RemoteManifest.read(staging_dir)`` call
+        to the server path, this test fails with the old
+        ``manifest_missing`` error envelope."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        # Precondition: the fixture produces a bare staging dir — no
+        # manifest file of either schema should be present.
+        assert not (staging / '.voxhub_manifest.json').exists()
+        assert not (staging / '.voxhub_pull.json').exists()
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        )
+
+        payload = parsed_stdout()
+        # No structured error (no top-level ``error`` key on success).
+        assert 'error' not in payload or payload.get('error') is not True
+        assert payload['stores']['alpha']['status'] == 'integrated'
+        assert len(payload['stores']['alpha']['annotations']) == 1
 
     def test_checksum_matches_accepted(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
         seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
         correct_checksum = server_cli._compute_sha256(seg_file)
 
@@ -709,35 +779,15 @@ class TestIntegrateAnnotationsHappy:
 class TestIntegrateAnnotationsErrors:
     """Covers error/rejection paths in _run_integrate_annotations."""
 
-    def test_missing_manifest_writes_error_envelope_and_exits(
-        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout
-    ):
-        stores_dir = stores_dir_factory(('alpha',))
-        # staging exists but lacks .voxhub_manifest.json.
-        bare_staging = tmp_path / 'bare_staging'
-        (bare_staging / 'alpha').mkdir(parents=True)
-
-        with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_integrate_annotations(
-                _integrate_argv(
-                    server_argv, stores_dir=stores_dir, staging_dir=bare_staging
-                )
-            )
-        assert excinfo.value.code == 1
-
-        envelope = parsed_stdout()
-        assert envelope['error'] is True
-        assert envelope['code'] == 'manifest_missing'
-
     def test_checksum_mismatch_writes_error_envelope_and_exits(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         bogus = f'sha256:{"0" * 64}'
         with pytest.raises(SystemExit) as excinfo:
@@ -756,40 +806,52 @@ class TestIntegrateAnnotationsErrors:
         # No annotation was written.
         assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
-    def test_unknown_ontology_produces_warning_but_continues(
+    def test_unknown_ontology_warns_then_errors_on_type_mismatch(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
+        """Declared ontology that can't be loaded produces a ``warning``
+        issue (resolution failure) AND, because no other declared
+        ontology remains to match the annotation's type, the per-
+        annotation integration errors.  Under the explicit-intent
+        policy we never silently downgrade to unconstrained — the
+        client has to opt in via ``--unconstrained``."""
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
-            store_names=['alpha'], ontologies=['does-not-exist']
-        )
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['does-not-exist'],
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
+
         warnings = [i for i in store_result['issues'] if i['severity'] == 'warning']
         assert any('does-not-exist' in w['message'] for w in warnings)
-        assert store_result['status'] == 'integrated'
-        # Falls back to unconstrained ontology name on write.
-        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
-        assert written.name.startswith('unconstrained-')
+
+        errors = [i for i in store_result['issues'] if i['severity'] == 'error']
+        assert any('No declared ontology matches' in e['message'] for e in errors)
+
+        assert store_result['status'] == 'failed'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
     def test_segmentation_validation_error_without_force_blocks_write(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
         # Shape mismatch: seg is (5,5,5), manifest declares SHAPE=(10,12,14).
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
@@ -808,12 +870,12 @@ class TestIntegrateAnnotationsErrors:
     def test_force_allows_integration_despite_errors(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
@@ -832,12 +894,12 @@ class TestIntegrateAnnotationsErrors:
     def test_parse_error_recorded_in_issues(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha', 'bravo'))
-        staging = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
+        staging = staging_dir_with_annotations(store_names=['alpha', 'bravo'])
         # Corrupt alpha's seg.nrrd.
         (staging / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
 
@@ -866,12 +928,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_partial_failure_per_store_isolated(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha', 'bravo'))
-        staging = staging_dir_with_manifest(store_names=['alpha', 'bravo'])
+        staging = staging_dir_with_annotations(store_names=['alpha', 'bravo'])
         # Bravo's seg has a shape mismatch.
         write_seg_nrrd(
             staging / 'bravo' / 'segmentation.seg.nrrd',
@@ -892,12 +954,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_iteration_order_deterministic(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha', 'bravo', 'charlie'))
-        staging = staging_dir_with_manifest(store_names=['charlie', 'alpha', 'bravo'])
+        staging = staging_dir_with_annotations(store_names=['charlie', 'alpha', 'bravo'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
@@ -909,12 +971,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_skips_hidden_directories(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
         hidden = staging / '.hidden'
         hidden.mkdir()
         (hidden / 'segmentation.seg.nrrd').write_bytes(b'junk')
@@ -929,12 +991,12 @@ class TestIntegrateAnnotationsMultiStore:
     def test_skips_directories_without_matching_zarr_store(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha', 'orphan'])
+        staging = staging_dir_with_annotations(store_names=['alpha', 'orphan'])
 
         server_cli._run_integrate_annotations(
             _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
@@ -956,20 +1018,24 @@ class TestIntegrateAnnotationsOntology:
     def test_segmentation_ontology_resolution_filters_by_type(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
-            ontologies=['inner-ear-structures', 'inner-ear-landmarks'],
             include_seg=True,
             include_lmk=True,
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-structures', 'inner-ear-landmarks'],
+            )
         )
 
         annotations = parsed_stdout()['stores']['alpha']['annotations']
@@ -980,53 +1046,158 @@ class TestIntegrateAnnotationsOntology:
     def test_first_matching_ontology_used(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        # Pin the documented behavior at server/cli.py:446 — the first
-        # matching segmentation ontology wins.
-        staging = staging_dir_with_manifest(
-            store_names=['alpha'],
-            ontologies=[
-                'inner-ear-structures',
-                'inner-ear-total-fluid-space',
-            ],
-        )
+        # Pin the documented behavior: given two ontologies that both
+        # match the annotation's type, the first one declared wins.
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=[
+                    'inner-ear-structures',
+                    'inner-ear-total-fluid-space',
+                ],
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['annotations'][0]['ontology'] == ('inner-ear-structures')
 
-    def test_no_matching_ontology_uses_unconstrained_fallback(
+    def test_declared_ontology_type_mismatch_errors_no_silent_fallback(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
+        """Declaring only a landmarks ontology while the session ships a
+        segmentation must error — silent unconstrained-fallback would
+        corrupt the ground-truth provenance record.  The error message
+        points the client at ``--unconstrained`` as the explicit escape
+        hatch."""
         stores_dir = stores_dir_factory(('alpha',))
-        # Only a landmarks ontology declared, but staging ships a segmentation.
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
-            ontologies=['inner-ear-landmarks'],
             include_seg=True,
             include_lmk=False,
         )
 
         server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-landmarks'],
+            )
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'failed'
+        errors = [i for i in store_result['issues'] if i['severity'] == 'error']
+        assert any(
+            'No declared ontology matches annotation type segmentation' in e['message']
+            for e in errors
+        )
+        assert any('--unconstrained' in e['message'] for e in errors)
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_unconstrained_flag_integrates_without_ontology(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Explicit --unconstrained opts the session out of ontology
+        enforcement.  Integration succeeds and provenance records the
+        ontology as ``'unconstrained'`` (not a silent default)."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                unconstrained=True,
+            )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'integrated'
         ann = store_result['annotations'][0]
         assert ann['ontology'] == 'unconstrained'
-        assert ann['ontology_version'] == 1
+
+        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
+        arr = zarr.open_array(written / 'data', mode='r')
+        assert dict(arr.attrs)['ontology'] == 'unconstrained'
+
+    def test_neither_ontology_flag_nor_unconstrained_errors(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Omitting both --expected-ontology and --unconstrained is a
+        client bug (no declared intent) — integrate exits with a
+        structured ``ontology_not_declared`` envelope rather than
+        silently defaulting."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    expected_ontology=[],
+                    unconstrained=False,
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'ontology_not_declared'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_both_ontology_flag_and_unconstrained_errors(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """--expected-ontology and --unconstrained are mutually
+        exclusive; passing both is ambiguous and rejected."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    expected_ontology=['inner-ear-structures'],
+                    unconstrained=True,
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'ambiguous_ontology_spec'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
 
 # ===========================================================================

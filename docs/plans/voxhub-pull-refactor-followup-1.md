@@ -225,87 +225,70 @@ the full list):
 
 ---
 
-## 3. Document the `RemoteManifest` latent bug
+## 3. `RemoteManifest` decoupling — **RESOLVED**
 
-### Motivation
+### Resolution summary
 
-Surfaced during the pull refactor but deliberately out of scope: the
-server's `prepare-pull` command never writes `.voxhub_manifest.json`
-(the `RemoteManifest` artefact), but `integrate-annotations` reads it
-and hard-errors if it's absent. The current test suite papers over the
-gap with a `write_remote_manifest` helper that synthesises the file
-for each integrate test.
+Originally framed as a docs-only item: the server's `prepare-pull`
+never wrote `.voxhub_manifest.json` but `integrate-annotations` read
+it, so production push would fail with `manifest_missing` the moment
+it ran for real.  Tests papered over it via a `write_remote_manifest`
+helper.
 
-This means:
+The gap was closed directly — the decoupling landed rather than being
+deferred to the push redesign.  The chosen direction matches Option 3
+from the original enumeration below (server owns pull; client owns
+push), with the addition of a stricter ontology policy:
 
-- The **tests** pass because they fabricate a manifest before invoking
-  `integrate-annotations`.
-- The **production flow** would fail: a real pull never produces
-  `.voxhub_manifest.json`, so a real `integrate-annotations` call would
-  return the `manifest_missing` error envelope.
+- `_run_integrate_annotations` no longer reads any manifest file.
+  Ontology declaration moves to CLI args (`--expected-ontology
+  <name>` repeatable, `--unconstrained` as the explicit escape hatch;
+  exactly one is required — silent fallback to unconstrained would
+  have corrupted the ground-truth provenance record).
+- The `RemoteManifest.read` call and the `manifest_missing` error
+  envelope are gone from the server path.
+- The `write_remote_manifest` test helper is deleted.  Fixtures moved
+  to `staging_dir_with_annotations` (no manifest written) and tests
+  declare ontology intent at the `_integrate_argv` call site.
+- `RemoteManifest` stays in `voxhub_schema.manifest` as
+  **client-owned** workflow state — updated docstring reflects that
+  the server neither reads nor writes it.  The push redesign picks it
+  up if it needs session-lifecycle tracking.
 
-Push has not been executed end-to-end yet in production, which is why
-this has not bitten. It **will** bite the moment push runs for real.
+New regression guard: `TestIntegrateAnnotationsHappy::
+test_integrate_does_not_require_voxhub_manifest_json` asserts neither
+`.voxhub_manifest.json` nor `.voxhub_pull.json` is present in the
+staging dir when integrate runs, closing the door on a re-added
+`RemoteManifest.read` call slipping in.
 
-### Goal
+### Original fix options (historical — preserved for context)
 
-Land a docs-only change that records the bug, its trigger, its current
-masking, and the coarse fix options — so whoever picks up the push
-redesign inherits full context instead of rediscovering it.
+1. **Delete `RemoteManifest`.** Migrate `integrate-annotations` to
+   consume `PullManifest` + any push-time arguments it still needs
+   (expected ontologies, included annotations). Simplest long-term;
+   biggest scope.
+2. **Write `RemoteManifest` alongside `PullManifest` in
+   `prepare-pull`.** Minimally invasive — a few lines in
+   `_run_prepare_pull` — but leaves two near-duplicate manifests on
+   disk and doubles the schema-evolution surface.
+3. **Treat the manifest as push-owned.** The client synthesises
+   `RemoteManifest` at push time from the session dir's
+   `PullManifest` plus its own state (session ID, ontologies). No
+   server change; the gap disappears because nothing on the server
+   side ever needed to write it.
 
-### Scope
+Option 3 was chosen with the `integrate-annotations` CLI surface
+extended to carry the ontology declaration that `RemoteManifest` used
+to provide.  See commit history for the server path for the concrete
+landing.
 
-A new doc (e.g. `docs/known-issues/remote-manifest-write-gap.md` —
-final location TBD) with at minimum:
+### Related follow-up
 
-- **Symptom**: `integrate-annotations` errors with `manifest_missing`
-  when invoked against a staging directory produced by `prepare-pull`.
-- **Root cause**: `_run_prepare_pull` does not call
-  `RemoteManifest.write(staging_dir)`; the manifest class exists and
-  has a working writer, but no caller.
-- **Why it's latent**: tests create the manifest via
-  `packages/voxhub-core/tests/_core_helpers.py::write_remote_manifest`
-  before driving `integrate-annotations`, so the gap never surfaces in
-  the unit or subprocess suites.
-- **Why the main pull refactor didn't fix it**: the new `PullManifest`
-  (`.voxhub_pull.json`) is a separate artefact serving a different
-  purpose (pull-side trust anchor + reference audit). `RemoteManifest`
-  is push-workflow state (pull session ID, expected ontologies,
-  integration status transitions) and deserves a decision coupled with
-  the push redesign.
-- **Fix options** (coarse — the push plan picks one):
-  1. **Delete `RemoteManifest`.** Migrate `integrate-annotations` to
-     consume `PullManifest` + any push-time arguments it still needs
-     (expected ontologies, included annotations). Simplest long-term;
-     biggest scope.
-  2. **Write `RemoteManifest` alongside `PullManifest` in
-     `prepare-pull`.** Minimally invasive — a few lines in
-     `_run_prepare_pull` — but leaves two near-duplicate manifests on
-     disk and doubles the schema-evolution surface.
-  3. **Treat the manifest as push-owned.** The client synthesises
-     `RemoteManifest` at push time from the session dir's
-     `PullManifest` plus its own state (session ID, ontologies). No
-     server change; the gap disappears because nothing on the server
-     side ever needed to write it.
-
-Option 3 is the cleanest boundary (server owns pull; client owns push)
-and the push plan should adopt it unless a concrete reason emerges.
-But the doc should enumerate all three neutrally.
-
-### Non-goals
-
-- **No code changes.** This item is docs only. The fix belongs with the
-  push-redesign plan.
-- No test changes. The masking helper (`write_remote_manifest`) stays
-  in place until push is redesigned.
-
-### Success criteria
-
-- A single markdown file under `docs/known-issues/` (or wherever fits
-  the project's convention) describing the bug.
-- Linked from `docs/plans/voxhub-pull-refactor.md` (or its successor)
-  so the push-redesign author finds it immediately.
-- No code or test changes in the commit that lands this doc.
+The same silent-fallback hazard exists today on the **local** integrate
+path (`voxhub_core.integrate.integrate` + `voxhub integrate` CLI) —
+captured in `docs/plans/tighten-local-integrate.md` for a fresh
+branch.  That plan additionally fixes a latent bug where
+`validate_segmentation` is called without the declared ontology.
 
 ---
 

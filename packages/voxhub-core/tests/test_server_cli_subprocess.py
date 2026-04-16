@@ -111,18 +111,19 @@ class TestCommandSmoke:
     def test_integrate_annotations_full_roundtrip(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_config_env,
         subprocess_server,
     ):
         """End-to-end: stage → build annotation → integrate → verify.
 
         This is the critical server-path smoke test that exercises real
-        argparse, real I/O, and the installed entrypoint.
+        argparse, real I/O, and the installed entrypoint.  Exercises the
+        explicit ``--expected-ontology`` surface (production contract).
         """
         stores_dir = stores_dir_factory(('alpha',))
         server_config_env(stores_dir)
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         result = subprocess_server(
             'integrate-annotations',
@@ -133,6 +134,8 @@ class TestCommandSmoke:
             'machine-abc',
             '--nano-id',
             'sub12345',
+            '--expected-ontology',
+            'inner-ear-structures',
         )
 
         assert result.returncode == 0, result.stderr

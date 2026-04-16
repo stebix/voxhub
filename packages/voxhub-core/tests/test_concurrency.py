@@ -19,7 +19,6 @@ from typing import Any
 import pytest
 from _core_helpers import (
     build_staging_dir_entries,
-    write_remote_manifest,
 )
 from filelock import FileLock, Timeout
 
@@ -40,25 +39,19 @@ def _build_staging(
     staging_parent: Path,
     staging_name: str,
     store_names: list[str],
-    *,
-    ontologies: tuple[str, ...] = ('inner-ear-structures',),
 ) -> Path:
-    """Build an isolated staging dir with manifest under ``staging_parent``.
+    """Build an isolated staging dir under ``staging_parent``.
 
     Each invocation produces a distinct directory so that ``staging_dir.name``
     (used as ``pull_session_id`` in provenance) differs per concurrent
-    integrate.
+    integrate.  Ontology declaration is now passed via the CLI at
+    ``integrate-annotations`` invocation time, not written into the
+    staging dir.
     """
     staging = staging_parent / staging_name
     staging.mkdir(parents=True, exist_ok=True)
     for store in store_names:
         build_staging_dir_entries(staging / store, include_seg=True)
-    write_remote_manifest(
-        staging,
-        store_names=list(store_names),
-        expected_ontologies=list(ontologies),
-        pull_session_id=staging_name,
-    )
     return staging
 
 
@@ -298,6 +291,7 @@ class TestConcurrentIntegrateSameStore:
                     staging_dir=str(staging),
                     annotator_id='alice',
                     nano_id='ccccdddd',
+                    expected_ontology=['inner-ear-structures'],
                 )
             )
 
