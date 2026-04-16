@@ -329,3 +329,64 @@ class TestListStoresCached:
         assert runner.calls == [('list-stores',)]
         assert result['catalog_version'] == 8
         assert result['stores'] == [{'name': 'alpha'}, {'name': 'bravo'}]
+
+    def test_unchanged_response_without_cache_refetches(
+        self,
+        cache: ClientCatalogCache,
+        make_runner: Callable[[list[dict]], _StubRunner],
+    ) -> None:
+        # Cold cache but the server claims ``unchanged`` — shouldn't
+        # happen under the protocol, but a buggy/old server or a
+        # cache wiped mid-call could trip it. The helper must recover
+        # by retrying with ``force=True`` instead of KeyErroring on
+        # the missing ``stores`` field.
+        runner = make_runner(
+            [
+                {
+                    'protocol_version': 1,
+                    'catalog_version': 5,
+                    'unchanged': True,
+                },
+                {
+                    'protocol_version': 1,
+                    'catalog_version': 5,
+                    'stores': [{'name': 'alpha'}],
+                },
+            ]
+        )
+
+        result = list_stores_cached(runner, cache, 'voxhub_at_host')  # type: ignore[arg-type]
+
+        # Two calls: the first with no ``--if-version`` (cold cache),
+        # the retry also without ``--if-version`` (force=True).
+        assert runner.calls == [('list-stores',), ('list-stores',)]
+        assert result['catalog_version'] == 5
+        assert result['stores'] == [{'name': 'alpha'}]
+
+        cached = cache.read('voxhub_at_host')
+        assert cached is not None
+        assert cached['catalog_version'] == 5
+        assert cached['stores'] == [{'name': 'alpha'}]
+
+    def test_unchanged_response_without_cache_does_not_recurse_twice(
+        self,
+        cache: ClientCatalogCache,
+        make_runner: Callable[[list[dict]], _StubRunner],
+    ) -> None:
+        # Bound the recursion: even if the server is misbehaving,
+        # ``force=True`` on the retry suppresses ``--if-version`` so
+        # the server has no way to answer ``unchanged`` again.
+        runner = make_runner(
+            [
+                {'protocol_version': 1, 'catalog_version': 5, 'unchanged': True},
+                {
+                    'protocol_version': 1,
+                    'catalog_version': 5,
+                    'stores': [{'name': 'alpha'}],
+                },
+            ]
+        )
+
+        list_stores_cached(runner, cache, 'voxhub_at_host')  # type: ignore[arg-type]
+
+        assert len(runner.calls) == 2

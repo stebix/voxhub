@@ -266,12 +266,19 @@ def list_stores_cached(
 
     response = runner.run(*args)
 
-    if response.get('unchanged') and cached is not None:
-        return {
-            'protocol_version': response.get('protocol_version'),
-            'catalog_version': response['catalog_version'],
-            'stores': cached['stores'],
-        }
+    if response.get('unchanged'):
+        if cached is not None:
+            return {
+                'protocol_version': response.get('protocol_version'),
+                'catalog_version': response['catalog_version'],
+                'stores': cached['stores'],
+            }
+        # Server claimed ``unchanged`` but we have nothing to splice
+        # (e.g. cache wiped between the version read and this point, or
+        # a buggy server). Recurse once with ``force=True`` so the next
+        # call omits ``--if-version`` and must return a full payload;
+        # recursion is bounded at one hop.
+        return list_stores_cached(runner, cache, server_key, force=True)
 
     cache.write(
         server_key,
