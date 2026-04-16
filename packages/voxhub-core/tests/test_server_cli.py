@@ -751,7 +751,7 @@ class TestIntegrateAnnotationsHappy:
         stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_annotations(store_names=['alpha'])
         seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
-        correct_checksum = server_cli._compute_sha256(seg_file)
+        correct_checksum = server_cli.compute_sha256(seg_file)
 
         server_cli._run_integrate_annotations(
             _integrate_argv(

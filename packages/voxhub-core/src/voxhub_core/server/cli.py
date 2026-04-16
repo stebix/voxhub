@@ -9,7 +9,6 @@ stderr via structlog.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -31,6 +30,7 @@ from voxhub_core.attributes import (
 from voxhub_core.catalog import discover_zarr_stores
 from voxhub_core.extraction import (
     ExtractionError,
+    compute_sha256,
     extract_landmarks,
     extract_segmentation,
     extract_spatial_metadata,
@@ -92,15 +92,6 @@ def _write_error(code: str, message: str) -> None:
             message=message,
         )
     )
-
-
-def _compute_sha256(path: Path) -> str:
-    """Compute SHA-256 hex digest of a file."""
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(8192), b''):
-            h.update(chunk)
-    return f'sha256:{h.hexdigest()}'
 
 
 # -- list-stores -------------------------------------------------------------
@@ -527,7 +518,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
             for ann_file in [seg_file, lmk_file]:
                 if ann_file is None:
                     continue
-                actual = _compute_sha256(ann_file)
+                actual = compute_sha256(ann_file)
                 expected = expected_checksums.get(ann_file.name)
                 if expected and actual != expected:
                     msg = (
@@ -635,7 +626,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                 force=force,
                             )
 
-                            seg_checksum = _compute_sha256(seg_file)
+                            seg_checksum = compute_sha256(seg_file)
                             record_provenance(
                                 stores_dir,
                                 store_name,
@@ -728,7 +719,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                 force=force,
                             )
 
-                            lmk_checksum = _compute_sha256(lmk_file)
+                            lmk_checksum = compute_sha256(lmk_file)
                             record_provenance(
                                 stores_dir,
                                 store_name,
