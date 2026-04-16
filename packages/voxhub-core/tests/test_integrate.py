@@ -477,3 +477,34 @@ class TestIntegrate:
         annotators = list(root['annotations'])
         assert 'alice-aaa11111' in annotators
         assert 'bob-bbb22222' in annotators
+
+    def test_seg_ontology_is_actually_enforced(self, tmp_path, inner_ear_ontology):
+        """Regression: a seg label not defined in the declared ontology must
+        surface as a validation error.
+
+        Before the fix this passed silently because ``validate_segmentation``
+        was called without the ``ontology=`` kwarg.
+        """
+        stores_dir = tmp_path / 'zarr'
+        stores_dir.mkdir()
+        create_zarr_store(stores_dir / 'mystore.zarr')
+
+        staging = tmp_path / 'staging'
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 42  # not in inner-ear-structures ontology (labels 1-3)
+        segments = [{'name': 'alien_structure', 'label_value': 42}]
+        build_staging_dir(
+            staging,
+            'mystore',
+            seg_label_map=lm,
+            seg_segments=segments,
+        )
+
+        with pytest.raises(RuntimeError, match='Validation errors'):
+            integrate(
+                staging,
+                stores_dir,
+                annotator_id='alice',
+                nano_id='abc12345',
+                ontology=inner_ear_ontology,
+            )

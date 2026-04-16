@@ -521,7 +521,9 @@ def integrate(
         if seg_file is not None:
             try:
                 seg_data = parse_seg_nrrd(seg_file)
-                seg_issues = validate_segmentation(seg_data, manifest_entry)
+                seg_issues = validate_segmentation(
+                    seg_data, manifest_entry, ontology=ontology
+                )
                 issues.extend(seg_issues)
                 console.print(
                     f'    segmentation: {seg_file.name}  '
