@@ -244,7 +244,7 @@ class TestConcurrentIntegrateSameStore:
                     'stores_dir': stores_dir,
                     'staging_dir': staging,
                     'annotator_id': f'user{i}',
-                    'nano_id': f'nano{i:04d}',
+                    'nano_id': f'abcd{i:04d}',
                 }
             )
 
@@ -395,7 +395,7 @@ class TestConcurrentIntegrateDifferentStores:
                     'stores_dir': stores_dir,
                     'staging_dir': staging,
                     'annotator_id': f'user{i}',
-                    'nano_id': f'nano{i:04d}',
+                    'nano_id': f'abcd{i:04d}',
                 }
             )
 
@@ -484,7 +484,7 @@ class TestConcurrentProvenanceAppend:
                 'annotation_path': ann_path,
                 'annotator_id': f'annot{i:02d}',
                 'machine_id': 'machine-x',
-                'nano_id': f'nano{i:04d}',
+                'nano_id': f'abcd{i:04d}',
                 'pull_session_id': f'session-{i:02d}',
                 'ontology': 'inner-ear-structures',
                 'ontology_version': 1,

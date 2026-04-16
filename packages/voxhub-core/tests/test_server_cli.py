@@ -1357,12 +1357,12 @@ class TestIntegrateAnnotationsCacheInvalidation:
     def test_successful_integrate_bumps_catalog_version_and_shows_annotation(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
         first = parsed_stdout()
@@ -1386,13 +1386,13 @@ class TestIntegrateAnnotationsCacheInvalidation:
     def test_integrate_writing_nothing_leaves_catalog_version_untouched(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha',))
         # Shape mismatch + force=False => validation errors block all writes.
-        staging = staging_dir_with_manifest(
+        staging = staging_dir_with_annotations(
             store_names=['alpha'],
             seg_label_map=np.zeros((5, 5, 5), dtype=np.int16),
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
@@ -1416,12 +1416,12 @@ class TestIntegrateAnnotationsCacheInvalidation:
     def test_multi_store_integrate_bumps_version_once_per_store(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
         stores_dir = stores_dir_factory(('alpha', 'bravo', 'charlie'))
-        staging = staging_dir_with_manifest(store_names=['alpha', 'bravo', 'charlie'])
+        staging = staging_dir_with_annotations(store_names=['alpha', 'bravo', 'charlie'])
 
         server_cli._run_list_stores(server_argv(stores_dir=stores_dir))
         initial_version = parsed_stdout()['catalog_version']
@@ -1448,7 +1448,7 @@ class TestIntegrateAnnotationsCacheInvalidation:
     def test_invalidate_failure_is_non_fatal(
         self,
         stores_dir_factory,
-        staging_dir_with_manifest,
+        staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
         caplog: pytest.LogCaptureFixture,
@@ -1457,7 +1457,7 @@ class TestIntegrateAnnotationsCacheInvalidation:
         from voxhub_core.server import catalog_cache
 
         stores_dir = stores_dir_factory(('alpha',))
-        staging = staging_dir_with_manifest(store_names=['alpha'])
+        staging = staging_dir_with_annotations(store_names=['alpha'])
 
         def boom(*_args: object, **_kwargs: object) -> None:
             raise catalog_cache.CacheLockError('simulated lock timeout')

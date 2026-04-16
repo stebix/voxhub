@@ -215,7 +215,7 @@ _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
     # by main()) used by list-stores, prepare-pull, validate-attributes,
     # healthcheck, and integrate-annotations.
     'stores_dir': None,
-    # prepare-pull (single-store)
+    # Single-store name, shared by prepare-pull and catalog refresh.
     'store': None,
     'staging_dir': None,
     'include_existing_annotations': None,
@@ -233,7 +233,6 @@ _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
     # gc
     'ttl_hours': 24.0,
     # catalog refresh
-    'store': None,
     'catalog_action': None,
     # list-stores client short-circuit (PR 5)
     'if_version': None,

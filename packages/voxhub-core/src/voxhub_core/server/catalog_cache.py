@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from voxhub_core.catalog import ZarrEntry, _probe_zarr, discover_zarr_stores
-from voxhub_core.staging import extract_spatial_metadata
+from voxhub_core.extraction import extract_spatial_metadata
 from voxhub_schema import PROTOCOL_VERSION
 
 CACHE_SCHEMA_VERSION: int = 1
