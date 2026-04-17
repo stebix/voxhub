@@ -407,9 +407,15 @@ Response:
 }
 ```
 
-#### `prepare-pull [--stores n1 n2] [--ontologies o1 o2] [--staging-dir /tmp/...] [--include-existing-annotations path1 path2] [--compress]`
+#### `prepare-pull --store <name> [--include-existing-annotations path1 path2] [--compress]`
 
-Calls `core.staging.stage()` into a server-side temp dir. Computes SHA-256 of each
+Calls `core.staging.stage()` into a server-created temp dir.  The server is
+authoritative over the staging path: it lives under ``[storage].staging_dir``
+from ``server.toml`` (default: ``tempfile.gettempdir()``), with a
+collision-free ``vxhb-staging-<nano>-<rand>/`` leaf created via
+``tempfile.mkdtemp``.  Clients never supply one — they read the
+server-issued path from the response and echo it back on subsequent
+``integrate-annotations`` / ``cleanup`` calls.  Computes SHA-256 of each
 generated NRRD.
 
 `--include-existing-annotations` requires fully explicit annotation paths (e.g.
@@ -447,6 +453,10 @@ Response:
 
 Calls `core.integrate.integrate()` then `server.provenance.record()`. Holds a per-store
 filelock during zarr writes. Verifies annotation file checksums before integrating.
+The ``staging_dir`` argument must be a path the server previously issued:
+it is validated to resolve inside ``[storage].staging_dir`` and carry the
+``vxhb-staging-`` prefix, or the call is rejected with an
+``invalid_staging_dir`` error.
 
 Server determines annotation paths and ontology from the annotation file metadata
 and the pull manifest. Creates annotator-scoped subgroups as needed.
@@ -478,15 +488,21 @@ Response:
 
 #### `cleanup <staging_dir>`
 
-Removes server-side temp directory. Logged via structlog.
+Removes a server-side staging directory after a successful ``pull`` ACK.
+The ``staging_dir`` argument is validated identically to
+``integrate-annotations``: it must resolve inside ``[storage].staging_dir``
+and carry the ``vxhb-staging-`` prefix.  Missing paths are a noop (client
+retry after a crash); invalid paths return an ``invalid_staging_dir``
+error envelope without touching disk.  Logged via structlog.
 
 Response: `{"protocol_version": 1, "status": "ok"}`
 
 #### `gc [--ttl-hours N]`
 
-Garbage-collects stale server-side temp directories older than TTL (default: 24h).
-Temp dirs use a naming convention with timestamps (e.g. `dt-push-20260331T150000-a3f1`).
-Logged via structlog.
+Garbage-collects stale staging directories under ``[storage].staging_dir``
+older than TTL (default: 24h).  Only entries whose basename starts with
+``vxhb-staging-`` are considered, so unrelated files in the staging root
+are ignored.  Logged via structlog.
 
 Response: `{"protocol_version": 1, "removed": [...], "count": N}`
 

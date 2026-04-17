@@ -389,7 +389,9 @@ class TestConcurrentIntegrateDifferentStores:
 
         invocations = []
         for i, name in enumerate(store_names):
-            staging = _build_staging(tmp_path / 'stagings', f'dt-pull-{name}', [name])
+            staging = _build_staging(
+                tmp_path / 'stagings', f'vxhb-staging-{name}', [name]
+            )
             invocations.append(
                 {
                     'stores_dir': stores_dir,

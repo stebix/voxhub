@@ -17,8 +17,8 @@ from _core_helpers import create_zarr_store, populate_store_annotation
 
 from voxhub_core.attributes import DATASET_ATTRIBUTES_KEY
 from voxhub_core.catalog import discover_zarr_stores
-from voxhub_core.server import catalog_cache as cc
 from voxhub_core.extraction import extract_spatial_metadata
+from voxhub_core.server import catalog_cache as cc
 
 if TYPE_CHECKING:
     from pathlib import Path

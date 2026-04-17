@@ -23,6 +23,14 @@ import nrrd
 import numpy as np
 import zarr
 
+from voxhub_core.memory_budget import (
+    MemoryBudget,
+    MemoryWarning,
+    estimate_array_bytes,
+)
+from voxhub_core.memory_budget import (
+    check as check_memory_budget,
+)
 from voxhub_core.slicer import write_mrk_json
 
 # -- Fast NRRD writer -------------------------------------------------------
@@ -258,6 +266,7 @@ def extract_volume(
     dest: Path,
     *,
     compress: bool = False,
+    budget: MemoryBudget | None = None,
 ) -> dict[str, Any]:
     """Extract a zarr store's raw volume (``raw/full``) to an NRRD file.
 
@@ -269,18 +278,35 @@ def extract_volume(
         Destination NRRD file path.  Parent directories are created.
     compress : bool
         Apply gzip compression.
+    budget : MemoryBudget | None
+        Policy controlling RAM warnings and refusal of oversized
+        materializations.  Defaults to :meth:`MemoryBudget.warn_only`.
 
     Returns
     -------
     dict[str, Any]
         Per-store metadata: ``raw_checksum``, ``shape``, ``dtype``,
         ``origin_lps``, ``spacing_mm``, ``space_directions``,
-        ``staged_at``.
+        ``staged_at``, ``warnings`` (list of memory advisories;
+        possibly empty).
+
+    Raises
+    ------
+    MemoryBudgetError
+        When ``budget.refuse_when_low`` is set and the planned
+        materialization would exceed available RAM headroom.
     """
     root = zarr.open_group(zarr_path, mode='r')
     arr: zarr.Array = root['raw']['full']
-    volume_data = arr[:]
     attributes = dict(arr.attrs)
+
+    effective_budget = budget if budget is not None else MemoryBudget.warn_only()
+    volume_bytes = estimate_array_bytes(arr.shape, arr.dtype)
+    warnings = check_memory_budget(
+        volume_bytes, budget=effective_budget, context=zarr_path.name
+    )
+
+    volume_data = arr[:]
 
     origin, space_directions, spacing_mm = extract_spatial_metadata(attributes)
     header = build_raw_volume_header(arr.shape, origin, space_directions)
@@ -296,6 +322,7 @@ def extract_volume(
         'spacing_mm': spacing_mm,
         'space_directions': space_directions.tolist(),
         'staged_at': datetime.now(UTC).isoformat(),
+        'warnings': warnings,
     }
 
 
@@ -373,6 +400,9 @@ def extract_segmentation(
     zarr_path: Path,
     array_zarr_path: str,
     dest: Path,
+    *,
+    budget: MemoryBudget | None = None,
+    warnings_out: list[MemoryWarning] | None = None,
 ) -> str:
     """Extract an integrated segmentation zarr array to a ``.seg.nrrd`` file.
 
@@ -385,6 +415,16 @@ def extract_segmentation(
         ``'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'``.
     dest : Path
         Destination file path for the extracted ``.seg.nrrd``.
+    budget : MemoryBudget | None
+        Policy controlling RAM warnings and refusal of oversized
+        materializations.  Defaults to :meth:`MemoryBudget.warn_only`.
+        The segmentation path holds two transient copies (``label_map``
+        + ``pynrrd`` internal buffer) so the budget's safety factor
+        should typically be ``>= 3.0`` here.
+    warnings_out : list[MemoryWarning] | None
+        Optional sink for memory advisories produced during the check.
+        Caller-owned list; warnings are appended in the order they are
+        emitted.
 
     Returns
     -------
@@ -396,9 +436,20 @@ def extract_segmentation(
     ExtractionError
         If the array is missing, has an unsupported dtype, or lacks the
         ``segments`` attribute.
+    MemoryBudgetError
+        When ``budget.refuse_when_low`` is set and the planned
+        materialization would exceed available RAM headroom.
     """
     origin, space_directions = _read_spatial_metadata(zarr_path)
     arr = _open_annotation_array(zarr_path, array_zarr_path)
+
+    effective_budget = budget if budget is not None else MemoryBudget.warn_only()
+    volume_bytes = estimate_array_bytes(arr.shape, arr.dtype)
+    new_warnings = check_memory_budget(
+        volume_bytes, budget=effective_budget, context=zarr_path.name
+    )
+    if warnings_out is not None:
+        warnings_out.extend(new_warnings)
 
     try:
         label_map = np.asarray(arr[:])

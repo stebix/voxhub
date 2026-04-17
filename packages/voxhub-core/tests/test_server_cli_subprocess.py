@@ -100,24 +100,31 @@ class TestCommandSmoke:
     def test_prepare_pull(
         self, stores_dir_factory, server_config_env, subprocess_server, tmp_path
     ):
+        """Server is authoritative over staging_dir: the client does not
+        supply one; the response carries the server-issued path."""
         root = stores_dir_factory(('alpha',))
-        server_config_env(root)
-        staging = tmp_path / 'subproc_staging'
-        result = subprocess_server(
-            'prepare-pull',
-            '--store',
-            'alpha',
-            '--staging-dir',
-            str(staging),
+        staging_root = tmp_path / 'subproc_staging_root'
+        staging_root.mkdir()
+        server_config_env(
+            root,
+            extra=f"staging_dir = '{staging_root}'\n",
         )
+        result = subprocess_server('prepare-pull', '--store', 'alpha')
 
         assert result.returncode == 0, result.stderr
         payload = _parse_json_stdout(result)
-        assert Path(payload['staging_dir']) == staging
-        assert payload['store_name'] == 'alpha'
-        assert payload['raw_name'] == 'raw.nrrd'
-        assert (staging / 'raw.nrrd').is_file()
-        assert (staging / '.voxhub_pull.json').is_file()
+        staging = Path(payload['staging_dir'])
+        try:
+            assert staging.parent == staging_root
+            assert staging.name.startswith('vxhb-staging-')
+            assert payload['store_name'] == 'alpha'
+            assert payload['raw_name'] == 'raw.nrrd'
+            assert (staging / 'raw.nrrd').is_file()
+            assert (staging / '.voxhub_pull.json').is_file()
+        finally:
+            import shutil as _shutil
+
+            _shutil.rmtree(staging, ignore_errors=True)
 
     def test_integrate_annotations_full_roundtrip(
         self,
@@ -241,8 +248,10 @@ class TestProtocolContract:
         assert r3.returncode == 0
         assert _parse_json_stdout(r3)['protocol_version'] == PROTOCOL_VERSION
 
-        # cleanup (noop)
-        r4 = subprocess_server('cleanup', str(tmp_path / 'nope'))
+        # cleanup (noop): prefix-valid path that doesn't exist on disk
+        # (e.g. client retry after a mid-cleanup crash).  Picked under
+        # /tmp so the default staging_root confines it.
+        r4 = subprocess_server('cleanup', str(tmp_path / 'vxhb-staging-nope'))
         assert _parse_json_stdout(r4)['protocol_version'] == PROTOCOL_VERSION
 
         # gc (empty)
@@ -252,7 +261,7 @@ class TestProtocolContract:
         assert _parse_json_stdout(r5)['protocol_version'] == PROTOCOL_VERSION
 
     def test_error_envelope_structure(
-        self, stores_dir_factory, server_config_env, subprocess_server, tmp_path
+        self, stores_dir_factory, server_config_env, subprocess_server
     ):
         """A deliberately-failing invocation produces a structured
         ServerError envelope — never a raw traceback."""
@@ -264,8 +273,6 @@ class TestProtocolContract:
             'prepare-pull',
             '--store',
             'does-not-exist',
-            '--staging-dir',
-            str(tmp_path / 'staging'),
         )
 
         assert result.returncode == 1

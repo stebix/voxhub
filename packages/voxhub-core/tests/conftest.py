@@ -6,6 +6,7 @@ import multiprocessing as mp
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from _core_helpers import (
     populate_store_annotation,
 )
 
+from voxhub_core.server.cli import STAGING_DIR_PREFIX
 from voxhub_schema.ontology import load_ontology
 
 # -- Logging: route structlog to stderr before any server handler runs -------
@@ -47,6 +49,10 @@ def _default_server_config(
     exercise handlers / subprocesses that call ``load_settings()``
     indirectly — they don't care about the concrete path.  This fixture
     ensures those tests see a valid config by default.
+
+    The default omits ``[storage].staging_dir`` so settings fall back to
+    ``tempfile.gettempdir()``.  Tests that need to exercise a custom
+    staging root write their own TOML via ``server_config_env``.
 
     Tests that need to drive specific storage behaviour use the
     ``server_config_env`` fixture (or their own monkeypatch.setenv)
@@ -158,7 +164,10 @@ def staging_dir_with_annotations(
         lmk_labels: list[str] | None = None,
         lmk_coordinate_system: str = 'LPS',
     ) -> Path:
-        staging_dir = tmp_path / 'staging'
+        # Name leaf with STAGING_DIR_PREFIX so the echoed-path validator in
+        # integrate-annotations / cleanup accepts it when the staging root
+        # is the test tmp_path (or its tempfile.gettempdir() ancestor).
+        staging_dir = tmp_path / f'{STAGING_DIR_PREFIX}fixture'
         staging_dir.mkdir(exist_ok=True)
 
         for name in store_names:
@@ -215,6 +224,12 @@ _DEFAULT_NAMESPACE_FIELDS: dict[str, Any] = {
     # by main()) used by list-stores, prepare-pull, validate-attributes,
     # healthcheck, and integrate-annotations.
     'stores_dir': None,
+    # Shared injected attribute (populated from settings.storage.staging_dir
+    # by main()) used by prepare-pull / integrate-annotations / cleanup / gc.
+    # Default to tempfile.gettempdir() so handler-level tests can be called
+    # without per-test wiring — fixtures that build staging dirs place them
+    # under tmp_path (a descendant of gettempdir()) with the required prefix.
+    'staging_root': tempfile.gettempdir(),
     # Single-store name, shared by prepare-pull and catalog refresh.
     'store': None,
     'staging_dir': None,
@@ -250,7 +265,7 @@ def server_argv() -> Callable[..., argparse.Namespace]:
         fields = dict(_DEFAULT_NAMESPACE_FIELDS)
         fields.update(overrides)
         # Normalise Path objects to str (argparse gives str too).
-        for key in ('stores_dir', 'staging_dir'):
+        for key in ('stores_dir', 'staging_dir', 'staging_root'):
             val = fields.get(key)
             if isinstance(val, Path):
                 fields[key] = str(val)

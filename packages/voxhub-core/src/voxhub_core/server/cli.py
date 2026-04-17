@@ -44,6 +44,11 @@ from voxhub_core.integrate import (
     write_landmarks_to_zarr,
     write_segmentation_to_zarr,
 )
+from voxhub_core.memory_budget import (
+    MemoryBudget,
+    MemoryBudgetError,
+    MemoryWarning,
+)
 from voxhub_core.server import catalog_cache
 from voxhub_core.server.locks import store_lock
 from voxhub_core.server.logging import configure_logging, get_logger
@@ -51,7 +56,11 @@ from voxhub_core.server.provenance import (
     record_provenance,
     validate_provenance_jsonl,
 )
-from voxhub_core.server.settings import SettingsError, load_settings
+from voxhub_core.server.settings import (
+    MemorySettings,
+    SettingsError,
+    load_settings,
+)
 from voxhub_schema import (
     PROTOCOL_VERSION,
     AnnotatorSlugError,
@@ -68,6 +77,84 @@ from voxhub_schema import (
 )
 
 STAGING_DIR_PREFIX: str = 'vxhb-staging-'
+
+# Segmentation extraction holds an extra transient copy compared to the raw
+# volume path (label_map + pynrrd internal buffer + astype).  Bump the
+# safety factor locally so the low-memory check reflects that worst case.
+_SEGMENTATION_SAFETY_BUMP: float = 1.5
+
+
+def _memory_budget(
+    memory: MemorySettings | None,
+    *,
+    extra_safety: float = 1.0,
+) -> MemoryBudget:
+    """Build a :class:`MemoryBudget` from server settings.
+
+    ``memory`` is ``None`` in the rare case where ``args.memory_settings``
+    was not attached (e.g. unit tests that invoke a handler directly);
+    the returned budget falls back to warn-only with the default
+    threshold.  ``extra_safety`` is multiplied into ``safety_factor`` to
+    accommodate paths with additional transient copies (segmentation).
+    """
+    if memory is None:
+        return MemoryBudget.warn_only()
+    return MemoryBudget(
+        warn_threshold_bytes=memory.max_safe_volume_mb * 1024 * 1024,
+        refuse_when_low=memory.refuse_when_low_memory,
+        safety_factor=memory.safety_factor * extra_safety,
+    )
+
+
+def _log_memory_warnings(
+    log: Any,
+    warnings: list[MemoryWarning],
+    *,
+    store: str,
+    phase: str,
+) -> None:
+    """Emit one structured log line per warning so ops sees them in journal."""
+    for w in warnings:
+        log.warning(
+            'memory_advisory',
+            phase=phase,
+            store=store,
+            code=w.code,
+            volume_bytes=w.volume_bytes,
+            available_bytes=w.available_bytes,
+            threshold_bytes=w.threshold_bytes,
+            message=w.message,
+        )
+
+
+def _validate_echoed_staging_dir(raw: str, staging_root: Path) -> Path:
+    """Confine a client-echoed staging_dir to the operator-configured root.
+
+    ``cleanup`` and ``integrate-annotations`` accept a ``staging_dir``
+    path that the client echoes back from a prior ``prepare-pull``
+    response.  A malicious or buggy SSH principal can craft any path;
+    without confinement ``cleanup`` would rmtree arbitrary locations and
+    ``integrate-annotations`` would treat attacker-chosen files as
+    annotation sources.
+
+    Returns the resolved path if it lives under ``staging_root`` and its
+    basename starts with :data:`STAGING_DIR_PREFIX`.  Raises ``ValueError``
+    otherwise; callers convert that into an ``invalid_staging_dir``
+    ``ServerError`` envelope.
+    """
+    candidate = Path(raw).resolve()
+    root = staging_root.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f'staging_dir {raw!r} is outside the configured staging root {root}'
+        ) from exc
+    if not candidate.name.startswith(STAGING_DIR_PREFIX):
+        raise ValueError(
+            f'staging_dir {raw!r} does not carry the {STAGING_DIR_PREFIX!r} prefix'
+        )
+    return candidate
 
 
 def _write_json(obj: object) -> None:
@@ -158,12 +245,20 @@ def _extract_reference_annotations(
     staging_dir: Path,
     include_annotations: list[str],
     log: Any,
+    *,
+    budget: MemoryBudget | None = None,
+    warnings_out: list[MemoryWarning] | None = None,
 ) -> tuple[list[PullAnnotationEntry], list[dict[str, str]]]:
     """Extract requested annotations to ``<staging_dir>/reference/``.
 
     Returns ``(manifest_entries, skipped)``.  Failures on individual
     annotations are non-fatal: they are appended to ``skipped`` with a
     human-readable reason and the remaining annotations continue.
+
+    Annotation-level :class:`MemoryBudgetError` (refusal under tight RAM)
+    is treated the same way as :class:`ExtractionError`: the offending
+    annotation is skipped, the rest still extract.  Soft warnings are
+    appended to ``warnings_out`` if provided.
     """
     manifest_entries: list[PullAnnotationEntry] = []
     skipped: list[dict[str, str]] = []
@@ -209,9 +304,30 @@ def _extract_reference_annotations(
         try:
             array_zarr_path = str(Path(ann_path) / 'data')
             if kind == 'segmentation':
-                checksum = extract_segmentation(zarr_path, array_zarr_path, ref_dest)
+                ann_warnings: list[MemoryWarning] = []
+                checksum = extract_segmentation(
+                    zarr_path,
+                    array_zarr_path,
+                    ref_dest,
+                    budget=budget,
+                    warnings_out=ann_warnings,
+                )
+                if warnings_out is not None:
+                    warnings_out.extend(ann_warnings)
+                _log_memory_warnings(
+                    log, ann_warnings, store=zarr_path.name, phase='reference_seg'
+                )
             else:
                 checksum = extract_landmarks(zarr_path, array_zarr_path, ref_dest)
+        except MemoryBudgetError as exc:
+            ref_dest.unlink(missing_ok=True)
+            log.warning(
+                'annotation_extraction_refused_low_memory',
+                path=ann_path,
+                error=str(exc),
+            )
+            skipped.append({'path': ann_path, 'reason': str(exc)})
+            continue
         except ExtractionError as exc:
             # Extraction may have written partial bytes before failing;
             # remove any orphan so the session dir only contains files
@@ -242,6 +358,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     t0 = time.monotonic()
 
     stores_dir = Path(args.stores_dir)
+    staging_root = Path(args.staging_root)
     store_name: str = args.store
     compress: bool = args.compress
     include_annotations: list[str] = args.include_existing_annotations or []
@@ -249,6 +366,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     log.info(
         'prepare_pull_started',
         stores_dir=str(stores_dir),
+        staging_root=str(staging_root),
         store=store_name,
         include_annotations=include_annotations,
     )
@@ -260,43 +378,58 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         _write_error('store_not_found', f'Store not found: {store_name!r}')
         sys.exit(1)
 
-    # Create a temp dir for staging.
+    # Staging dir path is server-authoritative: no client-supplied override.
+    # ``tempfile.mkdtemp(dir=staging_root)`` yields a collision-free sibling
+    # under the operator-configured root.  The nano_id in the prefix makes
+    # the path human-greppable in logs; the mkdtemp suffix guarantees
+    # uniqueness even under concurrent invocations.
     session_id = generate_nano_id()
-    if args.staging_dir:
-        staging_dir = Path(args.staging_dir)
-        staging_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        staging_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f'{STAGING_DIR_PREFIX}{session_id}-',
-            )
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f'{STAGING_DIR_PREFIX}{session_id}-',
+            dir=staging_root,
         )
-
-    # Sanitise prior prepare-pull output under ``--staging-dir``:
-    # ``reference/`` files from an earlier run are not touched by the
-    # extraction step and would otherwise rsync down as orphans that
-    # are absent from the fresh manifest.  ``raw.nrrd`` and the prior
-    # ``.voxhub_pull.json`` get overwritten downstream, but we clear
-    # them explicitly so the session dir is in a known state before
-    # we write anything.  All removals use ``missing_ok``-style
-    # semantics.
-    ref_dir = staging_dir / 'reference'
-    if ref_dir.exists():
-        shutil.rmtree(ref_dir)
-    (staging_dir / 'raw.nrrd').unlink(missing_ok=True)
-    (staging_dir / '.voxhub_pull.json').unlink(missing_ok=True)
+    )
 
     # -- Task 2a: extract raw volume at <staging_dir>/raw.nrrd --------------
+    memory_settings: MemorySettings | None = getattr(args, 'memory_settings', None)
+    raw_budget = _memory_budget(memory_settings)
+    seg_budget = _memory_budget(memory_settings, extra_safety=_SEGMENTATION_SAFETY_BUMP)
+    memory_warnings: list[MemoryWarning] = []
     try:
-        meta = extract_volume(zarr_path, staging_dir / 'raw.nrrd', compress=compress)
+        meta = extract_volume(
+            zarr_path,
+            staging_dir / 'raw.nrrd',
+            compress=compress,
+            budget=raw_budget,
+        )
+    except MemoryBudgetError as exc:
+        log.error(
+            'prepare_pull_refused_low_memory',
+            store=store_name,
+            error=str(exc),
+            volume_bytes=exc.warning.volume_bytes,
+            available_bytes=exc.warning.available_bytes,
+        )
+        _write_error('insufficient_memory', str(exc))
+        sys.exit(1)
     except Exception as exc:
         log.error('prepare_pull_failed', error=str(exc))
         _write_error('prepare_pull_failed', str(exc))
         sys.exit(1)
 
+    raw_warnings: list[MemoryWarning] = list(meta.pop('warnings', []))
+    memory_warnings.extend(raw_warnings)
+    _log_memory_warnings(log, raw_warnings, store=store_name, phase='raw_volume')
+
     # -- Task 2b: extract reference annotations -----------------------------
     ann_entries, skipped_annotations = _extract_reference_annotations(
-        zarr_path, staging_dir, include_annotations, log
+        zarr_path,
+        staging_dir,
+        include_annotations,
+        log,
+        budget=seg_budget,
+        warnings_out=memory_warnings,
     )
 
     # -- Task 3: write PullManifest to staging dir --------------------------
@@ -327,6 +460,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         staging_dir=str(staging_dir),
         extracted_annotations=len(ann_entries),
         skipped_annotations=len(skipped_annotations),
+        memory_warning_count=len(memory_warnings),
         duration_s=round(duration, 3),
     )
 
@@ -344,6 +478,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
             'origin_lps': meta['origin_lps'],
             'space_directions': meta['space_directions'],
             'skipped_annotations': skipped_annotations,
+            'memory_warnings': [w.to_dict() for w in memory_warnings],
         }
     )
 
@@ -405,7 +540,13 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     t0 = time.monotonic()
 
     stores_dir = Path(args.stores_dir)
-    staging_dir = Path(args.staging_dir)
+    staging_root = Path(args.staging_root)
+    try:
+        staging_dir = _validate_echoed_staging_dir(args.staging_dir, staging_root)
+    except ValueError as exc:
+        log.error('invalid_staging_dir', staging_dir=args.staging_dir, error=str(exc))
+        _write_error('invalid_staging_dir', str(exc))
+        sys.exit(1)
     annotator_id = args.annotator_id
     machine_id = args.machine_id
     nano_id = args.nano_id
@@ -771,7 +912,13 @@ def _read_pull_manifest_safely(staging_dir: Path) -> PullManifest | None:
 
 def _run_cleanup(args: argparse.Namespace) -> None:
     log = get_logger(command='cleanup')
-    staging_dir = Path(args.staging_dir)
+    staging_root = Path(args.staging_root)
+    try:
+        staging_dir = _validate_echoed_staging_dir(args.staging_dir, staging_root)
+    except ValueError as exc:
+        log.error('invalid_staging_dir', staging_dir=args.staging_dir, error=str(exc))
+        _write_error('invalid_staging_dir', str(exc))
+        sys.exit(1)
 
     log.info('cleanup_started', staging_dir=str(staging_dir))
 
@@ -808,9 +955,9 @@ def _run_gc(args: argparse.Namespace) -> None:
     log = get_logger(command='gc')
     ttl_hours = args.ttl_hours
 
-    log.info('gc_started', ttl_hours=ttl_hours)
+    tmp_root = Path(args.staging_root)
+    log.info('gc_started', ttl_hours=ttl_hours, staging_root=str(tmp_root))
 
-    tmp_root = Path(tempfile.gettempdir())
     cutoff = time.time() - (ttl_hours * 3600)
 
     removed: list[str] = []
@@ -1175,9 +1322,12 @@ def main() -> None:
     ls.set_defaults(func=_run_list_stores)
 
     # prepare-pull (single-store)
+    # Note: ``--staging-dir`` used to be a client-controllable override but
+    # was removed for security — the server is now authoritative over the
+    # staging path.  Operators redirect staging via ``[storage].staging_dir``
+    # in server.toml.
     pp = subparsers.add_parser('prepare-pull')
     pp.add_argument('--store', required=True, help='Store name to pull.')
-    pp.add_argument('--staging-dir', default=None)
     pp.add_argument('--include-existing-annotations', nargs='*')
     pp.add_argument('--compress', action='store_true')
     pp.set_defaults(func=_run_prepare_pull)
@@ -1275,6 +1425,8 @@ def main() -> None:
         sys.exit(0)
 
     args.stores_dir = str(settings.storage.stores_dir)
+    args.staging_root = str(settings.storage.staging_dir)
+    args.memory_settings = settings.memory
 
     try:
         args.func(args)

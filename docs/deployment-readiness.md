@@ -43,29 +43,20 @@ Target assumed: **Hetzner CX22 (2 vCPU / 4 GB) or CX32 (4 vCPU / 8 GB), Debian 1
 
 ## 2. Fix before first production push (deploy-blocking)
 
-### 2a. `prepare-pull --staging-dir` has no path validation
+### 2a. `prepare-pull --staging-dir` has no path validation — **RESOLVED**
 
-`packages/voxhub-core/src/voxhub_core/server/cli.py:210-211` accepts `--staging-dir`
-from the client verbatim:
+The ``--staging-dir`` flag has been removed entirely from the
+``prepare-pull`` surface.  The server is now authoritative over the
+staging path: it calls ``tempfile.mkdtemp(dir=settings.storage.staging_dir)``
+and returns the chosen path in the response.  Clients never supply
+a staging dir.
 
-```python
-if args.staging_dir:
-    staging_dir = Path(args.staging_dir)
-```
-
-The forced-command wrapper passes `$SSH_ORIGINAL_COMMAND` through unmodified, so a
-client with a valid SSH key can stage files into any path the `voxhub` user can
-write to. It's gated by the SSH key (authenticated users only, not random internet),
-so it's not a remote-code-execution — but it is an authenticated annotator writing
-files outside `/tmp`, which defeats the GC strategy and can fill arbitrary
-filesystems.
-
-**Fix:** either remove the `--staging-dir` CLI option entirely on the server side
-(always `tempfile.mkdtemp`), or clamp it:
-`staging_dir.resolve().relative_to(Path(tempfile.gettempdir()))` and reject on
-`ValueError`. Same cleanup pass is needed in `integrate-annotations` and `cleanup` —
-the latter is the really scary one, because `cleanup` takes a `staging_dir` and
-removes it.
+Operator control over where staging lives is exposed via a new
+``[storage].staging_dir`` key in ``server.toml`` (defaults to
+``tempfile.gettempdir()``).  ``scripts/deploy/deploy.sh`` accepts a
+matching ``--staging-dir`` installer flag and renders it into the
+config file.  ``load_settings`` refuses a config where ``staging_dir``
+equals ``stores_dir`` as an operator misconfiguration guard.
 
 ### 2b. `integrate-annotations` / `prepare-pull` peak memory is not bounded
 
@@ -89,19 +80,20 @@ clear error instead of OOM-killing the SSH session. **Fix (proper):** stream the
 NRRD write with chunked reads — the NRRD "raw" encoding supports it and pynrrd
 isn't the only way to write one.
 
-### 2c. No staging-dir confinement on `integrate-annotations` and `cleanup`
+### 2c. No staging-dir confinement on `integrate-annotations` and `cleanup` — **RESOLVED**
 
-As of the `stores_dir` refactor, the operator-owned stores directory is
-no longer client-supplied — the server reads it from
-``[storage].stores_dir`` — so that part of the original attack surface
-is closed.  ``staging_dir`` is still client-provided, though.  `cleanup`
-in particular takes a `staging_dir` argument and deletes it; with no
-bounds check, a buggy (or malicious-authenticated) client could point
-it at `~/.ssh` or the stores directory.  The forced-command wrapper
-can't save you here because `cleanup` is on the whitelist.
-
-**Fix:** validate `staging_dir.resolve()` starts with `Path(tempfile.gettempdir())` in
-all three subcommands that take one.
+``integrate-annotations`` and ``cleanup`` still accept ``staging_dir``
+as a positional argument — inherent, since both reference a dir the
+server previously issued — but they now funnel every client-echoed
+path through ``_validate_echoed_staging_dir``.  That helper rejects
+paths which, after ``.resolve()`` (follows symlinks), either fall
+outside ``settings.storage.staging_dir`` or lack the
+``vxhb-staging-`` prefix.  Rejected calls exit 1 with an
+``invalid_staging_dir`` error envelope and never touch disk, so
+``cleanup ~/.ssh`` / ``cleanup /mnt/storage/voxhub/data`` are
+mechanically impossible even for an SSH principal bypassing the
+voxhub-client.  Covered by ``TestValidateEchoedStagingDir``
+and ``TestCleanup::test_refuses_path_{without_staging_prefix,outside_staging_root}``.
 
 ---
 

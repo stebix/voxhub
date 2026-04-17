@@ -362,20 +362,33 @@ class TestPreparePull:
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
-    def test_uses_explicit_staging_dir_when_provided(
+    def test_stages_under_configured_staging_root(
         self, stores_dir_factory, tmp_path, server_argv, parsed_stdout
     ):
+        """Server-authoritative contract: ``prepare-pull`` creates its
+        session dir under ``args.staging_root`` (populated from
+        ``settings.storage.staging_dir`` in production)."""
         root = stores_dir_factory(('alpha',))
-        explicit = tmp_path / 'explicit_staging'
+        staging_root = tmp_path / 'configured_staging_root'
+        staging_root.mkdir()
+
         server_cli._run_prepare_pull(
-            server_argv(stores_dir=root, store='alpha', staging_dir=str(explicit))
+            server_argv(
+                stores_dir=root,
+                store='alpha',
+                staging_root=str(staging_root),
+            )
         )
 
         payload = parsed_stdout()
-        assert Path(payload['staging_dir']) == explicit
-        assert explicit.is_dir()
-        assert (explicit / 'raw.nrrd').is_file()
-        assert (explicit / '.voxhub_pull.json').is_file()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            assert staging_dir.parent == staging_root
+            assert staging_dir.name.startswith(server_cli.STAGING_DIR_PREFIX)
+            assert (staging_dir / 'raw.nrrd').is_file()
+            assert (staging_dir / '.voxhub_pull.json').is_file()
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def test_exports_reference_annotation(
         self, stores_dir_factory, server_argv, parsed_stdout
@@ -537,53 +550,6 @@ class TestPreparePull:
         finally:
             shutil.rmtree(payload['staging_dir'], ignore_errors=True)
 
-    def test_reused_staging_dir_is_sanitised(
-        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout
-    ):
-        """--staging-dir pointed at a dir with prior prepare-pull debris:
-        orphans from the previous run are removed so the new manifest
-        and on-disk layout stay in agreement."""
-        from voxhub_schema import PullManifest
-
-        root = stores_dir_factory(('alpha',))
-        explicit = tmp_path / 'explicit_staging'
-        explicit.mkdir()
-
-        # Plant debris that a prior prepare-pull invocation might leave:
-        #   * orphan reference files (the within-run #4 fix deletes
-        #     *partial* writes; across runs we clear the whole tree),
-        #   * a stale manifest (shouldn't be trusted if the new run
-        #     fails to write its own),
-        #   * stale raw.nrrd.
-        ref_dir = explicit / 'reference'
-        ref_dir.mkdir()
-        leftover = ref_dir / 'orphan-from-prior-run.seg.nrrd'
-        leftover.write_bytes(b'stale contents')
-        (explicit / '.voxhub_pull.json').write_text('{"stale": true}')
-        (explicit / 'raw.nrrd').write_bytes(b'stale raw bytes')
-
-        server_cli._run_prepare_pull(
-            server_argv(stores_dir=root, store='alpha', staging_dir=str(explicit))
-        )
-
-        payload = parsed_stdout()
-        assert Path(payload['staging_dir']) == explicit
-
-        # Orphans are gone.
-        assert not leftover.exists()
-
-        # Fresh manifest is in place and agrees with on-disk state.
-        assert (explicit / '.voxhub_pull.json').is_file()
-        manifest = PullManifest.read(explicit)
-        assert manifest.store_name == 'alpha'
-        assert manifest.annotations == []
-
-        # Fresh raw is genuinely fresh (checksum matches the new manifest,
-        # not the planted stub).
-        raw_bytes = (explicit / 'raw.nrrd').read_bytes()
-        assert raw_bytes != b'stale raw bytes'
-        assert manifest.raw_checksum == payload['raw_checksum']
-
     def test_partial_extraction_cleans_up_orphan_file(
         self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
     ):
@@ -685,6 +651,84 @@ def _written_annotations(store_zarr: Path) -> list[Path]:
         if annotator.is_dir():
             out.extend(p for p in annotator.iterdir() if p.is_dir())
     return out
+
+
+# ===========================================================================
+# _run_prepare_pull memory-budget surface
+# ===========================================================================
+
+
+class TestPreparePullMemoryWarnings:
+    """Covers the memory-budget integration in _run_prepare_pull."""
+
+    def test_default_payload_carries_empty_warnings_list(
+        self, stores_dir_factory, server_argv, parsed_stdout
+    ):
+        root = stores_dir_factory(('alpha',))
+        server_cli._run_prepare_pull(server_argv(stores_dir=root, store='alpha'))
+        payload = parsed_stdout()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            assert payload['memory_warnings'] == []
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def test_large_volume_warning_surfaces_in_payload(
+        self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
+    ):
+        from voxhub_core.server import settings as settings_mod
+
+        root = stores_dir_factory(('alpha',))
+        # Tiny threshold so the test SHAPE (10*12*14*4 = 6720 bytes) trips it.
+        memory = settings_mod.MemorySettings(
+            max_safe_volume_mb=0,
+            refuse_when_low_memory=False,
+            safety_factor=2.0,
+        )
+        # Pretend memory is generous so the low-memory path can't fire.
+        from voxhub_core import memory_budget as mb
+
+        monkeypatch.setattr(mb, 'read_available_bytes', lambda: 16 * 1024**3)
+
+        server_cli._run_prepare_pull(
+            server_argv(stores_dir=root, store='alpha', memory_settings=memory)
+        )
+        payload = parsed_stdout()
+        staging_dir = Path(payload['staging_dir'])
+        try:
+            warnings = payload['memory_warnings']
+            assert len(warnings) == 1
+            assert warnings[0]['code'] == 'large_volume'
+            assert warnings[0]['volume_bytes'] == 10 * 12 * 14 * 4
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def test_refuses_when_low_memory(
+        self, stores_dir_factory, server_argv, capsys, monkeypatch
+    ):
+        from voxhub_core.server import settings as settings_mod
+
+        root = stores_dir_factory(('alpha',))
+        memory = settings_mod.MemorySettings(
+            max_safe_volume_mb=512,
+            refuse_when_low_memory=True,
+            safety_factor=2.0,
+        )
+        from voxhub_core import memory_budget as mb
+
+        # 1 byte available — far below 2 * 6720.
+        monkeypatch.setattr(mb, 'read_available_bytes', lambda: 1)
+
+        with pytest.raises(SystemExit) as exc_info:
+            server_cli._run_prepare_pull(
+                server_argv(stores_dir=root, store='alpha', memory_settings=memory)
+            )
+        assert exc_info.value.code == 1
+
+        out = capsys.readouterr().out
+        envelope = json.loads(out.strip().splitlines()[-1])
+        assert envelope['error'] is True
+        assert envelope['code'] == 'insufficient_memory'
 
 
 # ===========================================================================
@@ -1539,37 +1583,62 @@ class TestCleanup:
         assert "'store_name': 'patient-007'" in msg
         assert "'had_manifest': True" in msg
 
-    def test_noop_when_staging_dir_missing(
-        self, tmp_path, server_argv, parsed_stdout, capsys
-    ):
-        missing = tmp_path / 'does-not-exist'
+    def test_noop_when_staging_dir_missing(self, tmp_path, server_argv, parsed_stdout):
+        """A prefix-valid, inside-root path that no longer exists on disk
+        is a noop (client retry after crash-mid-cleanup)."""
+        missing = tmp_path / 'vxhb-staging-does-not-exist'
 
         server_cli._run_cleanup(server_argv(staging_dir=str(missing)))
 
-        # Reading stderr first would consume the JSON stdout too, so we
-        # parse stdout through the fixture which calls readouterr().
         payload = parsed_stdout()
         assert payload['status'] == 'ok'
 
-    @pytest.mark.xfail(
-        reason='current implementation has no path safety check — '
-        'documented concern from docs/testing/server-cli.md §4.4',
-        strict=True,
-    )
-    def test_refuses_to_remove_non_staging_path(
+    def test_refuses_path_without_staging_prefix(
         self, tmp_path, server_argv, parsed_stdout
     ):
-        # A path that looks nothing like a staging directory (no dt-* prefix,
-        # not under system tmpdir) should be refused.  If this xfail ever
-        # flips to passing, _run_cleanup now rejects suspicious paths.
+        """A dir inside the staging root but whose basename lacks the
+        ``vxhb-staging-`` prefix is rejected — this is what stops a
+        buggy/malicious client from cleaning up arbitrary tempdir
+        siblings (pytest's own dirs, other daemons' state, etc.)."""
         suspicious = tmp_path / 'user-data'
         suspicious.mkdir()
 
-        server_cli._run_cleanup(server_argv(staging_dir=str(suspicious)))
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_cleanup(server_argv(staging_dir=str(suspicious)))
+        assert excinfo.value.code == 1
 
-        # We expect either a non-ok status OR the directory to remain.
-        payload = parsed_stdout()
-        assert payload['status'] != 'ok' or suspicious.exists()
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'invalid_staging_dir'
+        # The directory must still exist — no rmtree happened.
+        assert suspicious.exists()
+
+    def test_refuses_path_outside_staging_root(
+        self, tmp_path, server_argv, parsed_stdout
+    ):
+        """A prefix-valid path that resolves outside the configured
+        staging root is rejected — closes the ``cleanup ~/.ssh`` hole
+        that motivated the contract change."""
+        # Force the staging_root to a narrow sub-dir of tmp_path, then
+        # point at a sibling that carries the prefix but is outside.
+        narrow_root = tmp_path / 'narrow_root'
+        narrow_root.mkdir()
+        outside = tmp_path / 'vxhb-staging-outside'
+        outside.mkdir()
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_cleanup(
+                server_argv(
+                    staging_dir=str(outside),
+                    staging_root=str(narrow_root),
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'invalid_staging_dir'
+        assert outside.exists()
 
 
 # ===========================================================================
@@ -1580,23 +1649,20 @@ class TestCleanup:
 class TestGc:
     """Covers voxhub_core.server.cli._run_gc.
 
-    Isolation: ``_run_gc`` scans ``tempfile.gettempdir()``.  Every test
-    monkey-patches that to point at a per-test ``tmp_path`` so the real /tmp
-    is never touched.
+    Isolation: ``_run_gc`` scans ``args.staging_root`` (populated from
+    ``settings.storage.staging_dir`` in production).  Every test points
+    that at a per-test ``tmp_path`` sub-directory so the real staging
+    root is never touched.
     """
 
     @staticmethod
-    def _isolate(monkeypatch, fake_tmp: Path) -> None:
-        import tempfile
-
+    def _staging_root(fake_tmp: Path) -> Path:
         fake_tmp.mkdir(exist_ok=True)
-        monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(fake_tmp))
+        return fake_tmp
 
-    def test_removes_dirs_older_than_ttl(
-        self, tmp_path, server_argv, parsed_stdout, monkeypatch
-    ):
-        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        old = tmp_path / 'fake_tmp' / 'vxhb-staging-old'
+    def test_removes_dirs_older_than_ttl(self, tmp_path, server_argv, parsed_stdout):
+        fake_tmp = self._staging_root(tmp_path / 'fake_tmp')
+        old = fake_tmp / 'vxhb-staging-old'
         old.mkdir()
         # 48 hours in the past.
         import os as _os
@@ -1604,7 +1670,7 @@ class TestGc:
         old_ts = old.stat().st_mtime - 48 * 3600
         _os.utime(old, (old_ts, old_ts))
 
-        server_cli._run_gc(server_argv(ttl_hours=24.0))
+        server_cli._run_gc(server_argv(ttl_hours=24.0, staging_root=str(fake_tmp)))
 
         payload = parsed_stdout()
         assert str(old) in payload['removed']
@@ -1612,13 +1678,13 @@ class TestGc:
         assert not old.exists()
 
     def test_emits_staging_dir_reaped_event_on_gc(
-        self, tmp_path, server_argv, parsed_stdout, monkeypatch, caplog
+        self, tmp_path, server_argv, parsed_stdout, caplog
     ):
         """GC reap emits ``staging_dir_reaped`` with ``reason='gc_unacked'``."""
         from voxhub_schema import PROTOCOL_VERSION, PullManifest
 
-        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        old = tmp_path / 'fake_tmp' / 'vxhb-staging-old'
+        fake_tmp = self._staging_root(tmp_path / 'fake_tmp')
+        old = fake_tmp / 'vxhb-staging-old'
         old.mkdir()
         PullManifest(
             protocol_version=PROTOCOL_VERSION,
@@ -1640,7 +1706,7 @@ class TestGc:
         _os.utime(old, (old_ts, old_ts))
 
         with caplog.at_level('INFO'):
-            server_cli._run_gc(server_argv(ttl_hours=24.0))
+            server_cli._run_gc(server_argv(ttl_hours=24.0, staging_root=str(fake_tmp)))
         parsed_stdout()
 
         reaped_events = [
@@ -1652,77 +1718,67 @@ class TestGc:
         assert "'store_name': 'patient-013'" in msg
         assert "'had_manifest': True" in msg
 
-    def test_keeps_dirs_newer_than_ttl(
-        self, tmp_path, server_argv, parsed_stdout, monkeypatch
-    ):
-        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        recent = tmp_path / 'fake_tmp' / 'vxhb-staging-recent'
+    def test_keeps_dirs_newer_than_ttl(self, tmp_path, server_argv, parsed_stdout):
+        fake_tmp = self._staging_root(tmp_path / 'fake_tmp')
+        recent = fake_tmp / 'vxhb-staging-recent'
         recent.mkdir()
 
-        server_cli._run_gc(server_argv(ttl_hours=24.0))
+        server_cli._run_gc(server_argv(ttl_hours=24.0, staging_root=str(fake_tmp)))
 
         payload = parsed_stdout()
         assert payload['count'] == 0
         assert recent.exists()
 
-    def test_ignores_non_staging_prefix(
-        self, tmp_path, server_argv, parsed_stdout, monkeypatch
-    ):
-        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        other = tmp_path / 'fake_tmp' / 'foo-bar'
+    def test_ignores_non_staging_prefix(self, tmp_path, server_argv, parsed_stdout):
+        fake_tmp = self._staging_root(tmp_path / 'fake_tmp')
+        other = fake_tmp / 'foo-bar'
         other.mkdir()
         import os as _os
 
         old_ts = other.stat().st_mtime - 48 * 3600
         _os.utime(other, (old_ts, old_ts))
 
-        server_cli._run_gc(server_argv(ttl_hours=24.0))
+        server_cli._run_gc(server_argv(ttl_hours=24.0, staging_root=str(fake_tmp)))
 
         payload = parsed_stdout()
         assert payload['count'] == 0
         assert other.exists()
 
-    def test_ignores_files_only_dirs(
-        self, tmp_path, server_argv, parsed_stdout, monkeypatch
-    ):
-        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        staging_file = tmp_path / 'fake_tmp' / 'vxhb-staging-file'
+    def test_ignores_files_only_dirs(self, tmp_path, server_argv, parsed_stdout):
+        fake_tmp = self._staging_root(tmp_path / 'fake_tmp')
+        staging_file = fake_tmp / 'vxhb-staging-file'
         staging_file.write_text('data')
         import os as _os
 
         old_ts = staging_file.stat().st_mtime - 48 * 3600
         _os.utime(staging_file, (old_ts, old_ts))
 
-        server_cli._run_gc(server_argv(ttl_hours=24.0))
+        server_cli._run_gc(server_argv(ttl_hours=24.0, staging_root=str(fake_tmp)))
 
         payload = parsed_stdout()
         assert payload['count'] == 0
         assert staging_file.exists()
 
-    def test_count_matches_removed_length(
-        self, tmp_path, server_argv, parsed_stdout, monkeypatch
-    ):
-        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
+    def test_count_matches_removed_length(self, tmp_path, server_argv, parsed_stdout):
+        fake_tmp = self._staging_root(tmp_path / 'fake_tmp')
         import os as _os
 
         for name in ('vxhb-staging-a', 'vxhb-staging-b', 'vxhb-staging-c'):
-            p = tmp_path / 'fake_tmp' / name
+            p = fake_tmp / name
             p.mkdir()
             _os.utime(p, (p.stat().st_mtime - 48 * 3600,) * 2)
 
-        server_cli._run_gc(server_argv(ttl_hours=24.0))
+        server_cli._run_gc(server_argv(ttl_hours=24.0, staging_root=str(fake_tmp)))
 
         payload = parsed_stdout()
         assert payload['count'] == len(payload['removed'])
         assert payload['count'] == 3
 
-    def test_default_ttl_24_hours(
-        self, tmp_path, server_argv, parsed_stdout, monkeypatch
-    ):
+    def test_default_ttl_24_hours(self, tmp_path, server_argv, parsed_stdout):
         """Exercising argparse isn't possible at function layer; instead,
         assert that server_argv's default matches the documented default."""
-        self._isolate(monkeypatch, tmp_path / 'fake_tmp')
-        ns = server_argv()  # no override
+        fake_tmp = self._staging_root(tmp_path / 'fake_tmp')
+        ns = server_argv(staging_root=str(fake_tmp))  # no ttl override
         assert ns.ttl_hours == 24.0
         server_cli._run_gc(ns)
         # Empty fake_tmp → no removals, just verify the handler exits cleanly.
@@ -2143,6 +2199,131 @@ class TestMainStoresDirResolution:
         envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert envelope['error'] is True
         assert envelope['code'] == 'storage_misconfigured'
+
+
+# ===========================================================================
+# Staging-dir settings + validator
+# ===========================================================================
+
+
+class TestStagingDirSettings:
+    """Covers ``[storage].staging_dir`` parsing in ``load_settings`` and
+    the ``args.staging_root`` injection in ``main()``.
+    """
+
+    def test_staging_dir_defaults_to_gettempdir(
+        self, stores_dir_factory, server_config_env
+    ):
+        """An omitted ``[storage].staging_dir`` falls back to
+        ``tempfile.gettempdir()`` so existing deployments don't need to
+        rewrite their config."""
+        import tempfile as _tempfile
+
+        from voxhub_core.server.settings import load_settings
+
+        server_config_env(stores_dir_factory(('alpha',)))
+        settings = load_settings()
+        assert settings.storage.staging_dir == Path(_tempfile.gettempdir()).resolve()
+
+    def test_staging_dir_honoured_when_declared(
+        self, stores_dir_factory, server_config_env, tmp_path
+    ):
+        from voxhub_core.server.settings import load_settings
+
+        staging = tmp_path / 'operator_staging'
+        staging.mkdir()
+        server_config_env(
+            stores_dir_factory(('alpha',)),
+            extra=f"staging_dir = '{staging}'\n",
+        )
+        settings = load_settings()
+        assert settings.storage.staging_dir == staging.resolve()
+
+    def test_staging_dir_equal_to_stores_dir_is_rejected(
+        self, stores_dir_factory, server_config_env
+    ):
+        from voxhub_core.server.settings import SettingsError, load_settings
+
+        root = stores_dir_factory(('alpha',))
+        server_config_env(root, extra=f"staging_dir = '{root}'\n")
+        with pytest.raises(SettingsError) as excinfo:
+            load_settings()
+        assert 'must not equal' in str(excinfo.value)
+
+    def test_missing_staging_dir_path_is_rejected(
+        self, stores_dir_factory, server_config_env, tmp_path
+    ):
+        from voxhub_core.server.settings import SettingsError, load_settings
+
+        nonexistent = tmp_path / 'does_not_exist'
+        server_config_env(
+            stores_dir_factory(('alpha',)),
+            extra=f"staging_dir = '{nonexistent}'\n",
+        )
+        with pytest.raises(SettingsError) as excinfo:
+            load_settings()
+        assert 'does not exist' in str(excinfo.value)
+
+    def test_main_injects_staging_root_from_settings(
+        self, stores_dir_factory, server_config_env, tmp_path, monkeypatch
+    ):
+        """main() propagates ``settings.storage.staging_dir`` to handlers
+        via ``args.staging_root``."""
+        root = stores_dir_factory(('alpha',))
+        staging = tmp_path / 'operator_staging'
+        staging.mkdir()
+        server_config_env(root, extra=f"staging_dir = '{staging}'\n")
+
+        captured: dict[str, str] = {}
+
+        def spy(args):  # type: ignore[no-untyped-def]
+            captured['staging_root'] = args.staging_root
+
+        monkeypatch.setattr(server_cli, '_run_prepare_pull', spy)
+        monkeypatch.setattr(
+            'sys.argv', ['voxhub-server', 'prepare-pull', '--store', 'alpha']
+        )
+        server_cli.main()
+
+        assert Path(captured['staging_root']) == staging.resolve()
+
+
+class TestValidateEchoedStagingDir:
+    """Covers ``_validate_echoed_staging_dir`` — the confinement helper
+    that ``cleanup`` and ``integrate-annotations`` apply to every
+    client-echoed staging path."""
+
+    def test_accepts_path_inside_root_with_prefix(self, tmp_path):
+        target = tmp_path / 'vxhb-staging-alice'
+        target.mkdir()
+        result = server_cli._validate_echoed_staging_dir(str(target), tmp_path)
+        assert result == target.resolve()
+
+    def test_rejects_path_outside_root(self, tmp_path):
+        root = tmp_path / 'root'
+        root.mkdir()
+        sibling = tmp_path / 'vxhb-staging-sibling'
+        sibling.mkdir()
+        with pytest.raises(ValueError, match='outside'):
+            server_cli._validate_echoed_staging_dir(str(sibling), root)
+
+    def test_rejects_path_without_prefix(self, tmp_path):
+        target = tmp_path / 'user_data'
+        target.mkdir()
+        with pytest.raises(ValueError, match='prefix'):
+            server_cli._validate_echoed_staging_dir(str(target), tmp_path)
+
+    def test_rejects_symlink_escape(self, tmp_path):
+        """``resolve()`` follows symlinks before the confinement check,
+        so a symlink pointing outside the staging root is rejected."""
+        root = tmp_path / 'root'
+        root.mkdir()
+        outside = tmp_path / 'outside-target'
+        outside.mkdir()
+        lnk = root / 'vxhb-staging-sneaky'
+        lnk.symlink_to(outside)
+        with pytest.raises(ValueError, match='outside'):
+            server_cli._validate_echoed_staging_dir(str(lnk), root)
 
 
 # ===========================================================================

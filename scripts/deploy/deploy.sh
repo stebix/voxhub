@@ -3,11 +3,17 @@
 #
 # Usage:
 #   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data
+#   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --staging-dir /mnt/storage/voxhub/staging
 #   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --repo-url git@github.com:org/voxhub.git
 #   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --dry-run
 #
 # Idempotent — safe to re-run.  Re-running pulls latest code, re-syncs the
 # venv, and re-validates.
+#
+# ``--staging-dir`` is optional.  When omitted, staging defaults to the
+# stores-dir volume at ``<stores-dir parent>/staging`` so prepare-pull
+# doesn't eat the root disk on small VPS boxes.  The server is
+# authoritative over staging paths: clients never specify one.
 
 set -euo pipefail
 
@@ -38,6 +44,7 @@ step() {
 # ---------------------------------------------------------------------------
 
 STORES_DIR=""
+STAGING_DIR=""
 REPO_URL="https://github.com/jnickla1/voxhub.git"
 BRANCH="main"
 DRY_RUN=false
@@ -57,6 +64,9 @@ Usage: sudo $0 --stores-dir <path> [OPTIONS]
 
 Options:
   --stores-dir <path>    Path to the directory of zarr stores (required)
+  --staging-dir <path>   Operator-authoritative staging parent (default:
+                         <stores-dir parent>/staging).  Clients can never
+                         override this; see docs/architecture.md.
   --repo-url <url>       Git clone URL (default: $REPO_URL)
   --branch <name>        Branch to deploy (default: $BRANCH)
   --dry-run              Show what would be done without making changes
@@ -68,6 +78,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stores-dir)  STORES_DIR="$2"; shift 2 ;;
+        --staging-dir) STAGING_DIR="$2"; shift 2 ;;
         --repo-url)    REPO_URL="$2"; shift 2 ;;
         --branch)      BRANCH="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=true; shift ;;
@@ -78,6 +89,19 @@ done
 
 [[ -z "$STORES_DIR" ]] && fail "--stores-dir is required"
 [[ "$EUID" -ne 0 ]]   && fail "This script must be run as root (or via sudo)"
+
+# Default staging dir to a sibling of stores_dir on the same volume —
+# keeps prepare-pull off the root disk on small VPS boxes.
+if [[ -z "$STAGING_DIR" ]]; then
+    STORES_PARENT="$(dirname "$STORES_DIR")"
+    STAGING_DIR="$STORES_PARENT/staging"
+fi
+
+# Hard guard: settings.py rejects equal paths at load time, but refuse
+# earlier here so --dry-run surfaces the misconfiguration.
+if [[ "$STORES_DIR" == "$STAGING_DIR" ]]; then
+    fail "--stores-dir and --staging-dir must differ"
+fi
 
 if $DRY_RUN; then
     warn "Dry-run mode — no changes will be made"
@@ -290,6 +314,25 @@ run chown -R "$VOXHUB_USER:$VOXHUB_USER" "$STORES_DIR"
 ok "Stores directory ready at $STORES_DIR"
 
 # ===================================================================
+# Step 8b: Prepare staging directory
+# ===================================================================
+step "Prepare staging directory"
+
+if [[ -d "$STAGING_DIR" ]]; then
+    skip "Staging directory ($STAGING_DIR)"
+else
+    info "Creating $STAGING_DIR"
+    run mkdir -p "$STAGING_DIR"
+fi
+
+run chown -R "$VOXHUB_USER:$VOXHUB_USER" "$STAGING_DIR"
+# Restrict to the voxhub user — world-writable /tmp-like perms would let
+# any local account plant a ``vxhb-staging-*`` dir that gc would later
+# reap, wasting cycles at best and surprising operators at worst.
+run chmod 700 "$STAGING_DIR"
+ok "Staging directory ready at $STAGING_DIR"
+
+# ===================================================================
 # Step 9: Server configuration (TOML)
 # ===================================================================
 step "Write server configuration"
@@ -304,7 +347,8 @@ log_backup_count = 10
 stderr_level = \"WARNING\"
 
 [storage]
-stores_dir = \"$STORES_DIR\""
+stores_dir = \"$STORES_DIR\"
+staging_dir = \"$STAGING_DIR\""
 
 if [[ -f "$CONFIG_FILE" ]]; then
     skip "Server config ($CONFIG_FILE)"
@@ -398,10 +442,11 @@ printf "${BOLD}${GREEN}═══════════════════
 cat <<EOF
   Install dir:   $INSTALL_DIR
   Stores dir:    $STORES_DIR
+  Staging dir:   $STAGING_DIR
   Log dir:       $LOG_DIR
   Server config: $CONFIG_FILE
   SSH config:    $SSHD_CONF
-  GC cron:       daily at 04:00 (48h TTL)
+  GC cron:       daily at 04:00 (48h TTL, reaps $STAGING_DIR)
 
   Next steps:
     1. Add annotator keys:
