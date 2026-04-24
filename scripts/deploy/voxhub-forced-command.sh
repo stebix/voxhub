@@ -17,6 +17,11 @@
 
 set -euo pipefail
 
+# Explicit config path — do not rely on ``~`` expansion under non-login
+# SSH sessions, and do not rely on the caller to set this.  deploy.sh
+# writes the config here.
+export VOXHUB_SERVER_CONFIG="${VOXHUB_SERVER_CONFIG:-/home/voxhub/.config/voxhub/server.toml}"
+
 VOXHUB_SERVER="${VOXHUB_SERVER:-/usr/local/bin/voxhub-server}"
 
 ALLOWED_SUBCOMMANDS=(

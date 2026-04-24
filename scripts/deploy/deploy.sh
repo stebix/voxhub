@@ -45,13 +45,17 @@ step() {
 
 STORES_DIR=""
 STAGING_DIR=""
-REPO_URL="https://github.com/jnickla1/voxhub.git"
+REPO_URL="git@github.com:stebix/voxhub.git"
 BRANCH="main"
 DRY_RUN=false
 INSTALL_DIR="/opt/voxhub"
 VOXHUB_USER="voxhub"
 LOG_DIR="/var/log/voxhub"
 FORCED_CMD="/usr/local/bin/voxhub-forced-command.sh"
+# World-readable location for uv-managed Python + cache.  Must be
+# traversable by the voxhub user — ``/root/.local/share/uv`` is not.
+UV_ROOT="/opt/voxhub-uv"
+UV_INSTALL_VERSION="${UV_INSTALL_VERSION:-0.5.11}"
 STEP_NUM=0
 
 # ---------------------------------------------------------------------------
@@ -123,7 +127,9 @@ run() {
 # ===================================================================
 step "Install system packages"
 
-REQUIRED_PKGS=(python3 python3-venv rsync git)
+# uv downloads its own python-build-standalone interpreter, so we don't
+# need python3 / python3-venv from apt.  curl bootstraps uv itself.
+REQUIRED_PKGS=(curl ca-certificates rsync git)
 missing=()
 for pkg in "${REQUIRED_PKGS[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then
@@ -140,33 +146,36 @@ else
     skip "System packages"
 fi
 
-# Verify Python >= 3.12
-PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-info "Python version: $PYTHON_VERSION"
-if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'; then
-    ok "Python >= 3.12"
-else
-    fail "Python 3.12+ required, found $PYTHON_VERSION"
-fi
-
 # ===================================================================
-# Step 2: Install uv
+# Step 2: Install uv system-wide
 # ===================================================================
 step "Install uv"
 
-if command -v uv &>/dev/null; then
-    skip "uv ($(uv --version))"
+# Install uv into a world-readable location so both root (during deploy)
+# and the voxhub user (during runtime) see the same binary.  The default
+# ``curl | sh`` lands in ``$HOME/.local/bin`` — which is ``/root`` under
+# ``sudo``, and ``/root`` is mode 0700.  Pin the version so redeploys
+# are reproducible.
+UV_BIN="/usr/local/bin/uv"
+
+if [[ -x "$UV_BIN" ]]; then
+    skip "uv ($($UV_BIN --version))"
+elif $DRY_RUN; then
+    ok "(dry-run) uv install skipped"
 else
-    info "Installing uv"
-    run curl -LsSf https://astral.sh/uv/install.sh | run sh
-    # Ensure uv is on PATH for the rest of this script
-    export PATH="$HOME/.local/bin:$PATH"
-    if command -v uv &>/dev/null; then
-        ok "Installed uv ($(uv --version))"
-    elif $DRY_RUN; then
-        ok "(dry-run) uv install skipped"
+    info "Installing uv $UV_INSTALL_VERSION to $UV_BIN"
+    INSTALLER=$(mktemp)
+    trap 'rm -f "$INSTALLER"' EXIT
+    curl -LsSf "https://astral.sh/uv/${UV_INSTALL_VERSION}/install.sh" -o "$INSTALLER"
+    # UV_INSTALL_DIR controls where the installer drops the uv binary.
+    # UV_UNMANAGED_INSTALL silences the PATH-modification nag.
+    env UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=1 sh "$INSTALLER"
+    rm -f "$INSTALLER"
+    trap - EXIT
+    if [[ -x "$UV_BIN" ]]; then
+        ok "Installed uv ($($UV_BIN --version))"
     else
-        fail "uv installation failed"
+        fail "uv installation failed — $UV_BIN not present"
     fi
 fi
 
@@ -257,6 +266,11 @@ step "Clone / update repository"
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     info "Updating existing clone at $INSTALL_DIR"
     if ! $DRY_RUN; then
+        # Warn loudly if an operator hotfixed on the server — the reset
+        # below would silently discard it.
+        if ! git -C "$INSTALL_DIR" diff --quiet HEAD 2>/dev/null; then
+            warn "Uncommitted changes in $INSTALL_DIR will be discarded by reset --hard"
+        fi
         git -C "$INSTALL_DIR" fetch origin
         git -C "$INSTALL_DIR" checkout "$BRANCH"
         git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
@@ -268,24 +282,85 @@ else
     ok "Cloned repository"
 fi
 
+# The voxhub runtime user must be able to read/execute everything under
+# $INSTALL_DIR — including .venv/bin/python and the site-packages tree.
+# Chown before ``uv sync`` so the venv is created owned by voxhub from
+# the start, and uv's cache/python downloads (below) land in paths we
+# control.
+run chown -R "$VOXHUB_USER:$VOXHUB_USER" "$INSTALL_DIR"
+
 # ===================================================================
 # Step 7: Install Python packages (uv sync)
 # ===================================================================
 step "Install Python packages"
 
+# Thread the uv workflow through cleanly:
+#
+#   * UV_PYTHON_INSTALL_DIR — where uv downloads python-build-standalone.
+#     Must be world-readable because ``.venv/bin/python`` symlinks into
+#     it, and the voxhub user needs to traverse the path at runtime.
+#     (/root/.local/share/uv — uv's default under ``sudo`` — is 0700.)
+#   * UV_CACHE_DIR — keep uv's wheel cache alongside the python install
+#     so redeploys don't redownload.  Also voxhub-readable for future
+#     ``uv sync`` re-runs by the voxhub user.
+#   * UV_PYTHON_PREFERENCE=only-managed — never fall back to a system
+#     interpreter.  Guarantees the .venv shebang points into UV_ROOT,
+#     which we control, regardless of what apt happens to ship.
+#   * --frozen — respect uv.lock exactly; no implicit resolver drift.
+#   * --package voxhub-core — install only the server package from the
+#     workspace.  Avoids the ``voxhub`` script-name collision between
+#     voxhub-core and voxhub-client (we only need voxhub-server here).
+#   * --no-dev — skip the ``dev`` dependency group (ruff, pyright,
+#     pytest) on production boxes.
+info "Provisioning uv Python + venv under $UV_ROOT"
+if ! $DRY_RUN; then
+    mkdir -p "$UV_ROOT"
+    chown -R "$VOXHUB_USER:$VOXHUB_USER" "$UV_ROOT"
+    chmod 755 "$UV_ROOT"
+fi
+
+UV_ENV=(
+    env
+    "UV_PYTHON_INSTALL_DIR=$UV_ROOT/python"
+    "UV_CACHE_DIR=$UV_ROOT/cache"
+    "UV_PYTHON_PREFERENCE=only-managed"
+    "HOME=/home/$VOXHUB_USER"
+)
+
 info "Running uv sync in $INSTALL_DIR"
 if ! $DRY_RUN; then
-    (cd "$INSTALL_DIR" && uv sync)
+    sudo -u "$VOXHUB_USER" -H "${UV_ENV[@]}" "$UV_BIN" sync \
+        --project "$INSTALL_DIR" \
+        --package voxhub-core \
+        --frozen \
+        --no-dev
 fi
 
 VENV_BIN="$INSTALL_DIR/.venv/bin"
 
-# Symlink voxhub-server into /usr/local/bin
+# Symlink only voxhub-server (the single public entrypoint on the
+# server) into /usr/local/bin.  We intentionally do not symlink the
+# whole .venv: entrypoint scripts carry absolute shebangs pointing
+# back into $INSTALL_DIR/.venv/bin/python, so a single symlink is
+# sufficient and keeps /usr/local/bin tidy.
 if [[ -f "$VENV_BIN/voxhub-server" ]] || $DRY_RUN; then
     run ln -sf "$VENV_BIN/voxhub-server" /usr/local/bin/voxhub-server
     ok "Symlinked voxhub-server → /usr/local/bin/"
 else
     fail "voxhub-server not found in $VENV_BIN after uv sync"
+fi
+
+# Sanity-check the interpreter is reachable as the voxhub user — this
+# is exactly the failure mode that bit us when uv dropped python under
+# /root.  Skip in dry-run (nothing to check).
+if ! $DRY_RUN; then
+    if ! sudo -u "$VOXHUB_USER" test -x "$VENV_BIN/python"; then
+        fail "venv python not executable as $VOXHUB_USER — check ownership of $INSTALL_DIR and $UV_ROOT"
+    fi
+    if ! sudo -u "$VOXHUB_USER" "$VENV_BIN/python" -c 'import voxhub_core' 2>/dev/null; then
+        fail "voxhub_core not importable from $VENV_BIN/python as $VOXHUB_USER"
+    fi
+    ok "venv Python reachable and voxhub_core importable as $VOXHUB_USER"
 fi
 
 # ===================================================================
@@ -441,6 +516,7 @@ printf "${BOLD}${GREEN}═══════════════════
 
 cat <<EOF
   Install dir:   $INSTALL_DIR
+  uv root:       $UV_ROOT (python + cache, world-readable)
   Stores dir:    $STORES_DIR
   Staging dir:   $STAGING_DIR
   Log dir:       $LOG_DIR
