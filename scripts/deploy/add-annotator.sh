@@ -101,7 +101,15 @@ fi
 
 DATE=$(date +%Y-%m-%d)
 COMMENT="annotator:$ANNOTATOR_NAME added:$DATE"
-KEY_OPTS='command="/usr/local/bin/voxhub-forced-command.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty'
+# environment="VOXHUB_ANNOTATOR=<name>" binds this key to an annotator: sshd
+# injects the variable into the forced command's environment, and the server
+# treats it as the authoritative identity (overriding any client-sent
+# --annotator-id).  This requires ``PermitUserEnvironment VOXHUB_ANNOTATOR``
+# in the sshd config (written by deploy.sh) — without it sshd silently drops
+# the option.  ANNOTATOR_NAME is validated ^[a-zA-Z0-9_-]+$ above, so it is
+# safe to interpolate into the quoted option value.  The no-* restrictions
+# (and sshd's ``restrict``, if used) do NOT disable environment options.
+KEY_OPTS="command=\"/usr/local/bin/voxhub-forced-command.sh\",environment=\"VOXHUB_ANNOTATOR=${ANNOTATOR_NAME}\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty"
 
 AUTH_LINE="$KEY_OPTS $KEY_TYPE $KEY_DATA $COMMENT"
 
@@ -122,6 +130,7 @@ echo "  Name:        $ANNOTATOR_NAME"
 echo "  Key type:    $KEY_TYPE"
 echo "  Fingerprint: $FINGERPRINT"
 echo "  Date:        $DATE"
+echo "  Bound id:    VOXHUB_ANNOTATOR=$ANNOTATOR_NAME (key-enforced provenance)"
 echo
 echo "  The annotator can now connect with:"
 echo "    voxhub pull $VOXHUB_USER@<server-ip> ./local_staging"

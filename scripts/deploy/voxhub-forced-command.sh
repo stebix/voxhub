@@ -55,6 +55,11 @@ if [[ "$allowed" != true ]]; then
     exit 1
 fi
 
+# VOXHUB_ANNOTATOR (injected by sshd from the connecting key's per-key
+# environment= option) is left untouched: exec preserves the environment, so
+# the server inherits the key-bound identity and treats it as authoritative
+# for provenance.  Do not unset or rewrite it here.
+#
 # shellcheck disable=SC2086
 # Word-splitting on $CMD is intentional — the CLI parser expects individual args.
 exec "$VOXHUB_SERVER" $CMD

@@ -206,6 +206,10 @@ step "Configure SSH for '$VOXHUB_USER'"
 
 SSHD_CONF="/etc/ssh/sshd_config.d/voxhub.conf"
 
+# PermitUserEnvironment is a scoped allowlist (VOXHUB_ANNOTATOR only, never a
+# bare 'yes'): it lets sshd honour the per-key environment="VOXHUB_ANNOTATOR=..."
+# option set by add-annotator.sh, which binds each key to an annotator identity.
+# The server treats that variable as authoritative for provenance.
 SSHD_BLOCK="# voxhub annotator access — managed by deploy.sh
 Match User $VOXHUB_USER
     ForceCommand $FORCED_CMD
@@ -213,9 +217,16 @@ Match User $VOXHUB_USER
     AllowAgentForwarding no
     AllowTcpForwarding no
     X11Forwarding no
-    PermitTTY no"
+    PermitTTY no
+    PermitUserEnvironment VOXHUB_ANNOTATOR"
 
-if [[ -f "$SSHD_CONF" ]] && grep -qF "ForceCommand $FORCED_CMD" "$SSHD_CONF"; then
+# Re-write the config unless BOTH the forced command and the key-bound identity
+# allowlist are already present — an older deployment that predates
+# PermitUserEnvironment must be upgraded so key-bound identity actually takes
+# effect (sshd silently ignores environment= without it).
+if [[ -f "$SSHD_CONF" ]] \
+    && grep -qF "ForceCommand $FORCED_CMD" "$SSHD_CONF" \
+    && grep -qF "PermitUserEnvironment VOXHUB_ANNOTATOR" "$SSHD_CONF"; then
     skip "sshd config ($SSHD_CONF)"
 else
     info "Writing $SSHD_CONF"
