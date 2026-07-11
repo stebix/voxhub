@@ -417,11 +417,14 @@ class TestIntegrateProvenanceRollback:
 
         monkeypatch.setattr(server_cli, 'record_provenance', boom)
 
-        server_cli._run_integrate_annotations(
-            _provenance_integrate_argv(
-                server_argv, stores_dir=stores_dir, staging_dir=staging
+        # The store fails, so the batch exits non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _provenance_integrate_argv(
+                    server_argv, stores_dir=stores_dir, staging_dir=staging
+                )
             )
-        )
+        assert excinfo.value.code == 1
 
         result = parsed_stdout()['stores']['alpha']
         assert result['status'] == 'failed'

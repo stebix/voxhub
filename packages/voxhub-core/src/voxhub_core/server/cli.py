@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import zarr
@@ -197,6 +197,45 @@ def _validate_echoed_staging_dir(raw: str, staging_root: Path) -> Path:
             f'staging_dir {raw!r} does not carry the {STAGING_DIR_PREFIX!r} prefix'
         )
     return candidate
+
+
+def _validate_include_annotation_path(raw: str) -> str:
+    """Validate a client-supplied ``--include-existing-annotations`` path.
+
+    Reference-annotation paths address a group inside the store's own zarr
+    hierarchy, so they must match the ``annotations/<slug>/<instance>``
+    shape exactly: a relative POSIX path of three segments with no parent
+    (``..``) components.  Relying on zarr's incidental key validation is not
+    enough — a crafted ``../../etc`` could otherwise escape the store.
+
+    Parameters
+    ----------
+    raw : str
+        The client-supplied path.
+
+    Returns
+    -------
+    str
+        ``raw`` unchanged when valid.
+
+    Raises
+    ------
+    ValueError
+        When the path is absolute, contains ``..``, or does not have the
+        expected three-segment ``annotations/<slug>/<instance>`` shape.
+        Callers convert this into an ``invalid_annotation_path`` envelope.
+    """
+    candidate = PurePosixPath(raw)
+    if candidate.is_absolute():
+        raise ValueError(f'annotation path {raw!r} must be relative')
+    parts = candidate.parts
+    if '..' in parts:
+        raise ValueError(f'annotation path {raw!r} must not contain ".."')
+    if len(parts) != 3 or parts[0] != 'annotations':
+        raise ValueError(
+            f'annotation path {raw!r} must have the shape annotations/<slug>/<instance>'
+        )
+    return raw
 
 
 def _write_json(obj: object) -> None:
@@ -420,6 +459,17 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         _write_error('disk_full', disk_full)
         sys.exit(1)
 
+    # Validate client-supplied reference-annotation paths (task 2.8) before
+    # touching the filesystem: they must match annotations/<slug>/<instance>
+    # exactly, never escaping the store via ``..``.
+    for ann_path in include_annotations:
+        try:
+            _validate_include_annotation_path(ann_path)
+        except ValueError as exc:
+            log.error('invalid_annotation_path', path=ann_path, error=str(exc))
+            _write_error('invalid_annotation_path', str(exc))
+            sys.exit(1)
+
     # -- Task 1: upfront store validation (before mkdtemp) ------------------
     zarr_path = stores_dir / f'{store_name}.zarr'
     if not zarr_path.is_dir():
@@ -460,10 +510,14 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
             volume_bytes=exc.warning.volume_bytes,
             available_bytes=exc.warning.available_bytes,
         )
+        # Clean up the freshly-created staging dir instead of leaving it for
+        # gc (task 2.8).
+        shutil.rmtree(staging_dir, ignore_errors=True)
         _write_error('insufficient_memory', str(exc))
         sys.exit(1)
     except Exception as exc:
         log.error('prepare_pull_failed', error=str(exc))
+        shutil.rmtree(staging_dir, ignore_errors=True)
         _write_error('prepare_pull_failed', str(exc))
         sys.exit(1)
 
@@ -499,6 +553,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         ).write(staging_dir)
     except OSError as exc:
         log.error('manifest_write_failed', error=str(exc))
+        shutil.rmtree(staging_dir, ignore_errors=True)
         _write_error('prepare_pull_failed', f'failed to write pull manifest: {exc}')
         sys.exit(1)
 
@@ -718,6 +773,11 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     for store_dir in sorted(staging_dir.iterdir()):
         if not store_dir.is_dir() or store_dir.name.startswith('.'):
             continue
+        # Pulled reference annotations live under <staging>/reference/; that
+        # subdir must never be discovered as a store and re-integrated
+        # (task 2.8).
+        if store_dir.name == 'reference':
+            continue
 
         store_name = store_dir.name
         zarr_path = stores_dir / f'{store_name}.zarr'
@@ -763,15 +823,19 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                 }
                 continue
 
-        # Verify checksums.
+        # Verify checksums.  A mismatch fails this store only (task 2.8):
+        # earlier stores may already have committed, so never sys.exit
+        # mid-loop — record the failure and continue so the response reports
+        # every store's outcome.
         if expected_checksums:
-            for ann_file in [seg_file, lmk_file]:
+            checksum_mismatch: str | None = None
+            for ann_file in (seg_file, lmk_file):
                 if ann_file is None:
                     continue
                 actual = compute_sha256(ann_file)
                 expected = expected_checksums.get(ann_file.name)
                 if expected and actual != expected:
-                    msg = (
+                    checksum_mismatch = (
                         f'Checksum mismatch for {ann_file.name}: '
                         f'expected {expected}, got {actual}'
                     )
@@ -780,8 +844,14 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                         store=store_name,
                         file=ann_file.name,
                     )
-                    _write_error('checksum_mismatch', msg)
-                    sys.exit(1)
+                    break
+            if checksum_mismatch is not None:
+                stores_result[store_name] = {
+                    'status': 'failed',
+                    'annotations': [],
+                    'issues': [{'severity': 'error', 'message': checksum_mismatch}],
+                }
+                continue
 
         # Read volume metadata.
         root = zarr.open_group(zarr_path, mode='r')
@@ -1080,18 +1150,26 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         }
 
     duration = time.monotonic() - t0
+    any_failed = any(r['status'] != 'integrated' for r in stores_result.values())
     log.info(
         'integrate_completed',
         stores=list(stores_result.keys()),
+        any_failed=any_failed,
         duration_s=round(duration, 3),
     )
 
+    # Always emit the full per-store JSON so the client can reconcile every
+    # store's outcome, then signal partial or total failure via a non-zero
+    # exit (task 2.8).  An empty batch (no stores discovered) is a success.
     _write_dict(
         {
             'protocol_version': PROTOCOL_VERSION,
             'stores': stores_result,
         }
     )
+
+    if any_failed:
+        sys.exit(1)
 
 
 # -- cleanup -----------------------------------------------------------------
