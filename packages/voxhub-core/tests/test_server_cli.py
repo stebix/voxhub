@@ -730,6 +730,102 @@ class TestPreparePullMemoryWarnings:
         assert envelope['error'] is True
         assert envelope['code'] == 'insufficient_memory'
 
+    def test_prepare_pull_refuses_when_disk_full(
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout, monkeypatch
+    ):
+        """A staging filesystem >=90% full → ``disk_full`` envelope, exit 1,
+        and nothing staged (task 2.6)."""
+        import collections
+
+        root = stores_dir_factory(('alpha',))
+        staging_root = tmp_path / 'staging'
+        staging_root.mkdir()
+        usage = collections.namedtuple('usage', ['total', 'used', 'free'])
+        monkeypatch.setattr(
+            server_cli.shutil, 'disk_usage', lambda _p: usage(1000, 950, 50)
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_prepare_pull(
+                server_argv(
+                    stores_dir=root, store='alpha', staging_root=str(staging_root)
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'disk_full'
+        # Nothing staged.
+        assert list(staging_root.iterdir()) == []
+
+
+# ===========================================================================
+# _run_integrate_annotations (memory + disk preconditions — task 2.6)
+# ===========================================================================
+
+
+class TestIntegrateMemoryAndDiskPreconditions:
+    """Covers the integrate-side RAM budget and disk-full guard (task 2.6)."""
+
+    def test_integrate_refuses_segmentation_on_low_memory(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        from voxhub_core import memory_budget as mb
+        from voxhub_core.server import settings as settings_mod
+
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+        memory = settings_mod.MemorySettings(
+            max_safe_volume_mb=512,
+            refuse_when_low_memory=True,
+            safety_factor=2.0,
+        )
+        # 1 byte available — far below the seg.nrrd file size * safety.
+        monkeypatch.setattr(mb, 'read_available_bytes', lambda: 1)
+
+        argv = _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        argv.memory_settings = memory
+        server_cli._run_integrate_annotations(argv)
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        assert any('memory' in i['message'].lower() for i in result['issues'])
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_integrate_refuses_when_disk_full(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        import collections
+
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+        usage = collections.namedtuple('usage', ['total', 'used', 'free'])
+        monkeypatch.setattr(
+            server_cli.shutil, 'disk_usage', lambda _p: usage(1000, 999, 1)
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'disk_full'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
 
 # ===========================================================================
 # _run_integrate_annotations (happy paths)

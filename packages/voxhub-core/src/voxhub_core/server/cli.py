@@ -49,6 +49,9 @@ from voxhub_core.memory_budget import (
     MemoryBudgetError,
     MemoryWarning,
 )
+from voxhub_core.memory_budget import (
+    check as check_memory_budget,
+)
 from voxhub_core.server import catalog_cache
 from voxhub_core.server.locks import store_lock
 from voxhub_core.server.logging import configure_logging, get_logger
@@ -82,6 +85,45 @@ STAGING_DIR_PREFIX: str = 'vxhb-staging-'
 # volume path (label_map + pynrrd internal buffer + astype).  Bump the
 # safety factor locally so the low-memory check reflects that worst case.
 _SEGMENTATION_SAFETY_BUMP: float = 1.5
+
+# Refuse to stage or integrate when a target filesystem is this full.  A
+# nearly-full disk risks torn writes (an annotation committed to zarr with
+# no room left for its provenance line) and orphaned staging dirs.
+_DISK_FULL_THRESHOLD: float = 0.90
+
+
+def _check_disk_space(paths: list[Path]) -> str | None:
+    """Return a message if any of ``paths`` sits on a >=90%-full filesystem.
+
+    Parameters
+    ----------
+    paths : list[Path]
+        Target directories to probe with :func:`shutil.disk_usage`.
+        Unreadable or zero-total filesystems are skipped.
+
+    Returns
+    -------
+    str | None
+        A human-readable refusal message for the first filesystem over the
+        :data:`_DISK_FULL_THRESHOLD`, or ``None`` when every probed path has
+        headroom.  Callers convert the message into a ``disk_full``
+        ``ServerError`` envelope and exit without touching anything.
+    """
+    for path in paths:
+        try:
+            usage = shutil.disk_usage(path)
+        except OSError:
+            continue
+        if usage.total <= 0:
+            continue
+        used_fraction = usage.used / usage.total
+        if used_fraction >= _DISK_FULL_THRESHOLD:
+            return (
+                f'filesystem at {path} is {used_fraction * 100:.1f}% full '
+                f'(>= {_DISK_FULL_THRESHOLD * 100:.0f}% threshold); refusing '
+                'to write'
+            )
+    return None
 
 
 def _memory_budget(
@@ -371,6 +413,13 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         include_annotations=include_annotations,
     )
 
+    # -- Disk-full precondition (before anything is touched) ----------------
+    disk_full = _check_disk_space([staging_root])
+    if disk_full is not None:
+        log.error('disk_full', staging_root=str(staging_root), detail=disk_full)
+        _write_error('disk_full', disk_full)
+        sys.exit(1)
+
     # -- Task 1: upfront store validation (before mkdtemp) ------------------
     zarr_path = stores_dir / f'{store_name}.zarr'
     if not zarr_path.is_dir():
@@ -555,6 +604,25 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     declared_ontologies: list[str] = list(args.expected_ontology or [])
     unconstrained: bool = bool(args.unconstrained)
 
+    # Disk-full precondition: refuse before writing anything if either the
+    # staging filesystem or the stores filesystem is essentially full.
+    disk_full = _check_disk_space([staging_root, stores_dir])
+    if disk_full is not None:
+        log.error(
+            'disk_full',
+            staging_root=str(staging_root),
+            stores_dir=str(stores_dir),
+            detail=disk_full,
+        )
+        _write_error('disk_full', disk_full)
+        sys.exit(1)
+
+    # Segmentation parse is gated on available RAM (task 2.6): a pushed
+    # .seg.nrrd is materialized into memory, so use its file size as a cheap
+    # upper-bound estimate and keep the segmentation safety factor.
+    memory_settings: MemorySettings | None = getattr(args, 'memory_settings', None)
+    seg_budget = _memory_budget(memory_settings, extra_safety=_SEGMENTATION_SAFETY_BUMP)
+
     # Ontology policy: the client must state intent.  Silent fallback to
     # "unconstrained" would corrupt the downstream ground-truth story,
     # since a missing declaration is indistinguishable from a deliberate
@@ -738,6 +806,20 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                 else:
                     seg_ontology = seg_ontologies[0] if seg_ontologies else None
                     try:
+                        # Gate the in-RAM parse on available memory (task
+                        # 2.6): the .seg.nrrd is materialized into memory, so
+                        # refuse this store rather than risk an OOM kill.
+                        seg_mem_warnings = check_memory_budget(
+                            seg_file.stat().st_size,
+                            budget=seg_budget,
+                            context=store_name,
+                        )
+                        _log_memory_warnings(
+                            log,
+                            seg_mem_warnings,
+                            store=store_name,
+                            phase='integrate_seg',
+                        )
                         seg_data = parse_seg_nrrd(seg_file)
                         seg_issues = validate_segmentation(
                             seg_data,
@@ -795,6 +877,21 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                 }
                             )
 
+                    except MemoryBudgetError as exc:
+                        issues.append(
+                            IssueRecord(
+                                severity='error',
+                                message=(
+                                    f'Insufficient memory to integrate '
+                                    f'segmentation: {exc}'
+                                ),
+                            )
+                        )
+                        log.error(
+                            'integrate_refused_low_memory',
+                            store=store_name,
+                            error=str(exc),
+                        )
                     except Exception as exc:
                         issues.append(
                             IssueRecord(
