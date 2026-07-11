@@ -1103,6 +1103,72 @@ class TestIntegrateAnnotationsErrors:
 
 
 # ===========================================================================
+# _run_integrate_annotations (checksum fail-closed — task 2.5)
+# ===========================================================================
+
+
+class TestIntegrateChecksumFailClosed:
+    """Covers fail-closed checksum verification (launch task 2.5).
+
+    When the client supplies ``--checksums`` it asserts integrity of every
+    uploaded annotation file.  A file missing from the set, or a malformed
+    token, silently disables the check otherwise — so the owning store is
+    failed closed instead of integrated unverified.
+    """
+
+    def test_missing_checksum_entry_fails_store_closed(
+        self, stores_dir_factory, staging_dir_with_annotations, server_argv, parsed_stdout
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(
+            store_names=['alpha'], include_seg=True, include_lmk=True
+        )
+        seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
+        seg_ck = server_cli.compute_sha256(seg_file)
+        # Checksum supplied for the segmentation but NOT the landmarks file.
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                expected_ontology=['inner-ear-structures', 'inner-ear-landmarks'],
+                checksums=[f'{seg_file.name}:{seg_ck}'],
+            )
+        )
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        errors = [i for i in result['issues'] if i['severity'] == 'error']
+        assert any(
+            'landmarks.mrk.json' in e['message'] and 'checksum' in e['message'].lower()
+            for e in errors
+        )
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_malformed_checksum_token_fails_store_closed(
+        self, stores_dir_factory, staging_dir_with_annotations, server_argv, parsed_stdout
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+        # ``segmentation.seg.nrrd:garbage`` splits into two colon-parts, so
+        # it is not a well-formed ``<name>:sha256:<hex>`` token.
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                checksums=['segmentation.seg.nrrd:garbage'],
+            )
+        )
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        errors = [i for i in result['issues'] if i['severity'] == 'error']
+        assert any('malformed' in e['message'].lower() for e in errors)
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+
+# ===========================================================================
 # _run_integrate_annotations (multi-store)
 # ===========================================================================
 

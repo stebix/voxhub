@@ -587,14 +587,22 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         declared_ontologies=declared_ontologies,
     )
 
-    # Parse expected checksums.
+    # Parse expected checksums.  A well-formed token is
+    # ``<filename>:sha256:<hexdigest>``.  Malformed tokens are NOT silently
+    # dropped (task 2.5): the filename they were meant to cover is recorded
+    # so the owning store fails closed rather than integrating an unverified
+    # file.
     expected_checksums: dict[str, str] = {}
+    malformed_checksum_files: set[str] = set()
     for entry in checksums:
         parts = entry.split(':', 2)
-        if len(parts) == 3:
-            filename = parts[0]
-            checksum = f'{parts[1]}:{parts[2]}'
-            expected_checksums[filename] = checksum
+        if len(parts) == 3 and parts[1] and parts[2]:
+            expected_checksums[parts[0]] = f'{parts[1]}:{parts[2]}'
+        else:
+            # Keep the intended filename (text before the first ':') so the
+            # store that owns it can be failed with a clear message.
+            malformed_checksum_files.add(parts[0])
+            log.error('malformed_checksum_token', token=entry)
 
     date_str = datetime.now(UTC).strftime('%Y%m%d')
     annotator_dir = f'{annotator_id}-{nano_id}'
@@ -615,6 +623,40 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         seg_file, lmk_file = find_annotation_files(store_dir)
         if seg_file is None and lmk_file is None:
             continue
+
+        # Fail-closed checksum verification (task 2.5).  When the client
+        # supplies any --checksums it is asserting the integrity of every
+        # uploaded file; a file missing from the set, or a malformed token,
+        # would silently skip its integrity check.  Refuse the store instead.
+        if expected_checksums or malformed_checksum_files:
+            checksum_issue: str | None = None
+            for ann_file in (seg_file, lmk_file):
+                if ann_file is None:
+                    continue
+                if ann_file.name in malformed_checksum_files:
+                    checksum_issue = (
+                        f'Malformed checksum entry for {ann_file.name}; '
+                        'refusing to integrate an unverified file.'
+                    )
+                elif ann_file.name not in expected_checksums:
+                    checksum_issue = (
+                        f'No checksum provided for {ann_file.name}; '
+                        'refusing to integrate an unverified file.'
+                    )
+                if checksum_issue is not None:
+                    log.error(
+                        'checksum_verification_failed',
+                        store=store_name,
+                        file=ann_file.name,
+                    )
+                    break
+            if checksum_issue is not None:
+                stores_result[store_name] = {
+                    'status': 'failed',
+                    'annotations': [],
+                    'issues': [{'severity': 'error', 'message': checksum_issue}],
+                }
+                continue
 
         # Verify checksums.
         if expected_checksums:
