@@ -8,10 +8,12 @@ pushed to the server.
 The test data is built programmatically — no fixture files on disk.
 """
 
+import nrrd
 import numpy as np
 from _schema_helpers import (
     ORIGIN_LPS,
     SHAPE,
+    SPACE_DIRECTIONS,
     write_mrk_json,
     write_seg_nrrd,
 )
@@ -566,3 +568,139 @@ class TestLmkFileErrors:
         issues = validate_lmk_preflight(missing, manifest_entry, landmark_ontology)
         assert len(_errors(issues)) == 1
         assert 'not found' in _errors(issues)[0].message.lower()
+
+
+# ===================================================================
+# SEGMENTATION — COORDINATE SPACE (launch 2.4 fix 1)
+# ===================================================================
+
+
+def _write_seg_with_space(
+    path,
+    space: str,
+    label_map: np.ndarray,
+    segments: list[dict[str, object]],
+) -> None:
+    """Write a ``.seg.nrrd`` with an explicit NRRD ``space`` field."""
+    header: dict[str, object] = {
+        'space': space,
+        'space origin': ORIGIN_LPS,
+        'space directions': SPACE_DIRECTIONS,
+        'kinds': ['domain', 'domain', 'domain'],
+    }
+    for i, seg in enumerate(segments):
+        header[f'Segment{i}_ID'] = seg.get('id', f'seg_{i}')
+        header[f'Segment{i}_Name'] = seg['name']
+        header[f'Segment{i}_LabelValue'] = str(seg['label_value'])
+        header[f'Segment{i}_Color'] = seg.get('color', '0.5 0.5 0.5')
+    nrrd.write(str(path), label_map, header)
+
+
+class TestSegCoordinateSpace:
+    """The NRRD ``space`` field is read; RAS/unknown segmentations error."""
+
+    def test_lps_space_proceeds(self, tmp_path, manifest_entry, unconstrained_ontology):
+        path = tmp_path / 'lps.seg.nrrd'
+        _write_seg_with_space(
+            path, 'left-posterior-superior', _make_fluid_space_label_map(), []
+        )
+        issues = validate_seg_preflight(path, manifest_entry, unconstrained_ontology)
+        assert _errors(issues) == []
+
+    def test_ras_space_is_error(self, tmp_path, manifest_entry, unconstrained_ontology):
+        path = tmp_path / 'ras.seg.nrrd'
+        _write_seg_with_space(
+            path, 'right-anterior-superior', _make_fluid_space_label_map(), []
+        )
+        issues = validate_seg_preflight(path, manifest_entry, unconstrained_ontology)
+        errors = _errors(issues)
+        assert any('ras' in e.message.lower() for e in errors)
+        # The space error is the actionable one: no confusing secondary
+        # spatial-mismatch error is emitted.
+        assert not any('mismatch' in e.message.lower() for e in errors)
+
+    def test_unknown_space_is_error(
+        self, tmp_path, manifest_entry, unconstrained_ontology
+    ):
+        path = tmp_path / 'weird.seg.nrrd'
+        _write_seg_with_space(path, 'scanner-xyz', _make_fluid_space_label_map(), [])
+        issues = validate_seg_preflight(path, manifest_entry, unconstrained_ontology)
+        assert any('space' in e.message.lower() for e in _errors(issues))
+
+
+# ===================================================================
+# SEGMENTATION — MULTI-LAYER (4D) DETECTION (launch 2.4 fix 2)
+# ===================================================================
+
+
+class TestSegMultiLayer:
+    def test_4d_header_is_error_not_exception(
+        self, tmp_path, manifest_entry, unconstrained_ontology
+    ):
+        """A multi-layer export (4D data + NaN-row space directions) must
+        yield an error issue, never a broadcast ``ValueError``."""
+        path = tmp_path / 'multilayer.seg.nrrd'
+        data4 = np.zeros((2, *SHAPE), dtype=np.int16)
+        space_dirs = np.array([[np.nan, np.nan, np.nan], *SPACE_DIRECTIONS])
+        nrrd.write(
+            str(path),
+            data4,
+            {
+                'space': 'left-posterior-superior',
+                'space origin': ORIGIN_LPS,
+                'space directions': space_dirs,
+                'kinds': ['list', 'domain', 'domain', 'domain'],
+            },
+        )
+        # Must not raise.
+        issues = validate_seg_preflight(path, manifest_entry, unconstrained_ontology)
+        assert any('multi-layer' in e.message.lower() for e in _errors(issues))
+
+
+# ===================================================================
+# SEGMENTATION — VOXEL-LEVEL ONTOLOGY (launch 2.4 fix 3)
+# ===================================================================
+
+
+class TestSegVoxelLevelOntology:
+    def test_undeclared_voxel_value_is_error_not_warning(
+        self, tmp_path, manifest_entry, inner_ear_ontology
+    ):
+        """A voxel value present in the data but declared neither in the
+        header nor in the ontology is an error (previously only warned)."""
+        lm = _make_inner_ear_label_map()
+        lm[4, 4, 4] = 99  # not in header segments, not in ontology
+        seg = write_seg_nrrd(tmp_path / 'x.seg.nrrd', lm, _INNER_EAR_SEGMENTS)
+        issues = validate_seg_preflight(seg, manifest_entry, inner_ear_ontology)
+        assert any('99' in e.message for e in _errors(issues))
+
+    def test_negative_label_reports_constraint_violation(
+        self, tmp_path, manifest_entry, unconstrained_ontology
+    ):
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = -1
+        seg = write_seg_nrrd(tmp_path / 'neg.seg.nrrd', lm, [])
+        issues = validate_seg_preflight(seg, manifest_entry, unconstrained_ontology)
+        assert any(
+            'constraint' in e.message.lower() and 'negative' in e.message.lower()
+            for e in _errors(issues)
+        )
+
+
+# ===================================================================
+# LANDMARKS — ONTOLOGY COORDINATE SYSTEM (launch 2.4 fix 3)
+# ===================================================================
+
+
+class TestLmkOntologyCoordinateSystem:
+    def test_ras_file_vs_lps_ontology_warns(
+        self, tmp_path, manifest_entry, landmark_ontology
+    ):
+        """``inner-ear-landmarks`` declares LPS; a RAS file warns (the
+        points are still converted to LPS on write) but does not error."""
+        pts = [[4.0, 5.0, -6.0], [3.0, 4.0, -5.0], [2.0, 3.0, -4.0]]
+        labels = ['round_window', 'oval_window', 'cochlear_apex']
+        lmk = write_mrk_json(tmp_path / 'ras.mrk.json', pts, labels, 'RAS')
+        issues = validate_lmk_preflight(lmk, manifest_entry, landmark_ontology)
+        assert any('coordinate system' in w.message.lower() for w in _warnings(issues))
+        assert _errors(issues) == []

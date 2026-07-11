@@ -39,8 +39,6 @@ from voxhub_core.integrate import (
     find_annotation_files,
     parse_mrk_json,
     parse_seg_nrrd,
-    validate_landmarks,
-    validate_segmentation,
     write_landmarks_to_zarr,
     write_segmentation_to_zarr,
 )
@@ -63,6 +61,7 @@ from voxhub_core.server.settings import (
 )
 from voxhub_schema import (
     PROTOCOL_VERSION,
+    UNCONSTRAINED_SEGMENTATION,
     AnnotatorSlugError,
     IssueRecord,
     ManifestError,
@@ -74,6 +73,8 @@ from voxhub_schema import (
     load_ontology,
     parse_annotator_slug,
     serialize,
+    validate_lmk_preflight,
+    validate_seg_preflight,
 )
 
 STAGING_DIR_PREFIX: str = 'vxhb-staging-'
@@ -694,13 +695,19 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                         declared=declared_ontologies,
                     )
                 else:
-                    seg_ontology = seg_ontologies[0] if seg_ontologies else None
+                    # Under --unconstrained, validate against the shipped
+                    # ``unconstrained`` ontology so its structural constraints
+                    # are enforced on the live path (they were skipped when a
+                    # bare ``None`` was passed).
+                    if unconstrained:
+                        seg_ontology = UNCONSTRAINED_SEGMENTATION
+                    else:
+                        seg_ontology = seg_ontologies[0] if seg_ontologies else None
                     try:
-                        seg_data = parse_seg_nrrd(seg_file)
-                        seg_issues = validate_segmentation(
-                            seg_data,
+                        seg_issues = validate_seg_preflight(
+                            seg_file,
                             manifest_entry,
-                            ontology=seg_ontology,
+                            seg_ontology,
                         )
                         issues.extend(seg_issues)
 
@@ -712,6 +719,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                 errors=[i.message for i in errors],
                             )
                         else:
+                            seg_data = parse_seg_nrrd(seg_file)
                             ont_name = (
                                 seg_ontology.name if seg_ontology else 'unconstrained'
                             )
@@ -787,13 +795,15 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                         declared=declared_ontologies,
                     )
                 else:
+                    # No unconstrained landmark ontology exists, so under
+                    # --unconstrained landmarks validate with ontology=None
+                    # (structural checks only).
                     lmk_ontology = lmk_ontologies[0] if lmk_ontologies else None
                     try:
-                        lmk_data = parse_mrk_json(lmk_file)
-                        lmk_issues = validate_landmarks(
-                            lmk_data,
+                        lmk_issues = validate_lmk_preflight(
+                            lmk_file,
                             manifest_entry,
-                            ontology=lmk_ontology,
+                            lmk_ontology,
                         )
                         issues.extend(lmk_issues)
 
@@ -805,6 +815,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                 errors=[i.message for i in errors],
                             )
                         else:
+                            lmk_data = parse_mrk_json(lmk_file)
                             ont_name = (
                                 lmk_ontology.name if lmk_ontology else 'unconstrained'
                             )

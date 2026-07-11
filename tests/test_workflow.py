@@ -83,6 +83,20 @@ def _manifest_entry_from_stage(stage_meta: dict) -> RemoteManifestEntry:
     )
 
 
+def _volume_metadata_from_stage(stage_meta: dict) -> dict:
+    """Plain spatial metadata (``VolumeMetadata``) for the unified validators.
+
+    The canonical validators take the volume's spatial metadata as a plain
+    mapping (shape / origin / directions), not a manifest object.
+    """
+    return {
+        'shape': stage_meta['shape'],
+        'spacing_mm': stage_meta['spacing_mm'],
+        'origin_lps': stage_meta['origin_lps'],
+        'space_directions': stage_meta['space_directions'],
+    }
+
+
 def _write_valid_seg(store_dir, ontology):
     """Write a seg.nrrd that conforms to inner-ear-structures ontology."""
     lm = np.zeros(SHAPE, dtype=np.int16)
@@ -116,7 +130,7 @@ class TestSegmentationRoundTrip:
         # 1. Stage (simulate pull).
         meta = stage(stores_dir, staging_dir, force=True)
         assert 'scan-001' in meta
-        entry = _manifest_entry_from_stage(meta['scan-001'])
+        entry = _volume_metadata_from_stage(meta['scan-001'])
 
         # 2. Write annotation (simulate Slicer).
         store_dir = staging_dir / 'scan-001'
@@ -147,7 +161,7 @@ class TestSegmentationRoundTrip:
         self, stores_dir, staging_dir, inner_ear_ontology
     ):
         meta = stage(stores_dir, staging_dir, force=True)
-        entry = _manifest_entry_from_stage(meta['scan-001'])
+        entry = _volume_metadata_from_stage(meta['scan-001'])
 
         # Write seg with labels NOT in the ontology.
         store_dir = staging_dir / 'scan-001'
@@ -193,16 +207,7 @@ class TestLandmarkRoundTrip:
 
     def test_full_cycle(self, stores_dir, staging_dir, landmark_ontology):
         meta = stage(stores_dir, staging_dir, force=True)
-        entry = _manifest_entry_from_stage(meta['scan-001'])
-        entry = RemoteManifestEntry(
-            status=entry.status,
-            raw_checksum=entry.raw_checksum,
-            shape=entry.shape,
-            spacing_mm=entry.spacing_mm,
-            origin_lps=entry.origin_lps,
-            space_directions=entry.space_directions,
-            expected_ontologies=['inner-ear-landmarks'],
-        )
+        entry = _volume_metadata_from_stage(meta['scan-001'])
 
         store_dir = staging_dir / 'scan-001'
         lmk_path = _write_valid_lmk(store_dir)
@@ -286,7 +291,7 @@ class TestSpatialMetadataIntegrity:
         self, stores_dir, staging_dir, inner_ear_ontology
     ):
         meta = stage(stores_dir, staging_dir, force=True)
-        entry = _manifest_entry_from_stage(meta['scan-001'])
+        entry = _volume_metadata_from_stage(meta['scan-001'])
 
         store_dir = staging_dir / 'scan-001'
         lm = np.zeros(SHAPE, dtype=np.int16)
@@ -496,7 +501,7 @@ class TestOntologyEnforcementE2E:
     ):
         """Constrained ontology requires cochlea+vestibule+semicircular_canals."""
         meta = stage(stores_dir, staging_dir, force=True)
-        entry = _manifest_entry_from_stage(meta['scan-001'])
+        entry = _volume_metadata_from_stage(meta['scan-001'])
 
         store_dir = staging_dir / 'scan-001'
         lm = np.zeros(SHAPE, dtype=np.int16)
@@ -515,16 +520,7 @@ class TestOntologyEnforcementE2E:
         self, stores_dir, staging_dir, unconstrained_ontology
     ):
         meta = stage(stores_dir, staging_dir, force=True)
-        entry = _manifest_entry_from_stage(meta['scan-001'])
-        entry = RemoteManifestEntry(
-            status=entry.status,
-            raw_checksum=entry.raw_checksum,
-            shape=entry.shape,
-            spacing_mm=entry.spacing_mm,
-            origin_lps=entry.origin_lps,
-            space_directions=entry.space_directions,
-            expected_ontologies=['unconstrained'],
-        )
+        entry = _volume_metadata_from_stage(meta['scan-001'])
 
         store_dir = staging_dir / 'scan-001'
         lm = np.zeros(SHAPE, dtype=np.int16)

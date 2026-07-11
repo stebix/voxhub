@@ -200,9 +200,9 @@ def test_benchmark_pynrrd_write(benchmark, tmp_path, bench_data, bench_header):
 
 
 def test_handrolled_faster_than_pynrrd(tmp_path, bench_data, bench_header):
-    """Hand-rolled writer is at least 10× faster than pynrrd for large volumes.
+    """Hand-rolled writer is at least 10x faster than pynrrd for large volumes.
 
-    The docstring in extraction.py claims ~80×; 10× is used here as a
+    The docstring in extraction.py claims ~80x; 10x is used here as a
     conservative bound so the assertion holds on slow CI runners.
     """
     fast_path = tmp_path / 'fast.nrrd'
@@ -218,4 +218,4 @@ def test_handrolled_faster_than_pynrrd(tmp_path, bench_data, bench_header):
         number=n,
     )
     speedup = t_ref / t_fast
-    assert speedup >= 10, f'Expected >=10× speedup, got {speedup:.1f}×'
+    assert speedup >= 10, f'Expected >=10x speedup, got {speedup:.1f}x'
