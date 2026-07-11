@@ -153,3 +153,16 @@ class TestRemoteManifestEntryErrors:
         with pytest.raises(ManifestError) as excinfo:
             RemoteManifestEntry.from_dict(d)
         assert isinstance(excinfo.value.__cause__, KeyError)
+
+    def test_from_dict_invalid_status_raises_manifest_error(self):
+        """An out-of-vocabulary status must be rejected, not round-tripped."""
+        d: dict[str, object] = {
+            'status': 'bogus-status',
+            'raw_checksum': 'sha256:abc',
+            'shape': [10, 12, 14],
+            'spacing_mm': [0.5, 0.5, 0.5],
+            'origin_lps': [-5.0, -6.0, -7.0],
+            'space_directions': [[0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]],
+        }
+        with pytest.raises(ManifestError, match='status'):
+            RemoteManifestEntry.from_dict(d)

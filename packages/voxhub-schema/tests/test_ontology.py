@@ -1,9 +1,12 @@
 """Tests for ontology loading, versioning, and properties."""
 
+from pathlib import Path
+
 import pytest
 
 from voxhub_schema.ontology import (
     UNCONSTRAINED_SEGMENTATION,
+    _parse_ontology_file,
     list_ontologies,
     load_ontology,
 )
@@ -61,6 +64,13 @@ class TestLoadOntology:
     def test_nonexistent_version_raises(self):
         with pytest.raises(FileNotFoundError, match='version 99'):
             load_ontology('inner-ear-structures', version=99)
+
+    def test_invalid_type_raises(self, tmp_path: Path):
+        """An out-of-vocabulary ``type`` is rejected at parse time."""
+        path = tmp_path / 'bad-ontology-v1.yaml'
+        path.write_text('name: bad-ontology\nversion: 1\ntype: bogus\n')
+        with pytest.raises(ValueError, match='invalid ontology type'):
+            _parse_ontology_file(path)
 
 
 # ===================================================================
