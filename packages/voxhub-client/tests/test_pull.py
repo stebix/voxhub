@@ -191,6 +191,23 @@ class TestWriteTrustSidecar:
         with pytest.raises(OSError, match='read-only fs'):
             _write_trust_sidecar(session)
 
+    def test_refreshes_readonly_sidecar(self, tmp_path):
+        """A read-only sidecar from a prior pull is refreshed, not fatal.
+
+        ``_lock_session`` leaves ``.voxhub_pull.sha256`` at 0o444 after a
+        pull; a repeat pull to the same dest must be able to rewrite it.
+        """
+        session = tmp_path / 's'
+        _seed_session(session)
+        first = _write_trust_sidecar(session)
+        (session / '.voxhub_pull.sha256').chmod(0o444)
+
+        # A second write onto the read-only sidecar must succeed.
+        second = _write_trust_sidecar(session)
+        assert second == first
+        sidecar = (session / '.voxhub_pull.sha256').read_text().strip()
+        assert sidecar == _compute_sha256(session / '.voxhub_pull.json')
+
 
 # -- _lock_session -----------------------------------------------------------
 

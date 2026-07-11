@@ -5,7 +5,6 @@ Commands: set-server, set-identity, whoami, list-stores, pull.
 
 import argparse
 import hashlib
-import stat
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -97,6 +96,11 @@ def _write_trust_sidecar(session_dir: Path) -> str:
     manifest_path = session_dir / '.voxhub_pull.json'
     digest = _compute_sha256(manifest_path)
     sidecar_path = session_dir / '.voxhub_pull.sha256'
+    # A prior pull to this dest locks the sidecar read-only (0o444, see
+    # ``_lock_session``); ``write_text`` on it would raise ``PermissionError``.
+    # Refresh pulls are a normal workflow, so drop any stale sidecar before
+    # rewriting — the session root stays writable, so this always succeeds.
+    sidecar_path.unlink(missing_ok=True)
     sidecar_path.write_text(digest + '\n')
     return digest
 
@@ -140,7 +144,7 @@ def _lock_session(session_dir: Path, manifest: PullManifest) -> None:
                         f'[yellow]warning:[/yellow] could not lock {ref}: {exc}'
                     )
         try:
-            ref_dir.chmod(stat.S_IREAD | stat.S_IEXEC | 0o055)
+            ref_dir.chmod(0o555)
         except OSError as exc:
             console.print(f'[yellow]warning:[/yellow] could not lock {ref_dir}: {exc}')
 
