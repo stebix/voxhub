@@ -584,6 +584,43 @@ def _resolve_ontologies(
     return ontologies, issues
 
 
+def _rollback_annotation_group(zarr_path: Path, data_path: str) -> None:
+    """Delete a just-written annotation group after a post-write failure.
+
+    Upholds the invariant that *an annotation exists in a zarr store iff its
+    provenance line exists*: when ``record_provenance`` fails after the array
+    write has already committed, the orphaned annotation group must be
+    removed before the store is reported failed — otherwise a client retry
+    creates a duplicate.
+
+    Parameters
+    ----------
+    zarr_path : Path
+        Path to the ``.zarr`` store.
+    data_path : str
+        Array path of the just-written annotation
+        (``annotations/<slug>/<instance>/data``).  Its parent — the instance
+        group — is deleted.
+
+    Notes
+    -----
+    The caller must hold the per-store lock.  Deletion failures are
+    swallowed: the store is already being reported failed, and re-raising
+    here would mask the original provenance error.
+    """
+    instance_parts = data_path.strip('/').split('/')[:-1]
+    if not instance_parts:
+        return
+    try:
+        root = zarr.open_group(zarr_path, mode='r+')
+        parent = root
+        for part in instance_parts[:-1]:
+            parent = parent[part]
+        del parent[instance_parts[-1]]
+    except (KeyError, OSError):
+        pass
+
+
 def _run_integrate_annotations(args: argparse.Namespace) -> None:
     log = get_logger(command='integrate-annotations')
     t0 = time.monotonic()
@@ -854,20 +891,32 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             )
 
                             seg_checksum = compute_sha256(seg_file)
-                            record_provenance(
-                                stores_dir,
-                                store_name,
-                                seg_path,
-                                annotator_id=annotator_id,
-                                machine_id=machine_id,
-                                nano_id=nano_id,
-                                pull_session_id=pull_session_id,
-                                ontology=ont_name,
-                                ontology_version=ont_version,
-                                source_nrrd_checksum=seg_checksum,
-                                source_file=seg_file.name,
-                                issues=[i for i in seg_issues if i.severity == 'warning'],
-                            )
+                            # Invariant: an annotation exists in zarr iff its
+                            # provenance line exists.  The array write has
+                            # committed; if provenance recording fails, roll
+                            # back the just-created group (the per-store lock
+                            # is still held) before reporting the store failed,
+                            # so a client retry cannot create a duplicate.
+                            try:
+                                record_provenance(
+                                    stores_dir,
+                                    store_name,
+                                    seg_path,
+                                    annotator_id=annotator_id,
+                                    machine_id=machine_id,
+                                    nano_id=nano_id,
+                                    pull_session_id=pull_session_id,
+                                    ontology=ont_name,
+                                    ontology_version=ont_version,
+                                    source_nrrd_checksum=seg_checksum,
+                                    source_file=seg_file.name,
+                                    issues=[
+                                        i for i in seg_issues if i.severity == 'warning'
+                                    ],
+                                )
+                            except Exception:
+                                _rollback_annotation_group(zarr_path, seg_path)
+                                raise
 
                             annotations_written.append(
                                 {
@@ -962,20 +1011,32 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             )
 
                             lmk_checksum = compute_sha256(lmk_file)
-                            record_provenance(
-                                stores_dir,
-                                store_name,
-                                lmk_path,
-                                annotator_id=annotator_id,
-                                machine_id=machine_id,
-                                nano_id=nano_id,
-                                pull_session_id=pull_session_id,
-                                ontology=ont_name,
-                                ontology_version=ont_version,
-                                source_nrrd_checksum=lmk_checksum,
-                                source_file=lmk_file.name,
-                                issues=[i for i in lmk_issues if i.severity == 'warning'],
-                            )
+                            # Invariant: an annotation exists in zarr iff its
+                            # provenance line exists.  The array write has
+                            # committed; if provenance recording fails, roll
+                            # back the just-created group (the per-store lock
+                            # is still held) before reporting the store failed,
+                            # so a client retry cannot create a duplicate.
+                            try:
+                                record_provenance(
+                                    stores_dir,
+                                    store_name,
+                                    lmk_path,
+                                    annotator_id=annotator_id,
+                                    machine_id=machine_id,
+                                    nano_id=nano_id,
+                                    pull_session_id=pull_session_id,
+                                    ontology=ont_name,
+                                    ontology_version=ont_version,
+                                    source_nrrd_checksum=lmk_checksum,
+                                    source_file=lmk_file.name,
+                                    issues=[
+                                        i for i in lmk_issues if i.severity == 'warning'
+                                    ],
+                                )
+                            except Exception:
+                                _rollback_annotation_group(zarr_path, lmk_path)
+                                raise
 
                             annotations_written.append(
                                 {
