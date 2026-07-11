@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <rect width="1280" height="720" fill="#ffffff"/>
+
+  <!-- header -->
+  <rect x="64" y="50" width="16" height="16" rx="4" fill="#d97706"/>
+  <text x="92" y="67" font-size="30" font-weight="700" fill="#0f172a">Where annotations live — storage &amp; provenance</text>
+  <text x="92" y="93" font-size="15" fill="#64748b">Per-annotator subgroups inside each zarr store make work conflict-free and instantly queryable</text>
+  <rect x="1048" y="50" width="168" height="28" rx="14" fill="#fffbeb" stroke="#fde68a"/>
+  <text x="1132" y="69" font-size="13" font-weight="700" fill="#b45309" text-anchor="middle">STORAGE MODEL</text>
+
+  <!-- store tree card -->
+  <rect x="64" y="128" width="712" height="452" rx="14" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="86" y="150" width="16" height="16" rx="3" fill="#d97706"/>
+  <text x="112" y="164" font-size="16" font-weight="700" font-family="'SFMono-Regular',Consolas,monospace" fill="#92400e">gallivanting-groundhog.zarr</text>
+  <line x1="86" y1="180" x2="754" y2="180" stroke="#fde68a"/>
+
+  <!-- rows -->
+  <rect x="96" y="204" width="12" height="12" rx="2" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="120" y="215" font-size="13.5" font-weight="600" font-family="'SFMono-Regular',Consolas,monospace" fill="#334155">raw/</text>
+
+  <rect x="140" y="238" width="12" height="12" rx="2" fill="#e2e8f0" stroke="#64748b"/>
+  <text x="164" y="249" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#334155">full</text>
+  <text x="752" y="249" font-size="12" fill="#94a3b8" text-anchor="end">raw CT volume</text>
+
+  <rect x="96" y="272" width="12" height="12" rx="2" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="120" y="283" font-size="13.5" font-weight="600" font-family="'SFMono-Regular',Consolas,monospace" fill="#334155">annotations/</text>
+
+  <circle cx="146" cy="312" r="6" fill="#2563eb"/>
+  <text x="164" y="317" font-size="13.5" font-weight="700" font-family="'SFMono-Regular',Consolas,monospace" fill="#1e40af">alice-x7f2kp01/</text>
+  <text x="752" y="317" font-size="12" fill="#94a3b8" text-anchor="end">annotator subgroup</text>
+
+  <rect x="190" y="340" width="12" height="12" rx="2" fill="#fde68a" stroke="#d97706"/>
+  <text x="214" y="351" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#334155">inner-ear-structures-20260331-a3f1</text>
+  <text x="752" y="351" font-size="12" fill="#94a3b8" text-anchor="end">segmentation + attrs</text>
+
+  <rect x="190" y="374" width="12" height="12" rx="2" fill="#ddd6fe" stroke="#7c3aed"/>
+  <text x="214" y="385" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#334155">inner-ear-landmarks-20260331-b2c3</text>
+  <text x="752" y="385" font-size="12" fill="#94a3b8" text-anchor="end">landmarks + attrs</text>
+
+  <circle cx="146" cy="414" r="6" fill="#0d9488"/>
+  <text x="164" y="419" font-size="13.5" font-weight="700" font-family="'SFMono-Regular',Consolas,monospace" fill="#115e59">bob-k9m1r5tz/</text>
+  <text x="752" y="419" font-size="12" fill="#94a3b8" text-anchor="end">separate subgroup</text>
+
+  <rect x="190" y="442" width="12" height="12" rx="2" fill="#fde68a" stroke="#d97706"/>
+  <text x="214" y="453" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#334155">inner-ear-structures-20260401-c4d5</text>
+  <text x="752" y="453" font-size="12" fill="#94a3b8" text-anchor="end">segmentation + attrs</text>
+
+  <rect x="96" y="482" width="12" height="12" rx="2" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="120" y="493" font-size="13.5" font-weight="600" font-family="'SFMono-Regular',Consolas,monospace" fill="#334155">.meta/</text>
+
+  <rect x="140" y="516" width="12" height="12" rx="2" fill="#fcd34d" stroke="#b45309"/>
+  <text x="164" y="527" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#334155">provenance.jsonl</text>
+  <text x="752" y="527" font-size="12" fill="#94a3b8" text-anchor="end">append-only journal</text>
+
+  <text x="120" y="562" font-size="12.5" fill="#64748b">path:  annotations/&lt;annotator&gt;-&lt;nano-id&gt;/&lt;ontology&gt;-&lt;date&gt;-&lt;random&gt;/</text>
+
+  <!-- right panel -->
+  <rect x="800" y="128" width="416" height="452" rx="14" fill="#fffbeb" stroke="#fde68a"/>
+  <text x="822" y="164" font-size="18" font-weight="700" fill="#92400e">Why this layout wins</text>
+  <text x="822" y="187" font-size="12.5" fill="#475569">One question: every (volume, label) pair for an ontology</text>
+
+  <text x="822" y="222" font-size="12.5" font-weight="700" fill="#334155">across all stores</text>
+  <rect x="822" y="230" width="372" height="32" rx="8" fill="#0f172a"/>
+  <text x="838" y="251" font-size="12" fill="#e2e8f0" font-family="'SFMono-Regular',Consolas,monospace">*/annotations/*/inner-ear-structures-*/</text>
+
+  <text x="822" y="290" font-size="12.5" font-weight="700" fill="#334155">all of one annotator's work</text>
+  <rect x="822" y="298" width="372" height="32" rx="8" fill="#0f172a"/>
+  <text x="838" y="319" font-size="12" fill="#e2e8f0" font-family="'SFMono-Regular',Consolas,monospace">*/annotations/alice-*/</text>
+
+  <text x="822" y="358" font-size="12.5" font-weight="700" fill="#334155">one store's annotations</text>
+  <rect x="822" y="366" width="372" height="32" rx="8" fill="#0f172a"/>
+  <text x="838" y="387" font-size="12" fill="#e2e8f0" font-family="'SFMono-Regular',Consolas,monospace">&lt;store&gt;.zarr/annotations/</text>
+
+  <line x1="822" y1="426" x2="1194" y2="426" stroke="#fde68a"/>
+  <text x="822" y="452" font-size="12.5" fill="#475569">The provenance journal is the authoritative</text>
+  <text x="822" y="470" font-size="12.5" fill="#475569">index; globs are a zero-cost convenience —</text>
+  <text x="822" y="488" font-size="12.5" fill="#475569">neither needs to open zarr metadata.</text>
+
+  <text x="822" y="524" font-size="12.5" fill="#475569">Every array also carries full provenance in</text>
+  <text x="822" y="542" font-size="12.5" fill="#475569">its attrs: author, ontology + version,</text>
+  <text x="822" y="560" font-size="12.5" fill="#475569">checksum, timestamp, coordinate system.</text>
+
+  <!-- concurrency banner -->
+  <rect x="64" y="600" width="1152" height="72" rx="12" fill="#f0fdfa" stroke="#99f6e4"/>
+  <text x="88" y="632" font-size="16" font-weight="700" fill="#115e59">Concurrency-safe by construction</text>
+  <text x="88" y="658" font-size="13.5" fill="#334155">Each annotator writes to their own subgroup, guarded by a per-store lock — 2–5 annotators share one store with zero conflicts and no lost attribution.</text>
+
+  <text x="64" y="704" font-size="12" fill="#94a3b8">voxhub — collaborative volumetric annotation</text>
+</svg>

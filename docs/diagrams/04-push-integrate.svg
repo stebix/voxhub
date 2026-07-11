@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="pi-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>
+    <marker id="pi-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+  </defs>
+
+  <rect width="1280" height="720" fill="#ffffff"/>
+
+  <!-- header -->
+  <rect x="64" y="50" width="16" height="16" rx="4" fill="#7c3aed"/>
+  <text x="92" y="67" font-size="30" font-weight="700" fill="#0f172a">Push &amp; integrate — with a validation gate</text>
+  <text x="92" y="93" font-size="15" fill="#64748b">Annotations are validated before upload, then written into zarr with full provenance</text>
+  <rect x="1026" y="50" width="190" height="28" rx="14" fill="#f5f3ff" stroke="#ddd6fe"/>
+  <text x="1121" y="69" font-size="13" font-weight="700" fill="#7c3aed" text-anchor="middle">PUSH + INTEGRATE</text>
+
+  <!-- command pill -->
+  <rect x="64" y="124" width="360" height="34" rx="8" fill="#0f172a"/>
+  <text x="84" y="147" font-size="14" fill="#e2e8f0" font-family="'SFMono-Regular',Consolas,'Liberation Mono',monospace">voxhub push  ./staging</text>
+
+  <!-- step cards -->
+  <!-- 1 identity -->
+  <rect x="64" y="190" width="208" height="200" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="64" y="190" width="6" height="200" rx="3" fill="#7c3aed"/>
+  <circle cx="100" cy="224" r="14" fill="#7c3aed"/><text x="100" y="229" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+  <text x="124" y="229" font-size="16" font-weight="700" fill="#0f172a">identity</text>
+  <rect x="84" y="246" width="80" height="22" rx="11" fill="#f5f3ff"/><text x="124" y="261" font-size="11" font-weight="700" fill="#7c3aed" text-anchor="middle">client</text>
+  <text x="84" y="298" font-size="12.5" fill="#475569">Who is annotating:</text>
+  <text x="84" y="318" font-size="12.5" fill="#475569">annotator_id, machine_id,</text>
+  <text x="84" y="338" font-size="12.5" fill="#475569">nano_id. No overrides.</text>
+
+  <!-- 2 validate (gate) -->
+  <rect x="292" y="190" width="208" height="200" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+  <rect x="292" y="190" width="6" height="200" rx="3" fill="#d97706"/>
+  <circle cx="328" cy="224" r="14" fill="#d97706"/><text x="328" y="229" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+  <text x="352" y="229" font-size="16" font-weight="700" fill="#0f172a">validate</text>
+  <rect x="312" y="246" width="120" height="22" rx="11" fill="#fef3c7"/><text x="372" y="261" font-size="11" font-weight="700" fill="#b45309" text-anchor="middle">client · gate</text>
+  <text x="312" y="298" font-size="12.5" fill="#475569">Pre-flight checks: shape,</text>
+  <text x="312" y="318" font-size="12.5" fill="#475569">spatial fit, label integrity,</text>
+  <text x="312" y="338" font-size="12.5" fill="#475569">ontology conformance.</text>
+
+  <!-- 3 push -->
+  <rect x="520" y="190" width="208" height="200" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="520" y="190" width="6" height="200" rx="3" fill="#94a3b8"/>
+  <circle cx="556" cy="224" r="14" fill="#94a3b8"/><text x="556" y="229" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+  <text x="580" y="229" font-size="16" font-weight="700" fill="#0f172a">rsync push</text>
+  <rect x="540" y="246" width="120" height="22" rx="11" fill="#f1f5f9"/><text x="600" y="261" font-size="11" font-weight="700" fill="#475569" text-anchor="middle">client to server</text>
+  <text x="540" y="298" font-size="12.5" fill="#475569">Compute checksums and</text>
+  <text x="540" y="318" font-size="12.5" fill="#475569">upload to a server-side</text>
+  <text x="540" y="338" font-size="12.5" fill="#475569">temp directory.</text>
+
+  <!-- 4 integrate -->
+  <rect x="748" y="190" width="208" height="200" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="748" y="190" width="6" height="200" rx="3" fill="#0d9488"/>
+  <circle cx="784" cy="224" r="14" fill="#0d9488"/><text x="784" y="229" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+  <text x="808" y="229" font-size="16" font-weight="700" fill="#0f172a">integrate</text>
+  <rect x="768" y="246" width="80" height="22" rx="11" fill="#f0fdfa"/><text x="808" y="261" font-size="11" font-weight="700" fill="#0d9488" text-anchor="middle">server</text>
+  <text x="768" y="298" font-size="12.5" fill="#475569">Verify checksums; write to</text>
+  <text x="768" y="318" font-size="12.5" fill="#475569">an annotator-scoped group</text>
+  <text x="768" y="338" font-size="12.5" fill="#475569">under a per-store lock.</text>
+
+  <!-- 5 provenance -->
+  <rect x="976" y="190" width="208" height="200" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="976" y="190" width="6" height="200" rx="3" fill="#d97706"/>
+  <circle cx="1012" cy="224" r="14" fill="#d97706"/><text x="1012" y="229" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">5</text>
+  <text x="1036" y="229" font-size="16" font-weight="700" fill="#0f172a">provenance</text>
+  <rect x="996" y="246" width="80" height="22" rx="11" fill="#fffbeb"/><text x="1036" y="261" font-size="11" font-weight="700" fill="#b45309" text-anchor="middle">server</text>
+  <text x="996" y="298" font-size="12.5" fill="#475569">Record lineage in zarr</text>
+  <text x="996" y="318" font-size="12.5" fill="#475569">attrs and a provenance</text>
+  <text x="996" y="338" font-size="12.5" fill="#475569">journal.</text>
+
+  <!-- arrows between cards -->
+  <line x1="274" y1="290" x2="290" y2="290" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#pi-slate)"/>
+  <line x1="502" y1="290" x2="518" y2="290" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#pi-slate)"/>
+  <line x1="730" y1="290" x2="746" y2="290" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#pi-slate)"/>
+  <line x1="958" y1="290" x2="974" y2="290" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#pi-slate)"/>
+
+  <!-- abort branch -->
+  <line x1="396" y1="392" x2="396" y2="436" stroke="#dc2626" stroke-width="2.2" marker-end="url(#pi-red)"/>
+  <text x="406" y="418" font-size="11.5" font-weight="700" fill="#dc2626">on error</text>
+  <rect x="292" y="440" width="208" height="92" rx="12" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="312" y="468" font-size="14" font-weight="700" fill="#b91c1c">Stop on error</text>
+  <text x="312" y="491" font-size="12" fill="#7f1d1d">No non-conformant data ever</text>
+  <text x="312" y="509" font-size="12" fill="#7f1d1d">reaches the store. Fix locally</text>
+  <text x="312" y="527" font-size="12" fill="#7f1d1d">and retry (override: --force).</text>
+
+  <!-- identity value note -->
+  <rect x="64" y="440" width="208" height="92" rx="12" fill="#f5f3ff" stroke="#ddd6fe"/>
+  <text x="84" y="468" font-size="14" font-weight="700" fill="#5b21b6">Trustworthy attribution</text>
+  <text x="84" y="491" font-size="12" fill="#475569">Identity can't be overridden,</text>
+  <text x="84" y="509" font-size="12" fill="#475569">so every annotation is tied to</text>
+  <text x="84" y="527" font-size="12" fill="#475569">a real, consistent author.</text>
+
+  <!-- provenance record -->
+  <text x="520" y="460" font-size="13" font-weight="700" fill="#64748b">Recorded provenance — zarr attrs + .meta/provenance.jsonl</text>
+  <rect x="520" y="470" width="664" height="92" rx="10" fill="#0f172a"/>
+  <text x="540" y="498" font-size="11.5" fill="#e2e8f0" font-family="'SFMono-Regular',Consolas,monospace">{"event":"push","store":"gallivanting-groundhog",</text>
+  <text x="540" y="518" font-size="11.5" fill="#e2e8f0" font-family="'SFMono-Regular',Consolas,monospace"> "annotation_path":"annotations/alice-x7f2kp01/inner-ear-structures-...",</text>
+  <text x="540" y="538" font-size="11.5" fill="#e2e8f0" font-family="'SFMono-Regular',Consolas,monospace"> "annotator_id":"alice","ontology_version":1,"timestamp":"2026-03-31T15:00Z"}</text>
+
+  <text x="64" y="700" font-size="12" fill="#94a3b8">voxhub — collaborative volumetric annotation</text>
+</svg>

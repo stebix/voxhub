@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="ov-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    <marker id="ov-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0d9488"/></marker>
+    <marker id="ov-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>
+  </defs>
+
+  <rect width="1280" height="720" fill="#ffffff"/>
+
+  <!-- header -->
+  <rect x="64" y="50" width="16" height="16" rx="4" fill="#2563eb"/>
+  <text x="92" y="67" font-size="30" font-weight="700" fill="#0f172a">voxhub at a glance</text>
+  <text x="92" y="93" font-size="15" fill="#64748b">Collaborative volumetric annotation over plain SSH — pull, annotate, push, integrate</text>
+  <rect x="1086" y="50" width="130" height="28" rx="14" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="1151" y="69" font-size="13" font-weight="700" fill="#2563eb" text-anchor="middle">OVERVIEW</text>
+
+  <!-- left card: annotator -->
+  <rect x="80" y="150" width="300" height="250" rx="16" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+  <text x="230" y="185" font-size="17" font-weight="700" fill="#0f172a" text-anchor="middle">Annotator workstation</text>
+  <g transform="translate(120,232)">
+    <circle cx="0" cy="4" r="13" fill="#2563eb"/>
+    <path d="M-17,46 C-17,24 17,24 17,46 Z" fill="#2563eb"/>
+  </g>
+  <text x="170" y="248" font-size="15" font-weight="600" fill="#0f172a">3D Slicer</text>
+  <text x="170" y="270" font-size="12.5" fill="#64748b">paint segments / place landmarks</text>
+  <text x="170" y="320" font-size="15" font-weight="600" fill="#0f172a">voxhub CLI (client)</text>
+  <text x="170" y="342" font-size="12.5" fill="#64748b">pull · validate · push</text>
+
+  <!-- right card: server -->
+  <rect x="900" y="150" width="300" height="250" rx="16" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <text x="1050" y="185" font-size="17" font-weight="700" fill="#0f172a" text-anchor="middle">voxhub server</text>
+  <g transform="translate(930,225)">
+    <rect x="0" y="0" width="56" height="20" rx="4" fill="#0d9488"/>
+    <rect x="0" y="26" width="56" height="20" rx="4" fill="#0d9488"/>
+    <circle cx="11" cy="10" r="3" fill="#ffffff"/>
+    <circle cx="11" cy="36" r="3" fill="#ffffff"/>
+  </g>
+  <text x="1005" y="248" font-size="15" font-weight="600" fill="#0f172a">zarr stores</text>
+  <text x="1005" y="270" font-size="12.5" fill="#64748b">raw volumes + annotations</text>
+  <text x="1005" y="320" font-size="15" font-weight="600" fill="#0f172a">integrate + provenance</text>
+  <text x="1005" y="342" font-size="12.5" fill="#64748b">ontology-scoped, audited</text>
+
+  <!-- transport -->
+  <line x1="895" y1="232" x2="392" y2="232" stroke="#2563eb" stroke-width="2.5" marker-end="url(#ov-blue)"/>
+  <text x="643" y="220" font-size="13" font-weight="600" fill="#1e40af" text-anchor="middle">1 · pull — staged volumes (NRRD)</text>
+  <line x1="385" y1="320" x2="888" y2="320" stroke="#0d9488" stroke-width="2.5" marker-end="url(#ov-teal)"/>
+  <text x="643" y="343" font-size="13" font-weight="600" fill="#115e59" text-anchor="middle">2 · push — validated annotations</text>
+  <rect x="543" y="258" width="200" height="36" rx="18" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="643" y="281" font-size="13.5" font-weight="700" fill="#334155" text-anchor="middle">SSH + rsync</text>
+  <text x="643" y="312" font-size="11.5" fill="#94a3b8" text-anchor="middle">no open ports · no new infrastructure</text>
+
+  <!-- cycle ribbon -->
+  <text x="80" y="452" font-size="15" font-weight="700" fill="#0f172a">The annotation cycle</text>
+
+  <!-- step 1 -->
+  <rect x="80" y="470" width="250" height="120" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+  <circle cx="108" cy="500" r="14" fill="#2563eb"/>
+  <text x="108" y="505" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+  <text x="134" y="506" font-size="19" font-weight="700" fill="#0f172a">Pull</text>
+  <text x="100" y="538" font-size="12.5" fill="#475569">Fetch the volumes you</text>
+  <text x="100" y="557" font-size="12.5" fill="#475569">need to annotate, locally.</text>
+
+  <!-- step 2 -->
+  <rect x="370" y="470" width="250" height="120" rx="14" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.5"/>
+  <circle cx="398" cy="500" r="14" fill="#0d9488"/>
+  <text x="398" y="505" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+  <text x="424" y="506" font-size="19" font-weight="700" fill="#0f172a">Annotate</text>
+  <text x="390" y="538" font-size="12.5" fill="#475569">Work in 3D Slicer,</text>
+  <text x="390" y="557" font-size="12.5" fill="#475569">guided by an ontology.</text>
+
+  <!-- step 3 -->
+  <rect x="660" y="470" width="250" height="120" rx="14" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+  <circle cx="688" cy="500" r="14" fill="#7c3aed"/>
+  <text x="688" y="505" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+  <text x="714" y="506" font-size="19" font-weight="700" fill="#0f172a">Push</text>
+  <text x="680" y="538" font-size="12.5" fill="#475569">Pre-flight validation,</text>
+  <text x="680" y="557" font-size="12.5" fill="#475569">then upload.</text>
+
+  <!-- step 4 -->
+  <rect x="950" y="470" width="250" height="120" rx="14" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+  <circle cx="978" cy="500" r="14" fill="#d97706"/>
+  <text x="978" y="505" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+  <text x="1004" y="506" font-size="19" font-weight="700" fill="#0f172a">Integrate</text>
+  <text x="970" y="538" font-size="12.5" fill="#475569">Write to zarr with</text>
+  <text x="970" y="557" font-size="12.5" fill="#475569">full provenance.</text>
+
+  <!-- arrows between steps -->
+  <line x1="334" y1="530" x2="366" y2="530" stroke="#94a3b8" stroke-width="2" marker-end="url(#ov-slate)"/>
+  <line x1="624" y1="530" x2="656" y2="530" stroke="#94a3b8" stroke-width="2" marker-end="url(#ov-slate)"/>
+  <line x1="914" y1="530" x2="946" y2="530" stroke="#94a3b8" stroke-width="2" marker-end="url(#ov-slate)"/>
+
+  <!-- loop back -->
+  <path d="M1075,590 V625 H205 V598" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#ov-slate)"/>
+  <text x="640" y="645" font-size="12" fill="#94a3b8" text-anchor="middle">repeatable across sessions — many annotators, one shared store, no conflicts</text>
+
+  <text x="64" y="700" font-size="12" fill="#94a3b8">voxhub — collaborative volumetric annotation</text>
+</svg>

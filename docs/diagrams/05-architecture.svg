@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="ar-indigo" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#4f46e5"/></marker>
+  </defs>
+
+  <rect width="1280" height="720" fill="#ffffff"/>
+
+  <!-- header -->
+  <rect x="64" y="50" width="16" height="16" rx="4" fill="#4f46e5"/>
+  <text x="92" y="67" font-size="30" font-weight="700" fill="#0f172a">How it's built — three packages</text>
+  <text x="92" y="93" font-size="15" fill="#64748b">A shared contract in the middle; the server side and the client side never touch each other</text>
+  <rect x="1056" y="50" width="160" height="28" rx="14" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="1136" y="69" font-size="13" font-weight="700" fill="#4f46e5" text-anchor="middle">ARCHITECTURE</text>
+
+  <!-- schema (shared contract) -->
+  <rect x="440" y="140" width="400" height="162" rx="14" fill="#ffffff" stroke="#4f46e5" stroke-width="2"/>
+  <text x="464" y="176" font-size="20" font-weight="700" fill="#0f172a">voxhub-schema</text>
+  <text x="464" y="197" font-size="12.5" fill="#64748b">the shared contract — what crosses the wire + the rules</text>
+  <rect x="460" y="212" width="172" height="28" rx="8" fill="#eef2ff"/><text x="546" y="231" font-size="12.5" font-weight="600" fill="#3730a3" text-anchor="middle">protocol models</text>
+  <rect x="648" y="212" width="172" height="28" rx="8" fill="#eef2ff"/><text x="734" y="231" font-size="12" font-weight="600" fill="#3730a3" text-anchor="middle">versioned ontologies</text>
+  <rect x="460" y="248" width="172" height="28" rx="8" fill="#eef2ff"/><text x="546" y="267" font-size="12.5" font-weight="600" fill="#3730a3" text-anchor="middle">pre-flight validation</text>
+  <rect x="648" y="248" width="172" height="28" rx="8" fill="#eef2ff"/><text x="734" y="267" font-size="12.5" font-weight="600" fill="#3730a3" text-anchor="middle">nano-id · manifest</text>
+  <text x="464" y="292" font-size="12" fill="#94a3b8">depends on:  attrs · numpy · pynrrd</text>
+
+  <!-- core -->
+  <rect x="80" y="372" width="520" height="268" rx="14" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <text x="104" y="406" font-size="20" font-weight="700" fill="#0f172a">voxhub-core</text>
+  <text x="104" y="426" font-size="12.5" fill="#64748b">domain library + server entrypoint  ·  runs on the server</text>
+
+  <rect x="100" y="440" width="262" height="158" rx="10" fill="#f0fdfa" stroke="#99f6e4"/>
+  <text x="116" y="462" font-size="12" font-weight="700" fill="#115e59">LOCAL DOMAIN</text>
+  <text x="116" y="486" font-size="12.5" fill="#334155">dicom · export · staging</text>
+  <text x="116" y="508" font-size="12.5" fill="#334155">integrate · audit · catalog</text>
+  <text x="116" y="530" font-size="12.5" fill="#334155">slicer · naming · cli</text>
+  <text x="116" y="566" font-size="11.5" fill="#64748b">never imports server code</text>
+
+  <rect x="388" y="440" width="192" height="158" rx="10" fill="#ecfeff" stroke="#a5f3fc"/>
+  <text x="404" y="462" font-size="12" font-weight="700" fill="#155e75">server/</text>
+  <text x="404" y="486" font-size="12.5" fill="#334155">cli (SSH-invoked)</text>
+  <text x="404" y="508" font-size="12.5" fill="#334155">provenance</text>
+  <text x="404" y="530" font-size="12.5" fill="#334155">locks</text>
+  <text x="404" y="552" font-size="12.5" fill="#334155">logging</text>
+
+  <line x1="375" y1="448" x2="375" y2="590" stroke="#0d9488" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <text x="375" y="612" font-size="11" font-weight="700" fill="#0d9488" text-anchor="middle">HARD WALL</text>
+  <text x="375" y="628" font-size="11" fill="#94a3b8" text-anchor="middle">deps: zarr · pydicom · structlog · filelock</text>
+
+  <!-- client -->
+  <rect x="680" y="372" width="520" height="268" rx="14" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+  <text x="704" y="406" font-size="20" font-weight="700" fill="#0f172a">voxhub-client</text>
+  <text x="704" y="426" font-size="12.5" fill="#64748b">user-facing remote CLI  ·  runs on the annotator's machine</text>
+
+  <rect x="700" y="440" width="480" height="158" rx="10" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="716" y="462" font-size="12" font-weight="700" fill="#1e40af">CLI + TRANSPORT</text>
+  <text x="716" y="486" font-size="12.5" fill="#334155">cli — pull · push · remote-catalog · whoami · set-identity</text>
+  <text x="716" y="508" font-size="12.5" fill="#334155">ssh — SshRunner (protocol check, timeouts)</text>
+  <text x="716" y="530" font-size="12.5" fill="#334155">transfer — rsync pull/push (scp fallback)</text>
+  <text x="716" y="552" font-size="12.5" fill="#334155">identity · manifest</text>
+  <text x="716" y="582" font-size="11.5" fill="#64748b">deps: rich  (+ system ssh / rsync)  ·  no zarr, no pydicom</text>
+
+  <!-- dependency arrows -->
+  <line x1="338" y1="372" x2="540" y2="304" stroke="#4f46e5" stroke-width="2.2" marker-end="url(#ar-indigo)"/>
+  <line x1="942" y1="372" x2="740" y2="304" stroke="#4f46e5" stroke-width="2.2" marker-end="url(#ar-indigo)"/>
+  <text x="404" y="346" font-size="12" font-weight="700" fill="#4f46e5" transform="rotate(-18 404 346)">depends on</text>
+  <text x="876" y="346" font-size="12" font-weight="700" fill="#4f46e5" transform="rotate(18 876 346)">depends on</text>
+
+  <!-- no dependency between core & client -->
+  <line x1="600" y1="506" x2="680" y2="506" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="5 5"/>
+  <circle cx="640" cy="506" r="13" fill="#ffffff" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="632" y1="514" x2="648" y2="498" stroke="#94a3b8" stroke-width="2"/>
+  <text x="640" y="544" font-size="11.5" font-weight="700" fill="#64748b" text-anchor="middle">no mutual</text>
+  <text x="640" y="560" font-size="11.5" font-weight="700" fill="#64748b" text-anchor="middle">dependency</text>
+
+  <text x="64" y="700" font-size="12" fill="#94a3b8">voxhub — collaborative volumetric annotation</text>
+</svg>
