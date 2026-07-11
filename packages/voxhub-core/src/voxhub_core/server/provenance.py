@@ -28,6 +28,7 @@ def record_provenance(
     ontology_version: int,
     source_nrrd_checksum: str,
     source_file: str,
+    identity_source: str | None = None,
     issues: list[IssueRecord] | None = None,
 ) -> None:
     """Record full provenance for an annotation integration.
@@ -58,6 +59,12 @@ def record_provenance(
         SHA-256 checksum of the source NRRD file.
     source_file : str
         Original annotation filename.
+    identity_source : str | None
+        How the ``annotator_id`` was determined: ``'ssh_key'`` (bound to
+        the connecting SSH key via ``VOXHUB_ANNOTATOR``), ``'flag'``
+        (client-supplied ``--annotator-id``), or ``None``.  Recorded as an
+        additive field in both the zarr attrs and the JSONL line only when
+        supplied; readers must tolerate its absence on older records.
     issues : list[IssueRecord] | None
         Validation issues (warnings that were accepted).
     """
@@ -82,6 +89,9 @@ def record_provenance(
         'ontology': ontology,
         'ontology_version': ontology_version,
     }
+    # Additive field: only stamp when known so pre-B records stay unchanged.
+    if identity_source is not None:
+        provenance_attrs['identity_source'] = identity_source
     node.update_attributes(provenance_attrs)
 
     # Append to provenance JSONL index.
@@ -90,7 +100,7 @@ def record_provenance(
     jsonl_path = meta_dir / 'provenance.jsonl'
 
     session_id = f'dt-push-{datetime.now(UTC).strftime("%Y%m%dT%H%M%S")}'
-    record = {
+    record: dict[str, Any] = {
         'event': 'push',
         'session_id': session_id,
         'pull_session_id': pull_session_id,
@@ -105,6 +115,10 @@ def record_provenance(
             {'severity': i.severity, 'message': i.message} for i in (issues or [])
         ],
     }
+    # Additive field: only present when known so older readers using .get and
+    # pre-B lines round-trip unchanged.
+    if identity_source is not None:
+        record['identity_source'] = identity_source
 
     with open(jsonl_path, 'a') as f:
         f.write(json.dumps(record) + '\n')
