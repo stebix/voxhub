@@ -7,10 +7,8 @@ with human-readable names (e.g. ``gallivanting-groundhog.zarr``).
 import json
 import os
 import random
-from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import Queue
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
 
 import attrs
 import numpy as np
@@ -190,6 +188,44 @@ def flatten_to_volumes(
     return result
 
 
+def _check_conflicts(output_dir: Path, names: list[str]) -> None:
+    """Raise if any target store path or the manifest already exists.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Parent directory for the ``<name>.zarr`` stores and ``manifest.json``.
+    names : list[str]
+        Generated store names (without the ``.zarr`` suffix).
+
+    Raises
+    ------
+    FileExistsError
+        If any ``<name>.zarr`` path or ``manifest.json`` already exists.
+    """
+    conflicts = [
+        str(output_dir / f'{name}.zarr')
+        for name in names
+        if (output_dir / f'{name}.zarr').exists()
+    ]
+    manifest_path = output_dir / 'manifest.json'
+    if manifest_path.exists():
+        conflicts.append(str(manifest_path))
+    if conflicts:
+        msg = (
+            'Refusing to overwrite existing paths:\n'
+            + '\n'.join(f'  - {c}' for c in conflicts)
+            + '\nPass force_write=True to overwrite.'
+        )
+        raise FileExistsError(msg)
+
+
+def _write_manifest(output_dir: Path, mapping: dict[str, str]) -> None:
+    """Write ``mapping`` to ``<output_dir>/manifest.json`` as indented JSON."""
+    manifest_path = output_dir / 'manifest.json'
+    manifest_path.write_text(json.dumps(mapping, indent=2))
+
+
 def export_zarr_collection(
     volumes: dict[str, DicomVolume],
     output_dir: str | Path,
@@ -223,21 +259,7 @@ def export_zarr_collection(
     mapping: dict[str, str] = dict(zip(sorted_keys, names, strict=False))
 
     if not force_write:
-        manifest_path = output_dir / 'manifest.json'
-        conflicts = [
-            str(output_dir / f'{name}.zarr')
-            for name in names
-            if (output_dir / f'{name}.zarr').exists()
-        ]
-        if manifest_path.exists():
-            conflicts.append(str(manifest_path))
-        if conflicts:
-            msg = (
-                'Refusing to overwrite existing paths:\n'
-                + '\n'.join(f'  - {c}' for c in conflicts)
-                + '\nPass force_write=True to overwrite.'
-            )
-            raise FileExistsError(msg)
+        _check_conflicts(output_dir, names)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -248,22 +270,21 @@ def export_zarr_collection(
             force_write=force_write,
         )
 
-    manifest_path = output_dir / 'manifest.json'
-    manifest_path.write_text(json.dumps(mapping, indent=2))
+    _write_manifest(output_dir, mapping)
     return mapping
 
 
 # -- Parallel export ---------------------------------------------------------
 
 
-def _worker_fn(task: ExportTask, progress_queue: Queue[Any]) -> ExportResult:
-    """Worker: load DICOMs, apply LUT, write zarr."""
-    try:
-        datasets: list[pydicom.Dataset] = []
-        for p in task.dicom_paths:
-            datasets.append(pydicom.dcmread(p))
-            progress_queue.put(('slice_done', task.key))
+def _worker_fn(task: ExportTask) -> ExportResult:
+    """Worker: load DICOMs, apply LUT, write zarr.
 
+    Returns an :class:`ExportResult` in all cases; failures are reported via
+    its ``error`` field rather than raised, so the parent can aggregate them.
+    """
+    try:
+        datasets = [pydicom.dcmread(p) for p in task.dicom_paths]
         assert datasets
 
         sort_indices, geom_metadata = compute_slice_geometry(datasets)
@@ -279,15 +300,13 @@ def _worker_fn(task: ExportTask, progress_queue: Queue[Any]) -> ExportResult:
         if task.series_directory is not None:
             metadata['series_directory'] = task.series_directory
 
-        root = zarr.open_group(task.output_path, mode='w', zarr_format=3)
-        raw = root.create_group('raw')
-        arr = raw.create_array('full', data=volume)
-        arr.update_attributes(_sanitize_for_json(metadata))  # type: ignore[arg-type]
-
-        progress_queue.put(('dir_done', task.key, str(volume.shape)))
+        export_zarr(
+            DicomVolume(volume=volume, metadata=metadata),
+            task.output_path,
+            force_write=True,
+        )
         return ExportResult(key=task.key, name=task.name, shape=volume.shape)
     except Exception as exc:
-        progress_queue.put(('error', task.key, str(exc)))
         return ExportResult(key=task.key, name=task.name, shape=(), error=str(exc))
 
 
@@ -370,26 +389,11 @@ def export_zarr_collection_parallel(
     key_to_name: dict[str, str] = dict(zip(sorted_keys, names, strict=False))
 
     if not force_write:
-        manifest_path = output_dir / 'manifest.json'
-        conflicts = [
-            str(output_dir / f'{name}.zarr')
-            for name in names
-            if (output_dir / f'{name}.zarr').exists()
-        ]
-        if manifest_path.exists():
-            conflicts.append(str(manifest_path))
-        if conflicts:
-            msg = (
-                'Refusing to overwrite existing paths:\n'
-                + '\n'.join(f'  - {c}' for c in conflicts)
-                + '\nPass force_write=True to overwrite.'
-            )
-            raise FileExistsError(msg)
+        _check_conflicts(output_dir, names)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tasks = _build_tasks_from_tree(tree, output_dir, key_to_name)
-    total_slices = sum(len(t.dicom_paths) for t in tasks)
 
     if max_workers is None:
         effective_workers = min(32, os.cpu_count() or 1)
@@ -397,49 +401,22 @@ def export_zarr_collection_parallel(
         effective_workers = max_workers
     effective_workers = min(effective_workers, len(tasks))
 
-    progress_queue: Queue[Any] = Queue()
     results: list[ExportResult] = []
     errors: list[ExportResult] = []
 
+    # Advance a single per-store progress bar as each future completes.  We do
+    # not plumb per-slice progress across processes — that requires sharing a
+    # queue with the workers, which is not picklable and previously deadlocked.
     with ProcessPoolExecutor(max_workers=effective_workers) as executor:
-        futures = {
-            executor.submit(_worker_fn, task, progress_queue): task for task in tasks
-        }
-
-        completed = 0
-        with (
-            tqdm(
-                total=total_slices,
-                desc='Slices',
-                unit='slice',
-                position=1,
-                leave=False,
-            ) as slice_bar,
-            tqdm(
-                total=len(tasks),
-                desc='Directories',
-                unit='dir',
-                position=0,
-            ) as dir_bar,
-        ):
-            while completed < len(tasks):
-                event = progress_queue.get()
-                match event:
-                    case ('slice_done', _):
-                        slice_bar.update(1)
-                    case ('dir_done', _, _):
-                        dir_bar.update(1)
-                        completed += 1
-                    case ('error', _, _):
-                        dir_bar.update(1)
-                        completed += 1
-
-        for future in futures:
-            result = future.result()
-            if result.error:
-                errors.append(result)
-            else:
-                results.append(result)
+        futures = [executor.submit(_worker_fn, task) for task in tasks]
+        with tqdm(total=len(tasks), desc='Directories', unit='dir') as dir_bar:
+            for future in as_completed(futures):
+                result = future.result()
+                if result.error:
+                    errors.append(result)
+                else:
+                    results.append(result)
+                dir_bar.update(1)
 
     if errors:
         error_msgs = '\n'.join(f'  {e.key}: {e.error}' for e in errors)
@@ -452,6 +429,5 @@ def export_zarr_collection_parallel(
         for r in sorted(results, key=lambda r: _sort_key(r.key)):
             print(f'  {r.key}: shape={r.shape}')
 
-    manifest_path = output_dir / 'manifest.json'
-    manifest_path.write_text(json.dumps(mapping, indent=2))
+    _write_manifest(output_dir, mapping)
     return mapping
