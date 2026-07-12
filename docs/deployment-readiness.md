@@ -36,8 +36,10 @@ Target assumed: **Hetzner CX22 (2 vCPU / 4 GB) or CX32 (4 vCPU / 8 GB), Debian 1
 - **Log handler is rotating** (`RotatingFileHandler`, 50 MB × 10 = 500 MB cap) with
   configurable stderr level.
   (`packages/voxhub-core/src/voxhub_core/server/logging.py`)
-- **GC cron installed** daily at 04:00 with 48h TTL for `dt-*` temp dirs.
-  (`scripts/deploy/deploy.sh:336`)
+- **GC cron installed** daily at 04:00 with 48h TTL for `vxhb-staging-*` temp dirs.
+  (`scripts/deploy/deploy.sh:458`, `_run_gc` in
+  `packages/voxhub-core/src/voxhub_core/server/cli.py:954` reaps entries whose
+  basename starts with `STAGING_DIR_PREFIX = 'vxhb-staging-'`)
 
 ---
 
@@ -60,7 +62,7 @@ equals ``stores_dir`` as an operator misconfiguration guard.
 
 ### 2b. `integrate-annotations` / `prepare-pull` peak memory is not bounded
 
-`packages/voxhub-core/src/voxhub_core/staging.py:313` does `volume_data = arr[:]` —
+`packages/voxhub-core/src/voxhub_core/extraction.py:309` does `volume_data = arr[:]` —
 the entire raw volume is read into RAM uncompressed so pynrrd can write it as a
 contiguous NRRD. Stores are staged sequentially, so peak memory ≈ single largest
 store uncompressed. A 512×512×512 `uint16` CT is 256 MB; a 1024³ `float32` is 4 GB.
@@ -210,7 +212,7 @@ Ordered, do-this-before-annotators-touch-it:
    - `voxhub remote-catalog voxhub@<ip>`
    - `voxhub pull` → annotate a fake seg in 3D Slicer → `voxhub push`
    - Verify `.meta/provenance.jsonl` has the new entry
-   - Verify `/tmp/dt-*` got cleaned up
+   - Verify `$STAGING_DIR/vxhb-staging-*` got cleaned up (defaults to `/tmp`)
 8. **Run `scripts/deploy/healthcheck.sh`.** Should be all-green.
 9. **Tail logs during the smoke test:** `sudo journalctl -f` in one pane,
    `sudo tail -f /var/log/voxhub/debug.log` in another. Confirm the JSON structure
