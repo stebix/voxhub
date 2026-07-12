@@ -159,7 +159,27 @@ class LoopbackRsyncTransfer:
         *,
         progress: bool = True,
     ) -> None:
-        """Copy ``remote_path/*`` into ``local_path`` (trailing-slash semantics)."""
+        """Copy ``remote_path/*`` into ``local_path`` (trailing-slash semantics).
+
+        ``rsync`` replaces an existing destination file via a temp-file +
+        rename, so it overwrites even a read-only file as long as the
+        parent directory is writable (as after a repeat pull, where
+        ``_lock_session`` left the prior artefacts at 0o444).
+        :func:`shutil.copy2` instead opens the destination for writing and
+        would raise ``PermissionError`` on a 0o444 file, so remove
+        overlapping destination files first to mirror rsync's
+        inode-replacement semantics.  Destination-only files (e.g. the
+        client-written ``.voxhub_pull.sha256`` sidecar) are left untouched,
+        exactly as rsync-without-``--delete`` leaves them.
+        """
         del progress  # signature parity with the real RsyncTransfer
-        Path(local_path).mkdir(parents=True, exist_ok=True)
-        shutil.copytree(remote_path, local_path, dirs_exist_ok=True)
+        src = Path(remote_path)
+        dst = Path(local_path)
+        dst.mkdir(parents=True, exist_ok=True)
+        for source_file in src.rglob('*'):
+            if not source_file.is_file():
+                continue
+            existing = dst / source_file.relative_to(src)
+            if existing.exists():
+                existing.unlink()
+        shutil.copytree(src, dst, dirs_exist_ok=True)

@@ -205,3 +205,30 @@ def test_pull_acks_staging_dir_reaped(
     assert len(ack_events) == 1, (
         f'expected exactly one client_ack reap event, got {ack_events}'
     )
+
+
+def test_pull_twice_into_same_dest(
+    loopback_pull_env: SimpleNamespace,
+    raw_only_store: str,
+) -> None:
+    """A refresh pull to the same dest succeeds and refreshes the sidecar.
+
+    The first pull locks ``.voxhub_pull.sha256`` read-only (0o444); the
+    second must be able to rewrite it rather than failing with a
+    ``PermissionError`` misreported as an invalid session.
+    """
+    loopback_pull_env.run_pull(raw_only_store)
+    dest: Path = loopback_pull_env.session_dest
+    sidecar_path = dest / '.voxhub_pull.sha256'
+    assert stat.S_IMODE(sidecar_path.stat().st_mode) == 0o444
+
+    # Second pull to the same dest — must not raise, must re-lock.
+    loopback_pull_env.run_pull(raw_only_store)
+
+    # The sidecar was refreshed to match the freshly re-staged manifest
+    # (``prepared_at`` differs per prepare-pull, so the digest changes).
+    refreshed = sidecar_path.read_text().strip()
+    assert refreshed.startswith('sha256:')
+    assert refreshed == _compute_sha256(dest / '.voxhub_pull.json')
+    # The refreshed sidecar is locked read-only again.
+    assert stat.S_IMODE(sidecar_path.stat().st_mode) == 0o444

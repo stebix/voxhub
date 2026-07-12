@@ -8,7 +8,7 @@ Ontologies are YAML data files shipped with this package in the
 import re
 from importlib import resources
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import attrs
 import yaml
@@ -81,9 +81,24 @@ def _ontology_dir() -> Path:
 
 
 def _parse_ontology_file(path: Path) -> Ontology:
-    """Parse a single ontology YAML file into an ``Ontology`` object."""
+    """Parse a single ontology YAML file into an ``Ontology`` object.
+
+    Raises
+    ------
+    ValueError
+        If the file declares a ``type`` outside the
+        :data:`OntologyType` vocabulary.
+    """
     with open(path) as f:
         data = yaml.safe_load(f)
+
+    # ``OntologyType`` is a PEP 695 ``type`` alias, so unwrap it via
+    # ``__value__`` to reach the underlying ``Literal`` args.
+    valid_types = get_args(OntologyType.__value__)
+    if data['type'] not in valid_types:
+        raise ValueError(
+            f'invalid ontology type: {data["type"]!r} (expected one of {valid_types})'
+        )
 
     labels: list[OntologyLabel] | None = None
     if data.get('labels') is not None:

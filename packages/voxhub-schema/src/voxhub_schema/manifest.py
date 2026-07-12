@@ -7,7 +7,7 @@ per-store spatial metadata, expected ontologies, and workflow status.
 
 import json
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal, Self, cast, get_args
 
 import attrs
 
@@ -48,11 +48,17 @@ class RemoteManifestEntry:
         Raises
         ------
         ManifestError
-            If ``d`` is missing required keys or has wrong-typed values.
+            If ``d`` is missing required keys, has wrong-typed values, or
+            declares a ``status`` outside the :data:`ManifestStatus`
+            vocabulary.
         """
         try:
+            # ``ManifestStatus`` is a PEP 695 ``type`` alias, so unwrap it
+            # via ``__value__`` to reach the underlying ``Literal`` args.
+            if d['status'] not in get_args(ManifestStatus.__value__):
+                raise ManifestError(f'invalid manifest status: {d["status"]!r}')
             return cls(
-                status=d['status'],  # type: ignore[arg-type]
+                status=cast('ManifestStatus', d['status']),
                 raw_checksum=str(d['raw_checksum']),
                 shape=list(d['shape']),  # type: ignore[arg-type]
                 spacing_mm=list(d['spacing_mm']),  # type: ignore[arg-type]
