@@ -3,7 +3,6 @@
 import pytest
 from _schema_helpers import ORIGIN_LPS, SHAPE, SPACE_DIRECTIONS, SPACING_MM
 
-from voxhub_schema.manifest import RemoteManifestEntry
 from voxhub_schema.ontology import load_ontology
 
 # -- Ontology fixtures -------------------------------------------------------
@@ -38,13 +37,14 @@ def fluid_space_ontology():
 
 @pytest.fixture
 def manifest_entry():
-    """A ``RemoteManifestEntry`` matching the canonical spatial metadata."""
-    return RemoteManifestEntry(
-        status='pulled',
-        raw_checksum='sha256:abc123',
-        shape=list(SHAPE),
-        spacing_mm=SPACING_MM,
-        origin_lps=ORIGIN_LPS,
-        space_directions=SPACE_DIRECTIONS,
-        expected_ontologies=['inner-ear-structures'],
-    )
+    """Plain spatial metadata (``VolumeMetadata``) for the canonical volume.
+
+    The unified validators take the volume's spatial metadata as a plain
+    mapping so the schema package stays free of zarr / manifest coupling.
+    """
+    return {
+        'shape': list(SHAPE),
+        'spacing_mm': SPACING_MM,
+        'origin_lps': ORIGIN_LPS,
+        'space_directions': SPACE_DIRECTIONS,
+    }

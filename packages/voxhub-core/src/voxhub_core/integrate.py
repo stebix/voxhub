@@ -23,7 +23,14 @@ from voxhub_core.slicer import (
     parse_mrk_json,
     parse_seg_nrrd,
 )
-from voxhub_schema import IssueRecord, Ontology, generate_nano_id
+from voxhub_schema import (
+    UNCONSTRAINED_SEGMENTATION,
+    IssueRecord,
+    Ontology,
+    generate_nano_id,
+    validate_lmk_preflight,
+    validate_seg_preflight,
+)
 
 
 def find_annotation_files(
@@ -53,234 +60,6 @@ def find_annotation_files(
         lmk_path = lmk_candidates[0]
 
     return seg_path, lmk_path
-
-
-def validate_segmentation(
-    seg: SegmentationData,
-    manifest_entry: dict[str, object],
-    *,
-    ontology: Ontology | None = None,
-    spatial_tolerance: float = 0.01,
-) -> list[IssueRecord]:
-    """Validate a parsed segmentation against volume metadata.
-
-    Parameters
-    ----------
-    seg : SegmentationData
-        Parsed segmentation data.
-    manifest_entry : dict[str, object]
-        Store entry from the stage manifest.
-    ontology : Ontology | None
-        If provided, check label conformance against ontology.
-    spatial_tolerance : float
-        Tolerance in mm for spatial comparison.
-
-    Returns
-    -------
-    list[IssueRecord]
-    """
-    issues: list[IssueRecord] = []
-    expected_shape = tuple(manifest_entry['shape'])  # type: ignore[arg-type]
-
-    if seg.label_map.shape != expected_shape:
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message=(
-                    f'Shape mismatch: segmentation is {seg.label_map.shape}, '
-                    f'expected {expected_shape}'
-                ),
-            )
-        )
-
-    if not np.issubdtype(seg.label_map.dtype, np.integer) and not np.all(
-        seg.label_map == seg.label_map.astype(int)
-    ):
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message=(
-                    f'Label map contains non-integer values '
-                    f'(dtype: {seg.label_map.dtype})'
-                ),
-            )
-        )
-
-    if np.any(seg.label_map < 0):
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message='Label map contains negative values',
-            )
-        )
-
-    expected_origin = np.array(manifest_entry['origin_lps'])
-    if not np.allclose(seg.space_origin, expected_origin, atol=spatial_tolerance):
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message=(
-                    f'Space origin mismatch: segmentation has '
-                    f'{seg.space_origin.tolist()}, expected '
-                    f'{expected_origin.tolist()}'
-                ),
-            )
-        )
-
-    expected_dirs = np.array(manifest_entry['space_directions'])
-    if not np.allclose(seg.space_directions, expected_dirs, atol=spatial_tolerance):
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message='Space directions mismatch: segmentation has been '
-                'resampled or transformed',
-            )
-        )
-
-    unique_labels = set(np.unique(seg.label_map).tolist())
-    unique_labels.discard(0)
-    defined_labels = {s.label_value for s in seg.segments}
-
-    undefined = unique_labels - defined_labels
-    if undefined:
-        issues.append(
-            IssueRecord(
-                severity='warning',
-                message=(
-                    f'Label values {sorted(undefined)} found in volume '
-                    f'but have no segment definition in header'
-                ),
-            )
-        )
-
-    if defined_labels:
-        max_label = max(defined_labels)
-        expected_range = set(range(1, max_label + 1))
-        gaps = expected_range - defined_labels
-        if gaps:
-            issues.append(
-                IssueRecord(
-                    severity='warning',
-                    message=(f'Gap in label sequence: missing labels {sorted(gaps)}'),
-                )
-            )
-
-    # Ontology conformance.
-    if ontology is not None and not ontology.is_unconstrained:
-        ont_labels = ontology.label_map
-        if ont_labels is not None:
-            expected_labels = {v for v in ont_labels if v != 0}
-            seg_labels = {s.label_value: s.name for s in seg.segments}
-
-            for value, name in seg_labels.items():
-                if value == 0:
-                    continue
-                if value not in ont_labels:
-                    issues.append(
-                        IssueRecord(
-                            severity='error',
-                            message=(
-                                f'Segment label {value} ({name!r}) is not '
-                                f'defined in ontology {ontology.name!r} '
-                                f'v{ontology.version}'
-                            ),
-                        )
-                    )
-                elif ont_labels[value] != name:
-                    issues.append(
-                        IssueRecord(
-                            severity='warning',
-                            message=(
-                                f'Segment label {value} is named {name!r} '
-                                f'but ontology expects {ont_labels[value]!r}'
-                            ),
-                        )
-                    )
-
-            missing = expected_labels - set(seg_labels.keys())
-            if missing:
-                missing_names = [f'{v} ({ont_labels[v]})' for v in sorted(missing)]
-                issues.append(
-                    IssueRecord(
-                        severity='warning',
-                        message=(
-                            f'Ontology labels not present in segmentation: '
-                            f'{", ".join(missing_names)}'
-                        ),
-                    )
-                )
-
-    return issues
-
-
-def validate_landmarks(
-    lmk: LandmarkData,
-    manifest_entry: dict[str, object],
-    *,
-    ontology: Ontology | None = None,
-) -> list[IssueRecord]:
-    """Validate parsed landmarks against volume metadata.
-
-    Parameters
-    ----------
-    lmk : LandmarkData
-        Parsed landmark data.
-    manifest_entry : dict[str, object]
-        Store entry from the stage manifest.
-    ontology : Ontology | None
-        If provided, check landmark conformance against ontology points.
-
-    Returns
-    -------
-    list[IssueRecord]
-    """
-    issues: list[IssueRecord] = []
-
-    if lmk.coordinate_system not in ('LPS', 'RAS'):
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message=(f"Unknown coordinate system: '{lmk.coordinate_system}'"),
-            )
-        )
-
-    if len(set(lmk.labels)) != len(lmk.labels):
-        seen: set[str] = set()
-        dupes = [
-            lab
-            for lab in lmk.labels
-            if lab in seen or seen.add(lab)  # type: ignore[func-returns-value]
-        ]
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message=f'Duplicate landmark labels: {dupes}',
-            )
-        )
-
-    if ontology is not None and ontology.points is not None:
-        expected = set(ontology.points)
-        actual = set(lmk.labels)
-        missing = expected - actual
-        if missing:
-            issues.append(
-                IssueRecord(
-                    severity='error',
-                    message=(
-                        f'Ontology requires points {sorted(missing)} but they are missing'
-                    ),
-                )
-            )
-        extra = actual - expected
-        if extra:
-            issues.append(
-                IssueRecord(
-                    severity='error',
-                    message=(f'Extra landmarks {sorted(extra)} not in ontology'),
-                )
-            )
-
-    return issues
 
 
 def write_segmentation_to_zarr(
@@ -511,13 +290,17 @@ def integrate(
     stores_dir = Path(stores_dir)
     console = console or Console()
 
-    # Per-annotation-type ontology resolution.  Under --unconstrained
-    # both stay None by design.  Under a declared ontology, only the
-    # matching annotation type receives it; the other type triggers a
-    # type-mismatch error below rather than silently defaulting to
-    # unconstrained — that would misrepresent the provenance record.
+    # Per-annotation-type ontology resolution.  Under --unconstrained the
+    # segmentation is validated against the shipped ``unconstrained``
+    # ontology so its structural constraints (non_negative_integers,
+    # sequential_from_zero, background_at_zero) are actually enforced --
+    # there is no unconstrained landmark ontology, so landmarks stay None.
+    # Under a declared ontology, only the matching annotation type receives
+    # it; the other type triggers a type-mismatch error below rather than
+    # silently defaulting to unconstrained — that would misrepresent the
+    # provenance record.
     if unconstrained:
-        seg_ontology: Ontology | None = None
+        seg_ontology: Ontology | None = UNCONSTRAINED_SEGMENTATION
         lmk_ontology: Ontology | None = None
     else:
         assert ontology is not None  # entry-point check guarantees this
@@ -586,12 +369,12 @@ def integrate(
                     )
                 )
             else:
+                seg_issues = validate_seg_preflight(
+                    seg_file, manifest_entry, seg_ontology
+                )
+                issues.extend(seg_issues)
                 try:
                     seg_data = parse_seg_nrrd(seg_file)
-                    seg_issues = validate_segmentation(
-                        seg_data, manifest_entry, ontology=seg_ontology
-                    )
-                    issues.extend(seg_issues)
                     console.print(
                         f'    segmentation: {seg_file.name}  '
                         f'shape={seg_data.label_map.shape}  '
@@ -621,12 +404,12 @@ def integrate(
                     )
                 )
             else:
+                lmk_issues = validate_lmk_preflight(
+                    lmk_file, manifest_entry, lmk_ontology
+                )
+                issues.extend(lmk_issues)
                 try:
                     lmk_data = parse_mrk_json(lmk_file)
-                    lmk_issues = validate_landmarks(
-                        lmk_data, manifest_entry, ontology=lmk_ontology
-                    )
-                    issues.extend(lmk_issues)
                     console.print(
                         f'    landmarks: {lmk_file.name}  '
                         f'points={len(lmk_data.labels)}  '

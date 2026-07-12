@@ -15,18 +15,21 @@ from _core_helpers import (
     SPACING_MM,
     build_staging_dir,
     create_zarr_store,
+    default_lmk_labels,
+    default_lmk_points,
+    write_mrk_json,
+    write_seg_nrrd,
 )
 
 from voxhub_core.integrate import (
     find_annotation_files,
     integrate,
-    validate_landmarks,
-    validate_segmentation,
     write_landmarks_to_zarr,
     write_segmentation_to_zarr,
 )
 from voxhub_core.slicer import LandmarkData, Segment, SegmentationData
 from voxhub_schema.models import IssueRecord
+from voxhub_schema.validation import validate_lmk_preflight, validate_seg_preflight
 
 
 def _errors(issues: list[IssueRecord]) -> list[IssueRecord]:
@@ -69,98 +72,122 @@ def _valid_lmk_lps() -> LandmarkData:
 
 
 # ===================================================================
-# validate_segmentation
+# validate_seg_preflight (unified schema validator, core geometry)
 # ===================================================================
+
+_VALID_SEG_SEGMENTS = [
+    {'name': 'cochlea', 'label_value': 1},
+    {'name': 'vestibule', 'label_value': 2},
+    {'name': 'semicircular_canals', 'label_value': 3},
+]
+
+
+def _valid_seg_label_map() -> np.ndarray:
+    lm = np.zeros(SHAPE, dtype=np.int16)
+    lm[0, 0, 0] = 1
+    lm[1, 1, 1] = 2
+    lm[2, 2, 2] = 3
+    return lm
 
 
 class TestValidateSegmentation:
-    def test_valid_seg_no_errors(self):
-        issues = validate_segmentation(_valid_seg(), _manifest_entry())
+    """The core integrate path now validates through the canonical schema
+    validator; these cover the geometry ``extract_spatial_metadata`` emits."""
+
+    def test_valid_seg_no_errors(self, tmp_path, unconstrained_ontology):
+        seg = write_seg_nrrd(
+            tmp_path / 'test.seg.nrrd', _valid_seg_label_map(), _VALID_SEG_SEGMENTS
+        )
+        issues = validate_seg_preflight(seg, _manifest_entry(), unconstrained_ontology)
         assert _errors(issues) == []
 
-    def test_shape_mismatch(self):
-        seg = _valid_seg()
-        entry = _manifest_entry()
-        entry['shape'] = [8, 12, 14]
-        issues = validate_segmentation(seg, entry)
+    def test_shape_mismatch(self, tmp_path, unconstrained_ontology):
+        lm = np.zeros((8, 12, 14), dtype=np.int16)
+        seg = write_seg_nrrd(tmp_path / 'test.seg.nrrd', lm, [])
+        issues = validate_seg_preflight(seg, _manifest_entry(), unconstrained_ontology)
         assert any('shape' in e.message.lower() for e in _errors(issues))
 
-    def test_origin_mismatch(self):
-        seg = _valid_seg()
+    def test_origin_mismatch(self, tmp_path, unconstrained_ontology):
+        seg = write_seg_nrrd(
+            tmp_path / 'test.seg.nrrd', _valid_seg_label_map(), _VALID_SEG_SEGMENTS
+        )
         entry = _manifest_entry()
         entry['origin_lps'] = [0.0, 0.0, 0.0]
-        issues = validate_segmentation(seg, entry)
+        issues = validate_seg_preflight(seg, entry, unconstrained_ontology)
         assert any('origin' in e.message.lower() for e in _errors(issues))
 
-    def test_directions_mismatch(self):
-        seg = _valid_seg()
+    def test_directions_mismatch(self, tmp_path, unconstrained_ontology):
+        seg = write_seg_nrrd(
+            tmp_path / 'test.seg.nrrd', _valid_seg_label_map(), _VALID_SEG_SEGMENTS
+        )
         entry = _manifest_entry()
         entry['space_directions'] = [[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]]
-        issues = validate_segmentation(seg, entry)
+        issues = validate_seg_preflight(seg, entry, unconstrained_ontology)
         assert any('direction' in e.message.lower() for e in _errors(issues))
 
-    def test_negative_labels(self):
-        seg = _valid_seg()
-        seg.label_map[0, 0, 0] = -1
-        issues = validate_segmentation(seg, _manifest_entry())
+    def test_negative_labels(self, tmp_path, unconstrained_ontology):
+        lm = _valid_seg_label_map()
+        lm[0, 0, 0] = -1
+        seg = write_seg_nrrd(tmp_path / 'test.seg.nrrd', lm, _VALID_SEG_SEGMENTS)
+        issues = validate_seg_preflight(seg, _manifest_entry(), unconstrained_ontology)
         assert any('negative' in e.message.lower() for e in _errors(issues))
 
 
 # ===================================================================
-# validate_landmarks
+# validate_lmk_preflight (unified schema validator, core geometry)
 # ===================================================================
 
 
 class TestValidateLandmarks:
-    def test_valid_lps_no_errors(self, landmark_ontology):
-        issues = validate_landmarks(
-            _valid_lmk_lps(), _manifest_entry(), ontology=landmark_ontology
+    def test_valid_lps_no_errors(self, tmp_path, landmark_ontology):
+        lmk = write_mrk_json(
+            tmp_path / 'l.mrk.json', default_lmk_points(), default_lmk_labels(), 'LPS'
         )
+        issues = validate_lmk_preflight(lmk, _manifest_entry(), landmark_ontology)
         assert _errors(issues) == []
 
-    def test_unknown_coordinate_system(self):
-        lmk = LandmarkData(
-            points=np.array([[0, 0, 0]]),
-            labels=['pt'],
-            coordinate_system='XYZ',
-        )
-        issues = validate_landmarks(lmk, _manifest_entry())
+    def test_unknown_coordinate_system(self, tmp_path):
+        lmk = write_mrk_json(tmp_path / 'l.mrk.json', [[0.0, 0.0, 0.0]], ['pt'], 'XYZ')
+        issues = validate_lmk_preflight(lmk, _manifest_entry(), None)
         assert any('coordinate' in e.message.lower() for e in _errors(issues))
 
-    def test_duplicate_labels(self):
-        lmk = LandmarkData(
-            points=np.array([[0, 0, 0], [1, 1, 1]]),
-            labels=['same', 'same'],
-            coordinate_system='LPS',
+    def test_duplicate_labels(self, tmp_path):
+        lmk = write_mrk_json(
+            tmp_path / 'l.mrk.json',
+            [[-4.0, -5.0, -6.0], [-3.0, -4.0, -5.0]],
+            ['same', 'same'],
+            'LPS',
         )
-        issues = validate_landmarks(lmk, _manifest_entry())
+        issues = validate_lmk_preflight(lmk, _manifest_entry(), None)
         assert any('duplicate' in e.message.lower() for e in _errors(issues))
 
-    def test_missing_ontology_point(self, landmark_ontology):
-        lmk = LandmarkData(
-            points=np.array([[0, 0, 0], [1, 1, 1]]),
-            labels=['round_window', 'oval_window'],  # missing cochlear_apex
-            coordinate_system='LPS',
+    def test_missing_ontology_point(self, tmp_path, landmark_ontology):
+        lmk = write_mrk_json(
+            tmp_path / 'l.mrk.json',
+            [[-4.0, -5.0, -6.0], [-3.0, -4.0, -5.0]],
+            ['round_window', 'oval_window'],  # missing cochlear_apex
+            'LPS',
         )
-        issues = validate_landmarks(lmk, _manifest_entry(), ontology=landmark_ontology)
+        issues = validate_lmk_preflight(lmk, _manifest_entry(), landmark_ontology)
         assert any('cochlear_apex' in e.message for e in _errors(issues))
 
-    def test_extra_ontology_point(self, landmark_ontology):
-        lmk = LandmarkData(
-            points=np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]]),
-            labels=['round_window', 'oval_window', 'cochlear_apex', 'bonus'],
-            coordinate_system='LPS',
-        )
-        issues = validate_landmarks(lmk, _manifest_entry(), ontology=landmark_ontology)
+    def test_extra_ontology_point(self, tmp_path, landmark_ontology):
+        points = [
+            [-4.0, -5.0, -6.0],
+            [-3.0, -4.0, -5.0],
+            [-2.0, -3.0, -4.0],
+            [-1.0, -2.0, -3.0],
+        ]
+        labels = ['round_window', 'oval_window', 'cochlear_apex', 'bonus']
+        lmk = write_mrk_json(tmp_path / 'l.mrk.json', points, labels, 'LPS')
+        issues = validate_lmk_preflight(lmk, _manifest_entry(), landmark_ontology)
         assert any('bonus' in e.message for e in _errors(issues))
 
-    def test_no_ontology_skips_point_check(self):
-        lmk = LandmarkData(
-            points=np.array([[0, 0, 0]]),
-            labels=['anything_goes'],
-            coordinate_system='LPS',
+    def test_no_ontology_skips_point_check(self, tmp_path):
+        lmk = write_mrk_json(
+            tmp_path / 'l.mrk.json', [[-4.0, -5.0, -6.0]], ['anything_goes'], 'LPS'
         )
-        issues = validate_landmarks(lmk, _manifest_entry(), ontology=None)
+        issues = validate_lmk_preflight(lmk, _manifest_entry(), None)
         ontology_errors = [e for e in _errors(issues) if 'ontology' in e.message.lower()]
         assert ontology_errors == []
 
@@ -456,13 +483,14 @@ class TestIntegrate:
             ontology=inner_ear_ontology,
         )
 
-        # Second annotator with fresh staging.
+        # Second annotator with fresh staging (a valid inner-ear seg so the
+        # constrained ontology's required labels are all present).
         staging2 = tmp_path / 'staging2'
         build_staging_dir(
             staging2,
             'mystore',
-            seg_label_map=np.zeros(SHAPE, dtype=np.int16),
-            seg_segments=[],
+            seg_label_map=_valid_seg_label_map(),
+            seg_segments=_VALID_SEG_SEGMENTS,
         )
         integrate(
             staging2,
@@ -560,8 +588,9 @@ class TestIntegrate:
         """Regression: a seg label not defined in the declared ontology must
         surface as a validation error.
 
-        Before the fix this passed silently because ``validate_segmentation``
-        was called without the ``ontology=`` kwarg.
+        The local ``integrate()`` routes through the canonical
+        ``validate_seg_preflight`` with the declared ontology, so a stray
+        label (42) that the ontology never defines blocks integration.
         """
         stores_dir = tmp_path / 'zarr'
         stores_dir.mkdir()

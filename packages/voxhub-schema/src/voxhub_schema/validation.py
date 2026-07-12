@@ -1,35 +1,75 @@
-"""Client-side pre-flight validation checks.
+"""Canonical pre-flight validation checks for annotations.
 
-Validates annotation files against spatial metadata from the pull manifest
-and ontology conformance before push.  All checks are pure — no zarr or
-DICOM I/O.
+This module is the **single** validator implementation for the project.  It
+is the authority the server calls at integrate time and (for fast local
+feedback) the client calls before push.  It validates parsed NRRD / JSON
+annotation structures against the raw volume's spatial metadata and against
+a versioned ontology.
+
+The package stays free of ``zarr`` (and any store I/O): the caller extracts
+the volume's spatial metadata from its zarr attrs and passes it in as plain
+values (``manifest_entry``), exactly as
+:func:`voxhub_core.extraction.extract_spatial_metadata` already does.
+
+Coordinate-system policy
+------------------------
+* **Segmentations** must be exported in LPS (``left-posterior-superior``).
+  A RAS-exported ``.seg.nrrd`` is rejected with an error telling the
+  annotator to re-export as LPS rather than being silently converted:
+  re-orienting a full voxel grid's origin/direction matrix is error-prone,
+  Slicer exports segmentations in LPS by default, and a wrong-space
+  segmentation would otherwise mismatch the LPS manifest numerically and
+  surface a confusing secondary error.
+* **Landmarks** may be exported in LPS or RAS; RAS points are cheap and
+  lossless to mirror (negate x/y), so they are converted for the
+  bounding-box check and on write.  A landmark file whose coordinate
+  system disagrees with the ontology's declared ``coordinate_system``
+  produces a warning (the points are still converted to LPS on write).
 """
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import nrrd
 import numpy as np
 
-from voxhub_schema.manifest import RemoteManifestEntry
 from voxhub_schema.models import IssueRecord
 from voxhub_schema.ontology import Ontology
+
+# NRRD ``space`` field spellings (lower-cased) that mean LPS / RAS.
+_LPS_SPACES = frozenset({'left-posterior-superior', 'lps'})
+_RAS_SPACES = frozenset({'right-anterior-superior', 'ras'})
+
+# Plain spatial-metadata mapping.  Required keys: ``shape`` (sequence of
+# int), ``origin_lps`` (3 floats), ``space_directions`` (3x3 floats).  Extra
+# keys (e.g. ``spacing_mm``) are ignored.
+type VolumeMetadata = Mapping[str, object]
 
 
 def _parse_seg_nrrd_header(
     path: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, object]]]:
-    """Parse spatial metadata and segment info from a ``.seg.nrrd`` file.
+) -> tuple[np.ndarray, str | None, np.ndarray, np.ndarray, list[dict[str, object]]]:
+    """Parse label map + spatial metadata + segment info from a ``.seg.nrrd``.
 
     Returns
     -------
     tuple
-        ``(label_map, space_origin, space_directions, segments)``
+        ``(label_map, space, space_origin, space_directions, segments)``.
+        ``space`` is the raw NRRD ``space`` field (or ``None`` if absent).
+        ``space_directions`` is returned as parsed -- it may be a ``(4, 3)``
+        array with a NaN row for multi-layer exports; the caller detects
+        that before any numeric comparison.
     """
     data, header = nrrd.read(str(path))
 
-    space_origin = np.array(header.get('space origin', [0.0, 0.0, 0.0]), dtype=np.float64)
-    space_directions = np.array(
+    space = header.get('space')
+    space_str = str(space) if space is not None else None
+
+    space_origin = np.asarray(
+        header.get('space origin', [0.0, 0.0, 0.0]), dtype=np.float64
+    )
+    space_directions = np.asarray(
         header.get('space directions', np.eye(3)),
         dtype=np.float64,
     )
@@ -49,33 +89,98 @@ def _parse_seg_nrrd_header(
         )
         i += 1
 
-    return data, space_origin, space_directions, segments
+    return data, space_str, space_origin, space_directions, segments
+
+
+def _is_multilayer_directions(space_directions: np.ndarray) -> bool:
+    """Whether ``space directions`` signals a multi-layer (4D) export.
+
+    pynrrd yields a ``(4, 3)`` array with an all-NaN row for the
+    non-spatial axis of a multi-layer ``.seg.nrrd``.  A well-formed
+    single-layer segmentation is exactly ``(3, 3)`` with no NaNs.
+    """
+    return (
+        space_directions.ndim != 2
+        or space_directions.shape != (3, 3)
+        or bool(np.isnan(space_directions).any())
+    )
+
+
+def _check_seg_space(issues: list[IssueRecord], space: str | None) -> bool:
+    """Validate the NRRD ``space`` field; return whether it is LPS.
+
+    A non-LPS space appends an error and returns ``False`` so the caller
+    skips the (now meaningless) numeric origin/direction comparison.
+    """
+    if space is None:
+        issues.append(
+            IssueRecord(
+                severity='error',
+                message=(
+                    "Segmentation header has no 'space' field; export from "
+                    "3D Slicer in LPS ('left-posterior-superior')"
+                ),
+            )
+        )
+        return False
+
+    normalized = space.strip().lower()
+    if normalized in _LPS_SPACES:
+        return True
+    if normalized in _RAS_SPACES:
+        issues.append(
+            IssueRecord(
+                severity='error',
+                message=(
+                    f'Segmentation was exported in RAS ({space!r}); re-export '
+                    "it in LPS ('left-posterior-superior')"
+                ),
+            )
+        )
+        return False
+
+    issues.append(
+        IssueRecord(
+            severity='error',
+            message=(
+                f'Segmentation has an unrecognized NRRD space {space!r}; '
+                "export in LPS ('left-posterior-superior')"
+            ),
+        )
+    )
+    return False
 
 
 def validate_seg_preflight(
     seg_path: Path,
-    manifest_entry: RemoteManifestEntry,
-    ontology: Ontology,
+    manifest_entry: VolumeMetadata,
+    ontology: Ontology | None,
     *,
     spatial_tolerance: float = 0.01,
 ) -> list[IssueRecord]:
-    """Validate a segmentation NRRD against the manifest and ontology.
+    """Validate a segmentation NRRD against the volume metadata and ontology.
 
     Parameters
     ----------
     seg_path : Path
         Path to a ``.seg.nrrd`` file.
-    manifest_entry : RemoteManifestEntry
-        Per-store metadata from the pull manifest.
-    ontology : Ontology
-        The ontology this segmentation must conform to.
+    manifest_entry : VolumeMetadata
+        Plain spatial metadata of the raw volume: ``shape``, ``origin_lps``,
+        ``space_directions`` (see :data:`VolumeMetadata`).
+    ontology : Ontology | None
+        The ontology this segmentation must conform to.  ``None`` skips all
+        ontology-specific checks (structural integrity is still enforced);
+        an *unconstrained* ontology enforces its structural ``constraints``;
+        a constrained ontology enforces its exact label set, including at
+        the voxel level.
     spatial_tolerance : float
         Tolerance in mm for spatial metadata comparison.
 
     Returns
     -------
     list[IssueRecord]
-        Validation issues.  Empty means valid.
+        Validation issues.  Empty means valid.  This function never raises:
+        a file that cannot be read is reported as an error issue.
     """
     issues: list[IssueRecord] = []
 
@@ -88,9 +193,36 @@ def validate_seg_preflight(
         )
         return issues
 
-    label_map, space_origin, space_directions, segments = _parse_seg_nrrd_header(seg_path)
+    try:
+        label_map, space, space_origin, space_directions, segments = (
+            _parse_seg_nrrd_header(seg_path)
+        )
+    except Exception as exc:  # pre-flight must never raise
+        issues.append(
+            IssueRecord(
+                severity='error',
+                message=f'Failed to read segmentation NRRD: {exc}',
+            )
+        )
+        return issues
 
-    expected_shape = tuple(manifest_entry.shape)
+    # -- Multi-layer / 4D detection (must precede any np.allclose) --
+    if label_map.ndim != 3 or _is_multilayer_directions(space_directions):
+        issues.append(
+            IssueRecord(
+                severity='error',
+                message=(
+                    'multi-layer seg.nrrd not supported -- export a single '
+                    'merged segmentation'
+                ),
+            )
+        )
+        return issues
+
+    # -- Coordinate space --
+    space_is_lps = _check_seg_space(issues, space)
+
+    expected_shape = tuple(manifest_entry['shape'])  # type: ignore[arg-type]
 
     # -- Shape match --
     if label_map.shape != expected_shape:
@@ -125,36 +257,37 @@ def validate_seg_preflight(
             )
         )
 
-    # -- Spatial consistency: origin --
-    expected_origin = np.array(manifest_entry.origin_lps)
-    if not np.allclose(space_origin, expected_origin, atol=spatial_tolerance):
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message=(
-                    f'Space origin mismatch: segmentation has '
-                    f'{space_origin.tolist()}, expected '
-                    f'{expected_origin.tolist()} '
-                    f'(tolerance={spatial_tolerance} mm)'
-                ),
+    # -- Spatial consistency (skipped for non-LPS: the space error above is
+    #    the actionable one; a numeric mismatch would only be noise) --
+    if space_is_lps:
+        expected_origin = np.array(manifest_entry['origin_lps'])
+        if not np.allclose(space_origin, expected_origin, atol=spatial_tolerance):
+            issues.append(
+                IssueRecord(
+                    severity='error',
+                    message=(
+                        f'Space origin mismatch: segmentation has '
+                        f'{space_origin.tolist()}, expected '
+                        f'{expected_origin.tolist()} '
+                        f'(tolerance={spatial_tolerance} mm)'
+                    ),
+                )
             )
-        )
 
-    # -- Spatial consistency: directions --
-    expected_dirs = np.array(manifest_entry.space_directions)
-    if not np.allclose(space_directions, expected_dirs, atol=spatial_tolerance):
-        issues.append(
-            IssueRecord(
-                severity='error',
-                message=(
-                    f'Space directions mismatch: segmentation has been '
-                    f'resampled or transformed '
-                    f'(tolerance={spatial_tolerance} mm)'
-                ),
+        expected_dirs = np.array(manifest_entry['space_directions'])
+        if not np.allclose(space_directions, expected_dirs, atol=spatial_tolerance):
+            issues.append(
+                IssueRecord(
+                    severity='error',
+                    message=(
+                        f'Space directions mismatch: segmentation has been '
+                        f'resampled or transformed '
+                        f'(tolerance={spatial_tolerance} mm)'
+                    ),
+                )
             )
-        )
 
-    # -- Label integrity: sequential from zero --
+    # -- Label integrity: header declarations --
     unique_labels = set(np.unique(label_map).tolist())
     unique_labels.discard(0)
     defined_labels = {seg['label_value'] for seg in segments}
@@ -184,10 +317,11 @@ def validate_seg_preflight(
             )
 
     # -- Ontology conformance --
-    if not ontology.is_unconstrained:
-        _check_seg_ontology_conformance(issues, segments, label_map, ontology)
-    else:
-        _check_unconstrained_conformance(issues, label_map, ontology)
+    if ontology is not None:
+        if ontology.is_unconstrained:
+            _check_unconstrained_conformance(issues, label_map, ontology)
+        else:
+            _check_seg_ontology_conformance(issues, segments, label_map, ontology)
 
     return issues
 
@@ -198,7 +332,13 @@ def _check_seg_ontology_conformance(
     label_map: np.ndarray,
     ontology: Ontology,
 ) -> None:
-    """Check that a segmentation conforms to a constrained ontology."""
+    """Check a segmentation against a constrained ontology's label set.
+
+    Enforces the label contract at two levels: the header-declared
+    ``segments`` (missing / extra / mis-named labels) *and* the actual
+    voxel values (a value present in the data but declared neither in the
+    header nor in the ontology is an error, not a warning).
+    """
     assert ontology.labels is not None
 
     expected_labels = {lbl.value: lbl.name for lbl in ontology.labels}
@@ -232,7 +372,7 @@ def _check_seg_ontology_conformance(
                 )
             )
 
-    # Check for extra labels not in the ontology.
+    # Check for extra header-declared labels not in the ontology.
     for value, name in seg_labels.items():
         if value not in expected_labels:
             issues.append(
@@ -244,6 +384,24 @@ def _check_seg_ontology_conformance(
                     ),
                 )
             )
+
+    # Voxel-level check: a value present in the data but declared neither in
+    # the header nor in the ontology is an error (closes the hole where a
+    # stray voxel value only warned).  Background (0) is always allowed.
+    allowed = set(expected_labels) | {0}
+    declared = set(seg_labels)
+    voxel_values = {int(v) for v in np.unique(label_map)}
+    for value in sorted(voxel_values - allowed - declared):
+        issues.append(
+            IssueRecord(
+                severity='error',
+                message=(
+                    f'Voxel value {value} is present in the segmentation but '
+                    f'is declared neither in the header nor in ontology '
+                    f'{ontology.name!r} v{ontology.version}'
+                ),
+            )
+        )
 
 
 def _check_unconstrained_conformance(
@@ -330,24 +488,28 @@ def _parse_mrk_json(
 
 def validate_lmk_preflight(
     lmk_path: Path,
-    manifest_entry: RemoteManifestEntry,
-    ontology: Ontology,
+    manifest_entry: VolumeMetadata,
+    ontology: Ontology | None,
 ) -> list[IssueRecord]:
-    """Validate a landmark file against the manifest and ontology.
+    """Validate a landmark file against the volume metadata and ontology.
 
     Parameters
     ----------
     lmk_path : Path
         Path to a ``.mrk.json`` file.
-    manifest_entry : RemoteManifestEntry
-        Per-store metadata from the pull manifest.
-    ontology : Ontology
-        The ontology this landmark set must conform to.
+    manifest_entry : VolumeMetadata
+        Plain spatial metadata of the raw volume (see
+        :data:`VolumeMetadata`).
+    ontology : Ontology | None
+        The ontology this landmark set must conform to.  ``None`` skips the
+        ontology point-set and coordinate-system checks (structural checks
+        still run).
 
     Returns
     -------
     list[IssueRecord]
-        Validation issues.  Empty means valid.
+        Validation issues.  Empty means valid.  This function never raises:
+        a file that cannot be read is reported as an error issue.
     """
     issues: list[IssueRecord] = []
 
@@ -360,7 +522,16 @@ def validate_lmk_preflight(
         )
         return issues
 
-    points, labels, coord_system = _parse_mrk_json(lmk_path)
+    try:
+        points, labels, coord_system = _parse_mrk_json(lmk_path)
+    except Exception as exc:  # pre-flight must never raise
+        issues.append(
+            IssueRecord(
+                severity='error',
+                message=f'Failed to read landmarks JSON: {exc}',
+            )
+        )
+        return issues
 
     # -- Coordinate system known --
     if coord_system not in ('LPS', 'RAS'):
@@ -370,6 +541,25 @@ def validate_lmk_preflight(
                 message=(
                     f"Unknown coordinate system: '{coord_system}' "
                     f"(expected 'LPS' or 'RAS')"
+                ),
+            )
+        )
+
+    # -- Coordinate system matches the ontology's declared frame --
+    if (
+        ontology is not None
+        and ontology.coordinate_system is not None
+        and coord_system in ('LPS', 'RAS')
+        and coord_system != ontology.coordinate_system
+    ):
+        issues.append(
+            IssueRecord(
+                severity='warning',
+                message=(
+                    f'Landmark coordinate system {coord_system!r} differs from '
+                    f'ontology {ontology.name!r} expected '
+                    f'{ontology.coordinate_system!r}; points will be converted '
+                    f'to LPS on write'
                 ),
             )
         )
@@ -391,9 +581,9 @@ def validate_lmk_preflight(
 
     # -- Coordinate bounds check --
     if len(labels) > 0:
-        origin = np.array(manifest_entry.origin_lps)
-        shape = np.array(manifest_entry.shape)
-        space_dirs = np.array(manifest_entry.space_directions)
+        origin = np.array(manifest_entry['origin_lps'])
+        shape = np.array(manifest_entry['shape'])
+        space_dirs = np.array(manifest_entry['space_directions'])
 
         corner_offsets = shape[:, np.newaxis] * space_dirs
         far_corner = origin + corner_offsets.sum(axis=0)
@@ -424,7 +614,11 @@ def validate_lmk_preflight(
                 )
 
     # -- Ontology conformance --
-    if ontology.type == 'landmarks' and ontology.points is not None:
+    if (
+        ontology is not None
+        and ontology.type == 'landmarks'
+        and ontology.points is not None
+    ):
         _check_lmk_ontology_conformance(issues, labels, ontology)
 
     return issues

@@ -19,11 +19,17 @@ from _core_helpers import (
     ORIGIN_LPS,
     SHAPE,
     SPACING_MM,
+    default_seg_label_map,
     write_seg_nrrd,
 )
 
+from voxhub_core.extraction import extract_spatial_metadata
 from voxhub_core.server import cli as server_cli
-from voxhub_schema import PROTOCOL_VERSION
+from voxhub_schema import (
+    PROTOCOL_VERSION,
+    UNCONSTRAINED_SEGMENTATION,
+    validate_seg_preflight,
+)
 
 # ===========================================================================
 # _run_list_stores
@@ -1100,6 +1106,159 @@ class TestIntegrateAnnotationsErrors:
         assert errors
         # bravo unaffected.
         assert payload['stores']['bravo']['status'] == 'integrated'
+
+
+# ===========================================================================
+# _run_integrate_annotations — unconstrained constraint enforcement (A.1)
+# ===========================================================================
+
+
+def _non_sequential_label_map() -> np.ndarray:
+    """A label map with labels [0, 1, 3] (gap at 2) -- violates
+    ``sequential_from_zero`` under the unconstrained ontology."""
+    lm = np.zeros(SHAPE, dtype=np.int16)
+    lm[0, 0, 0] = 1
+    lm[1, 1, 1] = 3
+    return lm
+
+
+class TestUnconstrainedConstraintEnforcement:
+    """--unconstrained resolves the shipped ``unconstrained`` ontology so its
+    structural constraints are enforced on the live server path (they were
+    silently skipped when a bare ``None`` was passed).
+    """
+
+    def test_negative_label_is_error(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Negative voxel value under --unconstrained fails the store with a
+        constraint violation (fails before A.1: the constraint check was
+        skipped; only the generic non-negativity message appeared)."""
+        stores_dir = stores_dir_factory(('alpha',))
+        lm = default_seg_label_map()
+        lm[0, 0, 0] = -1
+        staging = staging_dir_with_annotations(store_names=['alpha'], seg_label_map=lm)
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                unconstrained=True,
+            )
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'failed'
+        errors = [i for i in store_result['issues'] if i['severity'] == 'error']
+        assert any(
+            'constraint' in e['message'].lower() and 'negative' in e['message'].lower()
+            for e in errors
+        )
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_non_sequential_labels_is_error(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Non-sequential labels under --unconstrained fail the store (fails
+        before A.1: with ontology=None the store integrated with only a gap
+        warning)."""
+        stores_dir = stores_dir_factory(('alpha',))
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        lm[1, 1, 1] = 3  # skips 2 -> not sequential from zero
+        staging = staging_dir_with_annotations(
+            store_names=['alpha'],
+            seg_label_map=lm,
+            seg_segments=[
+                {'id': 's0', 'name': 'a', 'label_value': 1},
+                {'id': 's1', 'name': 'c', 'label_value': 3},
+            ],
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                unconstrained=True,
+            )
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'failed'
+        errors = [i for i in store_result['issues'] if i['severity'] == 'error']
+        assert any('sequential' in e['message'].lower() for e in errors)
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    @pytest.mark.parametrize(
+        'seg_label_map',
+        [
+            None,  # valid default seg -> no issues
+            _non_sequential_label_map(),  # constraint-violating -> issues
+        ],
+        ids=['valid', 'non_sequential'],
+    )
+    def test_server_and_direct_validate_agree(
+        self,
+        seg_label_map,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """The server integrate path and a direct ``validate_seg_preflight``
+        call produce identical issue lists for the same input."""
+        stores_dir = stores_dir_factory(('alpha',))
+        seg_segments = (
+            None
+            if seg_label_map is None
+            else [
+                {'id': 's0', 'name': 'a', 'label_value': 1},
+                {'id': 's1', 'name': 'c', 'label_value': 3},
+            ]
+        )
+        staging = staging_dir_with_annotations(
+            store_names=['alpha'],
+            seg_label_map=seg_label_map,
+            seg_segments=seg_segments,
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                unconstrained=True,
+            )
+        )
+        server_issues = parsed_stdout()['stores']['alpha']['issues']
+
+        # Reconstruct the exact spatial metadata the server passed in.
+        root = zarr.open_group(stores_dir / 'alpha.zarr', mode='r')
+        arr = root['raw']['full']
+        origin, space_directions, spacing_mm = extract_spatial_metadata(dict(arr.attrs))
+        manifest_entry = {
+            'shape': list(arr.shape),
+            'origin_lps': origin.tolist(),
+            'space_directions': space_directions.tolist(),
+            'spacing_mm': spacing_mm,
+        }
+        seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
+        direct = validate_seg_preflight(
+            seg_file, manifest_entry, UNCONSTRAINED_SEGMENTATION
+        )
+        direct_issues = [{'severity': i.severity, 'message': i.message} for i in direct]
+
+        assert server_issues == direct_issues
 
 
 # ===========================================================================
