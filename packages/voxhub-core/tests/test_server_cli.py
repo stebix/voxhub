@@ -604,6 +604,63 @@ class TestPreparePull:
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
+    def test_include_annotation_path_traversal_rejected(
+        self, stores_dir_factory, server_argv, parsed_stdout, monkeypatch
+    ):
+        """A ``--include-existing-annotations`` path that escapes the store
+        shape (``../../etc``) is rejected up front with an
+        ``invalid_annotation_path`` envelope; nothing is extracted (task
+        2.8)."""
+        root = stores_dir_factory(('alpha',))
+
+        def sentinel(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError('extract_volume must not run on an invalid path')
+
+        monkeypatch.setattr(server_cli, 'extract_volume', sentinel)
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_prepare_pull(
+                server_argv(
+                    stores_dir=root,
+                    store='alpha',
+                    include_existing_annotations=['../../etc'],
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'invalid_annotation_path'
+
+    def test_failed_prepare_pull_leaves_no_staging_dir(
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout, monkeypatch
+    ):
+        """An extraction failure after mkdtemp cleans up the staging dir
+        instead of leaving it for gc (task 2.8)."""
+        root = stores_dir_factory(('alpha',))
+        staging_root = tmp_path / 'staging'
+        staging_root.mkdir()
+
+        def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError('extraction blew up')
+
+        monkeypatch.setattr(server_cli, 'extract_volume', boom)
+
+        with pytest.raises(SystemExit):
+            server_cli._run_prepare_pull(
+                server_argv(
+                    stores_dir=root, store='alpha', staging_root=str(staging_root)
+                )
+            )
+        parsed_stdout()
+
+        leftovers = [
+            p
+            for p in staging_root.iterdir()
+            if p.name.startswith(server_cli.STAGING_DIR_PREFIX)
+        ]
+        assert leftovers == []
+
 
 # ===========================================================================
 # _run_integrate_annotations — helpers
@@ -735,6 +792,105 @@ class TestPreparePullMemoryWarnings:
         envelope = json.loads(out.strip().splitlines()[-1])
         assert envelope['error'] is True
         assert envelope['code'] == 'insufficient_memory'
+
+    def test_prepare_pull_refuses_when_disk_full(
+        self, stores_dir_factory, tmp_path, server_argv, parsed_stdout, monkeypatch
+    ):
+        """A staging filesystem >=90% full → ``disk_full`` envelope, exit 1,
+        and nothing staged (task 2.6)."""
+        import collections
+
+        root = stores_dir_factory(('alpha',))
+        staging_root = tmp_path / 'staging'
+        staging_root.mkdir()
+        usage = collections.namedtuple('usage', ['total', 'used', 'free'])
+        monkeypatch.setattr(
+            server_cli.shutil, 'disk_usage', lambda _p: usage(1000, 950, 50)
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_prepare_pull(
+                server_argv(
+                    stores_dir=root, store='alpha', staging_root=str(staging_root)
+                )
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'disk_full'
+        # Nothing staged.
+        assert list(staging_root.iterdir()) == []
+
+
+# ===========================================================================
+# _run_integrate_annotations (memory + disk preconditions — task 2.6)
+# ===========================================================================
+
+
+class TestIntegrateMemoryAndDiskPreconditions:
+    """Covers the integrate-side RAM budget and disk-full guard (task 2.6)."""
+
+    def test_integrate_refuses_segmentation_on_low_memory(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        from voxhub_core import memory_budget as mb
+        from voxhub_core.server import settings as settings_mod
+
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+        memory = settings_mod.MemorySettings(
+            max_safe_volume_mb=512,
+            refuse_when_low_memory=True,
+            safety_factor=2.0,
+        )
+        # 1 byte available — far below the seg.nrrd file size * safety.
+        monkeypatch.setattr(mb, 'read_available_bytes', lambda: 1)
+
+        argv = _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        argv.memory_settings = memory
+        # A failed store makes the whole batch exit non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(argv)
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        assert any('memory' in i['message'].lower() for i in result['issues'])
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_integrate_refuses_when_disk_full(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        import collections
+
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+        usage = collections.namedtuple('usage', ['total', 'used', 'free'])
+        monkeypatch.setattr(
+            server_cli.shutil, 'disk_usage', lambda _p: usage(1000, 999, 1)
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'disk_full'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
 
 # ===========================================================================
@@ -970,13 +1126,16 @@ class TestIntegrateAnnotationsHappy:
 class TestIntegrateAnnotationsErrors:
     """Covers error/rejection paths in _run_integrate_annotations."""
 
-    def test_checksum_mismatch_writes_error_envelope_and_exits(
+    def test_checksum_mismatch_fails_store_and_exits_nonzero(
         self,
         stores_dir_factory,
         staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
+        """A checksum mismatch fails the store (task 2.8): the full per-store
+        JSON is emitted and the batch exits non-zero — no mid-loop bare
+        ``checksum_mismatch`` envelope."""
         stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_annotations(store_names=['alpha'])
 
@@ -992,8 +1151,9 @@ class TestIntegrateAnnotationsErrors:
             )
         assert excinfo.value.code == 1
 
-        envelope = parsed_stdout()
-        assert envelope['code'] == 'checksum_mismatch'
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        assert any('mismatch' in i['message'].lower() for i in result['issues'])
         # No annotation was written.
         assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
@@ -1013,14 +1173,17 @@ class TestIntegrateAnnotationsErrors:
         stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_annotations(store_names=['alpha'])
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(
-                server_argv,
-                stores_dir=stores_dir,
-                staging_dir=staging,
-                expected_ontology=['does-not-exist'],
+        # A failed store makes the batch exit non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    expected_ontology=['does-not-exist'],
+                )
             )
-        )
+        assert excinfo.value.code == 1
 
         store_result = parsed_stdout()['stores']['alpha']
 
@@ -1048,9 +1211,12 @@ class TestIntegrateAnnotationsErrors:
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
         )
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
-        )
+        # A failed store makes the batch exit non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'failed'
@@ -1094,9 +1260,13 @@ class TestIntegrateAnnotationsErrors:
         # Corrupt alpha's seg.nrrd.
         (staging / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
-        )
+        # alpha fails while bravo integrates, so the batch exits non-zero
+        # but still reports both stores (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
 
         payload = parsed_stdout()
         assert payload['stores']['alpha']['status'] == 'failed'
@@ -1137,20 +1307,23 @@ class TestUnconstrainedConstraintEnforcement:
     ):
         """Negative voxel value under --unconstrained fails the store with a
         constraint violation (fails before A.1: the constraint check was
-        skipped; only the generic non-negativity message appeared)."""
+        skipped; only the generic non-negativity message appeared). A failed
+        store makes the batch exit non-zero (task 2.8)."""
         stores_dir = stores_dir_factory(('alpha',))
         lm = default_seg_label_map()
         lm[0, 0, 0] = -1
         staging = staging_dir_with_annotations(store_names=['alpha'], seg_label_map=lm)
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(
-                server_argv,
-                stores_dir=stores_dir,
-                staging_dir=staging,
-                unconstrained=True,
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    unconstrained=True,
+                )
             )
-        )
+        assert excinfo.value.code == 1
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'failed'
@@ -1170,7 +1343,7 @@ class TestUnconstrainedConstraintEnforcement:
     ):
         """Non-sequential labels under --unconstrained fail the store (fails
         before A.1: with ontology=None the store integrated with only a gap
-        warning)."""
+        warning). A failed store makes the batch exit non-zero (task 2.8)."""
         stores_dir = stores_dir_factory(('alpha',))
         lm = np.zeros(SHAPE, dtype=np.int16)
         lm[0, 0, 0] = 1
@@ -1184,14 +1357,16 @@ class TestUnconstrainedConstraintEnforcement:
             ],
         )
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(
-                server_argv,
-                stores_dir=stores_dir,
-                staging_dir=staging,
-                unconstrained=True,
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    unconstrained=True,
+                )
             )
-        )
+        assert excinfo.value.code == 1
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'failed'
@@ -1216,7 +1391,9 @@ class TestUnconstrainedConstraintEnforcement:
         parsed_stdout,
     ):
         """The server integrate path and a direct ``validate_seg_preflight``
-        call produce identical issue lists for the same input."""
+        call produce identical issue lists for the same input. A failed
+        (constraint-violating) store makes the batch exit non-zero (task
+        2.8); the valid store integrates and exits zero."""
         stores_dir = stores_dir_factory(('alpha',))
         seg_segments = (
             None
@@ -1232,14 +1409,18 @@ class TestUnconstrainedConstraintEnforcement:
             seg_segments=seg_segments,
         )
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(
-                server_argv,
-                stores_dir=stores_dir,
-                staging_dir=staging,
-                unconstrained=True,
-            )
+        argv = _integrate_argv(
+            server_argv,
+            stores_dir=stores_dir,
+            staging_dir=staging,
+            unconstrained=True,
         )
+        if seg_label_map is None:
+            server_cli._run_integrate_annotations(argv)
+        else:
+            with pytest.raises(SystemExit) as excinfo:
+                server_cli._run_integrate_annotations(argv)
+            assert excinfo.value.code == 1
         server_issues = parsed_stdout()['stores']['alpha']['issues']
 
         # Reconstruct the exact spatial metadata the server passed in.
@@ -1259,6 +1440,78 @@ class TestUnconstrainedConstraintEnforcement:
         direct_issues = [{'severity': i.severity, 'message': i.message} for i in direct]
 
         assert server_issues == direct_issues
+
+
+# ===========================================================================
+# _run_integrate_annotations (checksum fail-closed — task 2.5)
+# ===========================================================================
+
+
+class TestIntegrateChecksumFailClosed:
+    """Covers fail-closed checksum verification (launch task 2.5).
+
+    When the client supplies ``--checksums`` it asserts integrity of every
+    uploaded annotation file.  A file missing from the set, or a malformed
+    token, silently disables the check otherwise — so the owning store is
+    failed closed instead of integrated unverified.
+    """
+
+    def test_missing_checksum_entry_fails_store_closed(
+        self, stores_dir_factory, staging_dir_with_annotations, server_argv, parsed_stdout
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(
+            store_names=['alpha'], include_seg=True, include_lmk=True
+        )
+        seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
+        seg_ck = server_cli.compute_sha256(seg_file)
+        # Checksum supplied for the segmentation but NOT the landmarks file.
+        # A failed store makes the batch exit non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    expected_ontology=['inner-ear-structures', 'inner-ear-landmarks'],
+                    checksums=[f'{seg_file.name}:{seg_ck}'],
+                )
+            )
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        errors = [i for i in result['issues'] if i['severity'] == 'error']
+        assert any(
+            'landmarks.mrk.json' in e['message'] and 'checksum' in e['message'].lower()
+            for e in errors
+        )
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_malformed_checksum_token_fails_store_closed(
+        self, stores_dir_factory, staging_dir_with_annotations, server_argv, parsed_stdout
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+        # ``segmentation.seg.nrrd:garbage`` splits into two colon-parts, so
+        # it is not a well-formed ``<name>:sha256:<hex>`` token.  A failed
+        # store makes the batch exit non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    checksums=['segmentation.seg.nrrd:garbage'],
+                )
+            )
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        errors = [i for i in result['issues'] if i['severity'] == 'error']
+        assert any('malformed' in e['message'].lower() for e in errors)
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
 
 # ===========================================================================
@@ -1285,9 +1538,13 @@ class TestIntegrateAnnotationsMultiStore:
             [{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
         )
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
-        )
+        # alpha integrates, bravo fails; the batch exits non-zero but the
+        # response still reports both stores (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
 
         payload = parsed_stdout()
         assert payload['stores']['alpha']['status'] == 'integrated'
@@ -1349,6 +1606,79 @@ class TestIntegrateAnnotationsMultiStore:
         payload = parsed_stdout()
         # Only alpha appears; orphan has no zarr store to integrate into.
         assert list(payload['stores']) == ['alpha']
+
+
+# ===========================================================================
+# _run_integrate_annotations (loop robustness — task 2.8)
+# ===========================================================================
+
+
+class TestIntegrateLoopRobustness:
+    """Covers non-atomic multi-store push robustness (launch task 2.8)."""
+
+    def test_bad_checksum_in_second_store_isolates_failure_and_exits_1(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """A checksum mismatch in a later store no longer aborts the loop
+        mid-way: the earlier store still integrates, the response reports
+        both statuses, and the batch exits non-zero."""
+        stores_dir = stores_dir_factory(('alpha', 'bravo'))
+        staging = staging_dir_with_annotations(store_names=['alpha', 'bravo'])
+        # alpha keeps the default seg; give bravo a different (still valid)
+        # seg so it mismatches the shared basename checksum.
+        alpha_seg = staging / 'alpha' / 'segmentation.seg.nrrd'
+        correct_ck = server_cli.compute_sha256(alpha_seg)
+        write_seg_nrrd(
+            staging / 'bravo' / 'segmentation.seg.nrrd',
+            np.ones(SHAPE, dtype=np.int16),
+            [{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    checksums=[f'segmentation.seg.nrrd:{correct_ck}'],
+                )
+            )
+        assert excinfo.value.code == 1
+
+        payload = parsed_stdout()
+        assert payload['stores']['alpha']['status'] == 'integrated'
+        assert payload['stores']['bravo']['status'] == 'failed'
+        assert any(
+            'mismatch' in i['message'].lower()
+            for i in payload['stores']['bravo']['issues']
+        )
+        assert len(_written_annotations(stores_dir / 'alpha.zarr')) == 1
+        assert _written_annotations(stores_dir / 'bravo.zarr') == []
+
+    def test_reference_subdir_is_never_integrated(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """A ``reference/`` staging subdir (pulled reference annotations) is
+        skipped in store discovery even when a same-named zarr store
+        exists."""
+        stores_dir = stores_dir_factory(('alpha', 'reference'))
+        staging = staging_dir_with_annotations(store_names=['alpha', 'reference'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        )
+
+        payload = parsed_stdout()
+        assert payload['stores']['alpha']['status'] == 'integrated'
+        assert 'reference' not in payload['stores']
 
 
 # ===========================================================================
@@ -1433,14 +1763,17 @@ class TestIntegrateAnnotationsOntology:
             include_lmk=False,
         )
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(
-                server_argv,
-                stores_dir=stores_dir,
-                staging_dir=staging,
-                expected_ontology=['inner-ear-landmarks'],
+        # A failed store makes the batch exit non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    expected_ontology=['inner-ear-landmarks'],
+                )
             )
-        )
+        assert excinfo.value.code == 1
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'failed'
@@ -1605,9 +1938,12 @@ class TestIntegrateAnnotationsCacheInvalidation:
         first = parsed_stdout()
         initial_version = first['catalog_version']
 
-        server_cli._run_integrate_annotations(
-            _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
-        )
+        # The store fails, so the batch exits non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'failed'
 

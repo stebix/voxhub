@@ -16,6 +16,7 @@ from typing import ClassVar
 import pytest
 import zarr
 
+from voxhub_core.server import cli as server_cli
 from voxhub_core.server.provenance import (
     record_provenance,
     validate_provenance_jsonl,
@@ -360,3 +361,100 @@ class TestValidateProvenanceJsonl:
         record = _read_jsonl(root / '.meta' / 'provenance.jsonl')[0]
         assert record['annotator_id'] == 'müller-李'
         assert validate_provenance_jsonl(root / '.meta' / 'provenance.jsonl') == []
+
+
+# ===========================================================================
+# integrate write+provenance atomicity (task 2.7)
+# ===========================================================================
+
+
+def _integrate_written_instances(store_zarr: Path) -> list[Path]:
+    """Return integrated annotation instance directories under a store."""
+    ann_root = store_zarr / 'annotations'
+    if not ann_root.is_dir():
+        return []
+    out: list[Path] = []
+    for annotator in ann_root.iterdir():
+        if annotator.is_dir():
+            out.extend(p for p in annotator.iterdir() if p.is_dir())
+    return out
+
+
+def _provenance_integrate_argv(server_argv, *, stores_dir, staging_dir):
+    """Build an integrate-annotations Namespace for the seg happy path."""
+    return server_argv(
+        stores_dir=stores_dir,
+        staging_dir=str(staging_dir),
+        annotator_id='alice',
+        nano_id='deadbeef',
+        machine_id='machine-xyz',
+        force=False,
+        checksums=None,
+        expected_ontology=['inner-ear-structures'],
+        unconstrained=False,
+    )
+
+
+class TestIntegrateProvenanceRollback:
+    """Covers the write+provenance atomicity invariant enforced in
+    _run_integrate_annotations (launch task 2.7): an annotation exists in a
+    zarr store iff its provenance line exists.
+    """
+
+    def test_provenance_failure_rolls_back_annotation_group(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError('provenance write failed')
+
+        monkeypatch.setattr(server_cli, 'record_provenance', boom)
+
+        # The store fails, so the batch exits non-zero (task 2.8).
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _provenance_integrate_argv(
+                    server_argv, stores_dir=stores_dir, staging_dir=staging
+                )
+            )
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        # The just-created annotation group was rolled back...
+        assert _integrate_written_instances(stores_dir / 'alpha.zarr') == []
+        # ...and no provenance line was written.
+        assert not (stores_dir / '.meta' / 'provenance.jsonl').exists()
+
+    def test_happy_path_writes_both_group_and_provenance(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        server_cli._run_integrate_annotations(
+            _provenance_integrate_argv(
+                server_argv, stores_dir=stores_dir, staging_dir=staging
+            )
+        )
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'integrated'
+        # Both the annotation group and its provenance line exist.
+        instances = _integrate_written_instances(stores_dir / 'alpha.zarr')
+        assert len(instances) == 1
+        jsonl = stores_dir / '.meta' / 'provenance.jsonl'
+        assert jsonl.is_file()
+        lines = [line for line in jsonl.read_text().splitlines() if line.strip()]
+        assert len(lines) == 1

@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import zarr
@@ -46,6 +46,9 @@ from voxhub_core.memory_budget import (
     MemoryBudget,
     MemoryBudgetError,
     MemoryWarning,
+)
+from voxhub_core.memory_budget import (
+    check as check_memory_budget,
 )
 from voxhub_core.server import catalog_cache
 from voxhub_core.server.locks import store_lock
@@ -83,6 +86,45 @@ STAGING_DIR_PREFIX: str = 'vxhb-staging-'
 # volume path (label_map + pynrrd internal buffer + astype).  Bump the
 # safety factor locally so the low-memory check reflects that worst case.
 _SEGMENTATION_SAFETY_BUMP: float = 1.5
+
+# Refuse to stage or integrate when a target filesystem is this full.  A
+# nearly-full disk risks torn writes (an annotation committed to zarr with
+# no room left for its provenance line) and orphaned staging dirs.
+_DISK_FULL_THRESHOLD: float = 0.90
+
+
+def _check_disk_space(paths: list[Path]) -> str | None:
+    """Return a message if any of ``paths`` sits on a >=90%-full filesystem.
+
+    Parameters
+    ----------
+    paths : list[Path]
+        Target directories to probe with :func:`shutil.disk_usage`.
+        Unreadable or zero-total filesystems are skipped.
+
+    Returns
+    -------
+    str | None
+        A human-readable refusal message for the first filesystem over the
+        :data:`_DISK_FULL_THRESHOLD`, or ``None`` when every probed path has
+        headroom.  Callers convert the message into a ``disk_full``
+        ``ServerError`` envelope and exit without touching anything.
+    """
+    for path in paths:
+        try:
+            usage = shutil.disk_usage(path)
+        except OSError:
+            continue
+        if usage.total <= 0:
+            continue
+        used_fraction = usage.used / usage.total
+        if used_fraction >= _DISK_FULL_THRESHOLD:
+            return (
+                f'filesystem at {path} is {used_fraction * 100:.1f}% full '
+                f'(>= {_DISK_FULL_THRESHOLD * 100:.0f}% threshold); refusing '
+                'to write'
+            )
+    return None
 
 
 def _memory_budget(
@@ -156,6 +198,45 @@ def _validate_echoed_staging_dir(raw: str, staging_root: Path) -> Path:
             f'staging_dir {raw!r} does not carry the {STAGING_DIR_PREFIX!r} prefix'
         )
     return candidate
+
+
+def _validate_include_annotation_path(raw: str) -> str:
+    """Validate a client-supplied ``--include-existing-annotations`` path.
+
+    Reference-annotation paths address a group inside the store's own zarr
+    hierarchy, so they must match the ``annotations/<slug>/<instance>``
+    shape exactly: a relative POSIX path of three segments with no parent
+    (``..``) components.  Relying on zarr's incidental key validation is not
+    enough — a crafted ``../../etc`` could otherwise escape the store.
+
+    Parameters
+    ----------
+    raw : str
+        The client-supplied path.
+
+    Returns
+    -------
+    str
+        ``raw`` unchanged when valid.
+
+    Raises
+    ------
+    ValueError
+        When the path is absolute, contains ``..``, or does not have the
+        expected three-segment ``annotations/<slug>/<instance>`` shape.
+        Callers convert this into an ``invalid_annotation_path`` envelope.
+    """
+    candidate = PurePosixPath(raw)
+    if candidate.is_absolute():
+        raise ValueError(f'annotation path {raw!r} must be relative')
+    parts = candidate.parts
+    if '..' in parts:
+        raise ValueError(f'annotation path {raw!r} must not contain ".."')
+    if len(parts) != 3 or parts[0] != 'annotations':
+        raise ValueError(
+            f'annotation path {raw!r} must have the shape annotations/<slug>/<instance>'
+        )
+    return raw
 
 
 def _write_json(obj: object) -> None:
@@ -372,6 +453,24 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         include_annotations=include_annotations,
     )
 
+    # -- Disk-full precondition (before anything is touched) ----------------
+    disk_full = _check_disk_space([staging_root])
+    if disk_full is not None:
+        log.error('disk_full', staging_root=str(staging_root), detail=disk_full)
+        _write_error('disk_full', disk_full)
+        sys.exit(1)
+
+    # Validate client-supplied reference-annotation paths (task 2.8) before
+    # touching the filesystem: they must match annotations/<slug>/<instance>
+    # exactly, never escaping the store via ``..``.
+    for ann_path in include_annotations:
+        try:
+            _validate_include_annotation_path(ann_path)
+        except ValueError as exc:
+            log.error('invalid_annotation_path', path=ann_path, error=str(exc))
+            _write_error('invalid_annotation_path', str(exc))
+            sys.exit(1)
+
     # -- Task 1: upfront store validation (before mkdtemp) ------------------
     zarr_path = stores_dir / f'{store_name}.zarr'
     if not zarr_path.is_dir():
@@ -412,10 +511,14 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
             volume_bytes=exc.warning.volume_bytes,
             available_bytes=exc.warning.available_bytes,
         )
+        # Clean up the freshly-created staging dir instead of leaving it for
+        # gc (task 2.8).
+        shutil.rmtree(staging_dir, ignore_errors=True)
         _write_error('insufficient_memory', str(exc))
         sys.exit(1)
     except Exception as exc:
         log.error('prepare_pull_failed', error=str(exc))
+        shutil.rmtree(staging_dir, ignore_errors=True)
         _write_error('prepare_pull_failed', str(exc))
         sys.exit(1)
 
@@ -451,6 +554,7 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         ).write(staging_dir)
     except OSError as exc:
         log.error('manifest_write_failed', error=str(exc))
+        shutil.rmtree(staging_dir, ignore_errors=True)
         _write_error('prepare_pull_failed', f'failed to write pull manifest: {exc}')
         sys.exit(1)
 
@@ -536,6 +640,43 @@ def _resolve_ontologies(
     return ontologies, issues
 
 
+def _rollback_annotation_group(zarr_path: Path, data_path: str) -> None:
+    """Delete a just-written annotation group after a post-write failure.
+
+    Upholds the invariant that *an annotation exists in a zarr store iff its
+    provenance line exists*: when ``record_provenance`` fails after the array
+    write has already committed, the orphaned annotation group must be
+    removed before the store is reported failed — otherwise a client retry
+    creates a duplicate.
+
+    Parameters
+    ----------
+    zarr_path : Path
+        Path to the ``.zarr`` store.
+    data_path : str
+        Array path of the just-written annotation
+        (``annotations/<slug>/<instance>/data``).  Its parent — the instance
+        group — is deleted.
+
+    Notes
+    -----
+    The caller must hold the per-store lock.  Deletion failures are
+    swallowed: the store is already being reported failed, and re-raising
+    here would mask the original provenance error.
+    """
+    instance_parts = data_path.strip('/').split('/')[:-1]
+    if not instance_parts:
+        return
+    try:
+        root = zarr.open_group(zarr_path, mode='r+')
+        parent = root
+        for part in instance_parts[:-1]:
+            parent = parent[part]
+        del parent[instance_parts[-1]]
+    except (KeyError, OSError):
+        pass
+
+
 def _run_integrate_annotations(args: argparse.Namespace) -> None:
     log = get_logger(command='integrate-annotations')
     t0 = time.monotonic()
@@ -555,6 +696,25 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     checksums = args.checksums or []
     declared_ontologies: list[str] = list(args.expected_ontology or [])
     unconstrained: bool = bool(args.unconstrained)
+
+    # Disk-full precondition: refuse before writing anything if either the
+    # staging filesystem or the stores filesystem is essentially full.
+    disk_full = _check_disk_space([staging_root, stores_dir])
+    if disk_full is not None:
+        log.error(
+            'disk_full',
+            staging_root=str(staging_root),
+            stores_dir=str(stores_dir),
+            detail=disk_full,
+        )
+        _write_error('disk_full', disk_full)
+        sys.exit(1)
+
+    # Segmentation parse is gated on available RAM (task 2.6): a pushed
+    # .seg.nrrd is materialized into memory, so use its file size as a cheap
+    # upper-bound estimate and keep the segmentation safety factor.
+    memory_settings: MemorySettings | None = getattr(args, 'memory_settings', None)
+    seg_budget = _memory_budget(memory_settings, extra_safety=_SEGMENTATION_SAFETY_BUMP)
 
     # Ontology policy: the client must state intent.  Silent fallback to
     # "unconstrained" would corrupt the downstream ground-truth story,
@@ -588,14 +748,22 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         declared_ontologies=declared_ontologies,
     )
 
-    # Parse expected checksums.
+    # Parse expected checksums.  A well-formed token is
+    # ``<filename>:sha256:<hexdigest>``.  Malformed tokens are NOT silently
+    # dropped (task 2.5): the filename they were meant to cover is recorded
+    # so the owning store fails closed rather than integrating an unverified
+    # file.
     expected_checksums: dict[str, str] = {}
+    malformed_checksum_files: set[str] = set()
     for entry in checksums:
         parts = entry.split(':', 2)
-        if len(parts) == 3:
-            filename = parts[0]
-            checksum = f'{parts[1]}:{parts[2]}'
-            expected_checksums[filename] = checksum
+        if len(parts) == 3 and parts[1] and parts[2]:
+            expected_checksums[parts[0]] = f'{parts[1]}:{parts[2]}'
+        else:
+            # Keep the intended filename (text before the first ':') so the
+            # store that owns it can be failed with a clear message.
+            malformed_checksum_files.add(parts[0])
+            log.error('malformed_checksum_token', token=entry)
 
     date_str = datetime.now(UTC).strftime('%Y%m%d')
     annotator_dir = f'{annotator_id}-{nano_id}'
@@ -605,6 +773,11 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
 
     for store_dir in sorted(staging_dir.iterdir()):
         if not store_dir.is_dir() or store_dir.name.startswith('.'):
+            continue
+        # Pulled reference annotations live under <staging>/reference/; that
+        # subdir must never be discovered as a store and re-integrated
+        # (task 2.8).
+        if store_dir.name == 'reference':
             continue
 
         store_name = store_dir.name
@@ -617,15 +790,53 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         if seg_file is None and lmk_file is None:
             continue
 
-        # Verify checksums.
+        # Fail-closed checksum verification (task 2.5).  When the client
+        # supplies any --checksums it is asserting the integrity of every
+        # uploaded file; a file missing from the set, or a malformed token,
+        # would silently skip its integrity check.  Refuse the store instead.
+        if expected_checksums or malformed_checksum_files:
+            checksum_issue: str | None = None
+            for ann_file in (seg_file, lmk_file):
+                if ann_file is None:
+                    continue
+                if ann_file.name in malformed_checksum_files:
+                    checksum_issue = (
+                        f'Malformed checksum entry for {ann_file.name}; '
+                        'refusing to integrate an unverified file.'
+                    )
+                elif ann_file.name not in expected_checksums:
+                    checksum_issue = (
+                        f'No checksum provided for {ann_file.name}; '
+                        'refusing to integrate an unverified file.'
+                    )
+                if checksum_issue is not None:
+                    log.error(
+                        'checksum_verification_failed',
+                        store=store_name,
+                        file=ann_file.name,
+                    )
+                    break
+            if checksum_issue is not None:
+                stores_result[store_name] = {
+                    'status': 'failed',
+                    'annotations': [],
+                    'issues': [{'severity': 'error', 'message': checksum_issue}],
+                }
+                continue
+
+        # Verify checksums.  A mismatch fails this store only (task 2.8):
+        # earlier stores may already have committed, so never sys.exit
+        # mid-loop — record the failure and continue so the response reports
+        # every store's outcome.
         if expected_checksums:
-            for ann_file in [seg_file, lmk_file]:
+            checksum_mismatch: str | None = None
+            for ann_file in (seg_file, lmk_file):
                 if ann_file is None:
                     continue
                 actual = compute_sha256(ann_file)
                 expected = expected_checksums.get(ann_file.name)
                 if expected and actual != expected:
-                    msg = (
+                    checksum_mismatch = (
                         f'Checksum mismatch for {ann_file.name}: '
                         f'expected {expected}, got {actual}'
                     )
@@ -634,8 +845,14 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                         store=store_name,
                         file=ann_file.name,
                     )
-                    _write_error('checksum_mismatch', msg)
-                    sys.exit(1)
+                    break
+            if checksum_mismatch is not None:
+                stores_result[store_name] = {
+                    'status': 'failed',
+                    'annotations': [],
+                    'issues': [{'severity': 'error', 'message': checksum_mismatch}],
+                }
+                continue
 
         # Read volume metadata.
         root = zarr.open_group(zarr_path, mode='r')
@@ -704,6 +921,22 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                     else:
                         seg_ontology = seg_ontologies[0] if seg_ontologies else None
                     try:
+                        # Gate the in-RAM parse on available memory (task
+                        # 2.6): validate_seg_preflight materializes the full
+                        # .seg.nrrd into memory to validate it (and the write
+                        # path below re-parses it once more), so refuse this
+                        # store rather than risk an OOM kill.
+                        seg_mem_warnings = check_memory_budget(
+                            seg_file.stat().st_size,
+                            budget=seg_budget,
+                            context=store_name,
+                        )
+                        _log_memory_warnings(
+                            log,
+                            seg_mem_warnings,
+                            store=store_name,
+                            phase='integrate_seg',
+                        )
                         seg_issues = validate_seg_preflight(
                             seg_file,
                             manifest_entry,
@@ -738,20 +971,32 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             )
 
                             seg_checksum = compute_sha256(seg_file)
-                            record_provenance(
-                                stores_dir,
-                                store_name,
-                                seg_path,
-                                annotator_id=annotator_id,
-                                machine_id=machine_id,
-                                nano_id=nano_id,
-                                pull_session_id=pull_session_id,
-                                ontology=ont_name,
-                                ontology_version=ont_version,
-                                source_nrrd_checksum=seg_checksum,
-                                source_file=seg_file.name,
-                                issues=[i for i in seg_issues if i.severity == 'warning'],
-                            )
+                            # Invariant: an annotation exists in zarr iff its
+                            # provenance line exists.  The array write has
+                            # committed; if provenance recording fails, roll
+                            # back the just-created group (the per-store lock
+                            # is still held) before reporting the store failed,
+                            # so a client retry cannot create a duplicate.
+                            try:
+                                record_provenance(
+                                    stores_dir,
+                                    store_name,
+                                    seg_path,
+                                    annotator_id=annotator_id,
+                                    machine_id=machine_id,
+                                    nano_id=nano_id,
+                                    pull_session_id=pull_session_id,
+                                    ontology=ont_name,
+                                    ontology_version=ont_version,
+                                    source_nrrd_checksum=seg_checksum,
+                                    source_file=seg_file.name,
+                                    issues=[
+                                        i for i in seg_issues if i.severity == 'warning'
+                                    ],
+                                )
+                            except Exception:
+                                _rollback_annotation_group(zarr_path, seg_path)
+                                raise
 
                             annotations_written.append(
                                 {
@@ -761,6 +1006,21 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                 }
                             )
 
+                    except MemoryBudgetError as exc:
+                        issues.append(
+                            IssueRecord(
+                                severity='error',
+                                message=(
+                                    f'Insufficient memory to integrate '
+                                    f'segmentation: {exc}'
+                                ),
+                            )
+                        )
+                        log.error(
+                            'integrate_refused_low_memory',
+                            store=store_name,
+                            error=str(exc),
+                        )
                     except Exception as exc:
                         issues.append(
                             IssueRecord(
@@ -834,20 +1094,32 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                             )
 
                             lmk_checksum = compute_sha256(lmk_file)
-                            record_provenance(
-                                stores_dir,
-                                store_name,
-                                lmk_path,
-                                annotator_id=annotator_id,
-                                machine_id=machine_id,
-                                nano_id=nano_id,
-                                pull_session_id=pull_session_id,
-                                ontology=ont_name,
-                                ontology_version=ont_version,
-                                source_nrrd_checksum=lmk_checksum,
-                                source_file=lmk_file.name,
-                                issues=[i for i in lmk_issues if i.severity == 'warning'],
-                            )
+                            # Invariant: an annotation exists in zarr iff its
+                            # provenance line exists.  The array write has
+                            # committed; if provenance recording fails, roll
+                            # back the just-created group (the per-store lock
+                            # is still held) before reporting the store failed,
+                            # so a client retry cannot create a duplicate.
+                            try:
+                                record_provenance(
+                                    stores_dir,
+                                    store_name,
+                                    lmk_path,
+                                    annotator_id=annotator_id,
+                                    machine_id=machine_id,
+                                    nano_id=nano_id,
+                                    pull_session_id=pull_session_id,
+                                    ontology=ont_name,
+                                    ontology_version=ont_version,
+                                    source_nrrd_checksum=lmk_checksum,
+                                    source_file=lmk_file.name,
+                                    issues=[
+                                        i for i in lmk_issues if i.severity == 'warning'
+                                    ],
+                                )
+                            except Exception:
+                                _rollback_annotation_group(zarr_path, lmk_path)
+                                raise
 
                             annotations_written.append(
                                 {
@@ -891,18 +1163,26 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         }
 
     duration = time.monotonic() - t0
+    any_failed = any(r['status'] != 'integrated' for r in stores_result.values())
     log.info(
         'integrate_completed',
         stores=list(stores_result.keys()),
+        any_failed=any_failed,
         duration_s=round(duration, 3),
     )
 
+    # Always emit the full per-store JSON so the client can reconcile every
+    # store's outcome, then signal partial or total failure via a non-zero
+    # exit (task 2.8).  An empty batch (no stores discovered) is a success.
     _write_dict(
         {
             'protocol_version': PROTOCOL_VERSION,
             'stores': stores_result,
         }
     )
+
+    if any_failed:
+        sys.exit(1)
 
 
 # -- cleanup -----------------------------------------------------------------
