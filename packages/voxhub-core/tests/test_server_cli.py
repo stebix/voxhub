@@ -2024,6 +2024,211 @@ class TestIntegrateAnnotationsCacheInvalidation:
 
 
 # ===========================================================================
+# _run_integrate_annotations / _run_prepare_pull — key-bound identity (plan §B)
+# ===========================================================================
+
+
+def _jsonl_records(stores_dir: Path) -> list[dict]:
+    """Return parsed provenance JSONL lines, or [] when the file is absent."""
+    jsonl = stores_dir / '.meta' / 'provenance.jsonl'
+    if not jsonl.is_file():
+        return []
+    return [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+
+
+class TestIntegrateAnnotationsIdentity:
+    """The connecting SSH key's VOXHUB_ANNOTATOR binds annotator identity.
+
+    Over SSH the env var (injected by sshd from the key's environment=
+    option) is authoritative and overrides the client-sent --annotator-id;
+    a disagreement fails the request; without the env var (local/dev) the
+    flag is used exactly as before.
+    """
+
+    def test_env_var_alone_provides_identity_with_ssh_key_source(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        # "env set + no flag": the key binding alone provides the identity.
+        monkeypatch.setenv('VOXHUB_ANNOTATOR', 'carol')
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                annotator_id=None,
+            )
+        )
+
+        payload = parsed_stdout()
+        ann = payload['stores']['alpha']['annotations'][0]
+        # Annotator-scoped path uses the key-bound identity, not the flag.
+        assert ann['path'].startswith('annotations/carol-deadbeef/')
+
+        records = _jsonl_records(stores_dir)
+        assert len(records) == 1
+        assert records[0]['annotator_id'] == 'carol'
+        assert records[0]['identity_source'] == 'ssh_key'
+
+        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
+        arr_attrs = dict(zarr.open_array(written / 'data', mode='r').attrs)
+        assert arr_attrs['annotator_id'] == 'carol'
+        assert arr_attrs['identity_source'] == 'ssh_key'
+
+    def test_env_var_matching_flag_stamps_ssh_key_source(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        # Realistic client: sends --annotator-id equal to the key binding.
+        monkeypatch.setenv('VOXHUB_ANNOTATOR', 'alice')
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                annotator_id='alice',
+            )
+        )
+        parsed_stdout()
+
+        records = _jsonl_records(stores_dir)
+        assert records[0]['annotator_id'] == 'alice'
+        assert records[0]['identity_source'] == 'ssh_key'
+
+    def test_env_var_disagreeing_with_flag_fails_and_writes_nothing(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        monkeypatch.setenv('VOXHUB_ANNOTATOR', 'alice')
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        with pytest.raises(SystemExit) as exc_info:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    annotator_id='mallory',
+                )
+            )
+        assert exc_info.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'identity_mismatch'
+
+        # Nothing landed: no annotations group, no provenance line.
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+        assert _jsonl_records(stores_dir) == []
+
+    def test_env_var_unset_uses_flag_with_flag_source(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        monkeypatch.delenv('VOXHUB_ANNOTATOR', raising=False)
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                annotator_id='alice',
+            )
+        )
+        payload = parsed_stdout()
+        ann = payload['stores']['alpha']['annotations'][0]
+        assert ann['path'].startswith('annotations/alice-deadbeef/')
+
+        records = _jsonl_records(stores_dir)
+        assert records[0]['annotator_id'] == 'alice'
+        assert records[0]['identity_source'] == 'flag'
+
+        written = _written_annotations(stores_dir / 'alpha.zarr')[0]
+        arr_attrs = dict(zarr.open_array(written / 'data', mode='r').attrs)
+        assert arr_attrs['identity_source'] == 'flag'
+
+
+class TestPreparePullIdentity:
+    """prepare-pull resolves the same key-bound identity so the pull session
+    (whose staging-dir name becomes the pull_session_id in later integrate
+    provenance) is attributable to the connecting key."""
+
+    def test_env_var_disagreeing_with_flag_fails(
+        self,
+        stores_dir_factory,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        monkeypatch.setenv('VOXHUB_ANNOTATOR', 'alice')
+        root = stores_dir_factory(('alpha',))
+
+        with pytest.raises(SystemExit) as exc_info:
+            server_cli._run_prepare_pull(
+                server_argv(stores_dir=root, store='alpha', annotator_id='mallory')
+            )
+        assert exc_info.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'identity_mismatch'
+
+    def test_env_var_logs_ssh_key_source(
+        self,
+        stores_dir_factory,
+        server_argv,
+        parsed_stdout,
+        caplog,
+        monkeypatch,
+    ):
+        import logging
+
+        caplog.set_level(logging.INFO, logger='voxhub_core.server.cli')
+        monkeypatch.setenv('VOXHUB_ANNOTATOR', 'carol')
+        root = stores_dir_factory(('alpha',))
+
+        server_cli._run_prepare_pull(
+            server_argv(stores_dir=root, store='alpha', annotator_id=None)
+        )
+        payload = parsed_stdout()
+        shutil.rmtree(Path(payload['staging_dir']), ignore_errors=True)
+
+        started = [
+            r.msg
+            for r in caplog.records
+            if isinstance(r.msg, dict) and r.msg.get('event') == 'prepare_pull_started'
+        ]
+        assert started, 'expected a prepare_pull_started log event'
+        assert started[0]['annotator_id'] == 'carol'
+        assert started[0]['identity_source'] == 'ssh_key'
+
+
+# ===========================================================================
 # _run_cleanup
 # ===========================================================================
 

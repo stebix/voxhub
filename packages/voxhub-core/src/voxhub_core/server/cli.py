@@ -263,6 +263,80 @@ def _write_error(code: str, message: str) -> None:
     )
 
 
+# -- annotator identity ------------------------------------------------------
+
+
+class _IdentityMismatchError(Exception):
+    """The SSH-key-bound annotator disagrees with the client-sent flag."""
+
+
+def _resolve_annotator_identity(
+    flag_annotator_id: str | None,
+    *,
+    log: Any,
+) -> tuple[str | None, str]:
+    """Resolve the effective annotator identity and record its source.
+
+    The ``VOXHUB_ANNOTATOR`` environment variable is injected by sshd from
+    the connecting key's ``environment="VOXHUB_ANNOTATOR=<name>"`` option
+    (see ``scripts/deploy/add-annotator.sh`` and the ``PermitUserEnvironment
+    VOXHUB_ANNOTATOR`` line in the sshd ``Match User voxhub`` block).  When
+    present it is **authoritative**: it overrides any client-sent
+    ``--annotator-id`` so provenance is cryptographically anchored to the
+    key, not to a self-reported flag.  A disagreement between the two is a
+    misconfigured client worth surfacing rather than silently papering over,
+    so it fails the request.  When the variable is absent -- local/dev use
+    and loopback tests that never traverse sshd -- the client flag is used
+    exactly as before.
+
+    Parameters
+    ----------
+    flag_annotator_id : str | None
+        The client-sent ``--annotator-id`` value, or ``None`` when the
+        caller does not supply one.
+    log
+        structlog logger; the resolved source is logged for the audit trail.
+
+    Returns
+    -------
+    tuple[str | None, str]
+        ``(annotator_id, identity_source)``.  ``identity_source`` is
+        ``'ssh_key'`` (key-bound), ``'flag'`` (client-supplied), or
+        ``'none'`` (neither available -- only reachable from an anonymous
+        local ``prepare-pull``).
+
+    Raises
+    ------
+    _IdentityMismatchError
+        If the key-bound identity and the client flag are both present and
+        disagree.
+    """
+    env_annotator = (os.environ.get('VOXHUB_ANNOTATOR') or '').strip()
+    if env_annotator:
+        if flag_annotator_id is not None and flag_annotator_id != env_annotator:
+            raise _IdentityMismatchError(
+                f'SSH key is bound to annotator {env_annotator!r} but the '
+                f'client sent --annotator-id {flag_annotator_id!r}; refusing '
+                'to record a mismatched identity.'
+            )
+        log.info(
+            'identity_resolved',
+            annotator_id=env_annotator,
+            identity_source='ssh_key',
+            flag_annotator_id=flag_annotator_id,
+        )
+        return env_annotator, 'ssh_key'
+    if flag_annotator_id is not None:
+        log.info(
+            'identity_resolved',
+            annotator_id=flag_annotator_id,
+            identity_source='flag',
+        )
+        return flag_annotator_id, 'flag'
+    log.info('identity_resolved', annotator_id=None, identity_source='none')
+    return None, 'none'
+
+
 # -- list-stores -------------------------------------------------------------
 
 
@@ -445,12 +519,27 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
     compress: bool = args.compress
     include_annotations: list[str] = args.include_existing_annotations or []
 
+    # Resolve who is pulling from the SSH-key-bound identity (falling back to
+    # the optional flag for local/dev).  The staging dir minted below names
+    # the pull_session_id later stamped into integrate provenance, so binding
+    # the identity here makes that session attributable to the connecting key.
+    try:
+        pulled_by, identity_source = _resolve_annotator_identity(
+            getattr(args, 'annotator_id', None), log=log
+        )
+    except _IdentityMismatchError as exc:
+        log.error('identity_mismatch', error=str(exc))
+        _write_error('identity_mismatch', str(exc))
+        sys.exit(1)
+
     log.info(
         'prepare_pull_started',
         stores_dir=str(stores_dir),
         staging_root=str(staging_root),
         store=store_name,
         include_annotations=include_annotations,
+        annotator_id=pulled_by,
+        identity_source=identity_source,
     )
 
     # -- Disk-full precondition (before anything is touched) ----------------
@@ -567,6 +656,8 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         skipped_annotations=len(skipped_annotations),
         memory_warning_count=len(memory_warnings),
         duration_s=round(duration, 3),
+        annotator_id=pulled_by,
+        identity_source=identity_source,
     )
 
     _write_dict(
@@ -689,7 +780,22 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         log.error('invalid_staging_dir', staging_dir=args.staging_dir, error=str(exc))
         _write_error('invalid_staging_dir', str(exc))
         sys.exit(1)
-    annotator_id = args.annotator_id
+    # Resolve the effective annotator identity.  Over SSH the key-bound
+    # VOXHUB_ANNOTATOR env var overrides the client flag so provenance cannot
+    # record an identity other than the one bound to the connecting key; a
+    # flag that disagrees with the key fails the request.  Locally (no env
+    # var) the required --annotator-id flag is used exactly as before.
+    try:
+        resolved_annotator, identity_source = _resolve_annotator_identity(
+            args.annotator_id, log=log
+        )
+    except _IdentityMismatchError as exc:
+        log.error('identity_mismatch', error=str(exc))
+        _write_error('identity_mismatch', str(exc))
+        sys.exit(1)
+    # --annotator-id is required for integrate, so resolution never yields None.
+    assert resolved_annotator is not None
+    annotator_id = resolved_annotator
     machine_id = args.machine_id
     nano_id = args.nano_id
     force = args.force
@@ -744,6 +850,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         stores_dir=str(stores_dir),
         staging_dir=str(staging_dir),
         annotator_id=annotator_id,
+        identity_source=identity_source,
         ontology_policy='unconstrained' if unconstrained else 'declared',
         declared_ontologies=declared_ontologies,
     )
@@ -990,6 +1097,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                     ontology_version=ont_version,
                                     source_nrrd_checksum=seg_checksum,
                                     source_file=seg_file.name,
+                                    identity_source=identity_source,
                                     issues=[
                                         i for i in seg_issues if i.severity == 'warning'
                                     ],
@@ -1113,6 +1221,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                     ontology_version=ont_version,
                                     source_nrrd_checksum=lmk_checksum,
                                     source_file=lmk_file.name,
+                                    identity_source=identity_source,
                                     issues=[
                                         i for i in lmk_issues if i.severity == 'warning'
                                     ],
@@ -1621,6 +1730,15 @@ def main() -> None:
     pp.add_argument('--store', required=True, help='Store name to pull.')
     pp.add_argument('--include-existing-annotations', nargs='*')
     pp.add_argument('--compress', action='store_true')
+    pp.add_argument(
+        '--annotator-id',
+        default=None,
+        help=(
+            'Optional annotator identity for local/dev use. Over SSH the '
+            'key-bound VOXHUB_ANNOTATOR env var is authoritative and '
+            'overrides this flag; a disagreement fails the request.'
+        ),
+    )
     pp.set_defaults(func=_run_prepare_pull)
 
     # integrate-annotations
