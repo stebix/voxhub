@@ -12,6 +12,7 @@ from typing import Any
 
 import zarr
 
+from voxhub_core.server.locks import provenance_lock
 from voxhub_schema import IssueRecord
 
 
@@ -106,7 +107,13 @@ def record_provenance(
         ],
     }
 
-    with open(jsonl_path, 'a') as f:
+    # The central JSONL is appended to across *all* stores, so the per-store
+    # store_lock does not serialize these writes.  O_APPEND atomicity only
+    # covers writes under PIPE_BUF (and is not guaranteed on some network
+    # filesystems), so a large record could tear when concurrent appends
+    # interleave.  Serialize the append with a dedicated filelock; keep
+    # O_APPEND + fsync for durability.
+    with provenance_lock(stores_dir), open(jsonl_path, 'a') as f:
         f.write(json.dumps(record) + '\n')
         f.flush()
         os.fsync(f.fileno())

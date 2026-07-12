@@ -23,7 +23,8 @@ from _core_helpers import (
 from filelock import FileLock, Timeout
 
 from voxhub_core.server import cli as server_cli
-from voxhub_core.server.locks import store_lock
+from voxhub_core.server import provenance as server_provenance
+from voxhub_core.server.locks import provenance_lock, store_lock
 from voxhub_core.server.provenance import record_provenance
 from voxhub_schema import IssueRecord
 
@@ -116,6 +117,49 @@ def _acquire_and_suicide(zarr_path_str: str, acquired: Any) -> None:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
+# Child that holds the provenance_lock until signalled, so the parent can
+# assert cross-process exclusivity of the meta lock.
+def _hold_provenance_lock_child(stores_dir_str: str, acquired: Any, release: Any) -> None:
+    from voxhub_core.server.locks import provenance_lock as _lock
+
+    stores_dir = Path(stores_dir_str)
+    (stores_dir / '.meta').mkdir(parents=True, exist_ok=True)
+    with _lock(stores_dir, timeout=30.0):
+        acquired.set()
+        release.wait(timeout=60.0)
+
+
+# Worker that appends one JSON record across several write() syscalls with a
+# sleep between each, modelling the non-atomic (multi-write) append the
+# provenance lock defends against — e.g. a network filesystem, or any future
+# multi-write record path.  Unlocked, concurrent workers interleave and tear
+# the lines; guarded by provenance_lock, every record lands intact.
+def _torn_append_worker(args: tuple[str, str, bool, int, float]) -> None:
+    stores_dir_str, tag, use_lock, nchunks, sleep_s = args
+    from voxhub_core.server.locks import provenance_lock as _lock
+
+    stores_dir = Path(stores_dir_str)
+    meta_dir = stores_dir / '.meta'
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = meta_dir / 'provenance.jsonl'
+    line = json.dumps({'event': 'push', 'tag': tag, 'pad': 'x' * 3000}) + '\n'
+    step = max(1, len(line) // nchunks)
+
+    def _write() -> None:
+        with open(jsonl_path, 'a') as f:
+            for i in range(0, len(line), step):
+                f.write(line[i : i + step])
+                f.flush()
+                os.fsync(f.fileno())
+                time.sleep(sleep_s)
+
+    if use_lock:
+        with _lock(stores_dir, timeout=30.0):
+            _write()
+    else:
+        _write()
+
+
 # ===========================================================================
 # store_lock unit tests
 # ===========================================================================
@@ -172,6 +216,58 @@ class TestStoreLock:
                 lock.acquire()
             # Generous upper bound — should fail well before 2s.
             assert time.monotonic() - t0 < 2.0
+
+
+# ===========================================================================
+# provenance_lock unit tests
+# ===========================================================================
+
+
+class TestProvenanceLock:
+    """Covers voxhub_core.server.locks.provenance_lock."""
+
+    def test_returns_filelock_instance(self, tmp_path):
+        lock = provenance_lock(tmp_path)
+        assert isinstance(lock, FileLock)
+
+    def test_lock_file_lives_in_meta_dir(self, tmp_path):
+        lock = provenance_lock(tmp_path)
+        assert Path(str(lock.lock_file)) == tmp_path / '.meta' / 'provenance.jsonl.lock'
+
+    def test_lock_is_exclusive_cross_process(self, tmp_path):
+        """While a child holds the meta lock, this process cannot acquire it
+        within a short timeout."""
+        (tmp_path / '.meta').mkdir(parents=True, exist_ok=True)
+
+        ctx = mp.get_context('fork')
+        acquired = ctx.Event()
+        release = ctx.Event()
+        proc = ctx.Process(
+            target=_hold_provenance_lock_child,
+            args=(str(tmp_path), acquired, release),
+        )
+        proc.start()
+        try:
+            assert acquired.wait(timeout=10.0)
+            lock = provenance_lock(tmp_path, timeout=0.2)
+            with pytest.raises(Timeout):
+                lock.acquire()
+        finally:
+            release.set()
+            proc.join(timeout=10.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2.0)
+
+    def test_lock_released_on_context_exit(self, tmp_path):
+        (tmp_path / '.meta').mkdir(parents=True, exist_ok=True)
+
+        with provenance_lock(tmp_path):
+            pass
+
+        # Fresh acquirer succeeds immediately once the first holder released.
+        with provenance_lock(tmp_path, timeout=1.0):
+            pass
 
 
 # ===========================================================================
@@ -426,11 +522,12 @@ class TestConcurrentIntegrateDifferentStores:
 class TestConcurrentProvenanceAppend:
     """The central .meta/provenance.jsonl is shared across stores.
 
-    These tests probe the implicit POSIX O_APPEND atomicity guarantee
-    (safe for writes under PIPE_BUF, typically 4 KB on Linux). If the
-    high-concurrency test fails or the large-record test shows torn
-    writes, the worktree should add an explicit meta_lock around the
-    JSONL append.
+    Cross-store appends are not serialized by the per-store ``store_lock``;
+    ``record_provenance`` now serializes them with ``provenance_lock`` so a
+    concurrent append never tears, regardless of record size or filesystem.
+    These tests assert that invariant (integrity of every landed line) and,
+    in ``test_concurrent_torn_appends_serialized_by_lock``, demonstrate the
+    lock's effect deterministically against the multi-write append it guards.
     """
 
     def test_two_different_stores_append_single_jsonl_concurrently(
@@ -509,15 +606,24 @@ class TestConcurrentProvenanceAppend:
         self,
         stores_dir_factory,
     ):
-        """Craft records well beyond PIPE_BUF (200 issues @ ~120 bytes each
-        ≈ 24 KB per line) and append 4 concurrently.
+        """Large concurrent appends via ``record_provenance`` land intact.
 
-        The current implementation has no explicit lock around the JSONL
-        append; if the POSIX O_APPEND guarantee breaks above PIPE_BUF,
-        lines may interleave.  This test documents the current behavior.
-        A failure motivates adding an explicit ``meta_lock``.
+        Crafts records well beyond PIPE_BUF (200 issues @ ~130 bytes each
+        ≈ 30 KB per line) and appends them from N processes against distinct
+        stores, so the per-store ``store_lock`` does not serialize them — only
+        ``provenance_lock`` does.  Hard invariant: exactly N lines, every line
+        parses as JSON, and each record's identity survives (no field-level
+        contamination).
+
+        Note: on the deployment target's local filesystem ``record_provenance``
+        issues a single ``write()`` per record and the kernel serializes
+        regular-file writes, so this holds even without the lock at any record
+        size (verified via strace).  ``provenance_lock`` guarantees it on
+        filesystems lacking that atomicity (e.g. NFS) and against any future
+        multi-write record path; ``test_concurrent_torn_appends_serialized_by_lock``
+        demonstrates the lock's effect deterministically.
         """
-        store_names = [f'large{i:02d}' for i in range(4)]
+        store_names = [f'large{i:02d}' for i in range(6)]
         stores_dir = stores_dir_factory(tuple(store_names), with_annotations=True)
 
         ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
@@ -555,16 +661,135 @@ class TestConcurrentProvenanceAppend:
         raw_lines = [
             ln for ln in jsonl_path.read_text(encoding='utf-8').splitlines() if ln.strip()
         ]
-        assert len(raw_lines) == 4, (
-            f'expected 4 lines in provenance.jsonl, got {len(raw_lines)} — '
-            f'likely torn writes from concurrent large appends; consider '
-            f'adding an explicit meta_lock around the JSONL append.'
+        assert len(raw_lines) == len(store_names), (
+            f'expected {len(store_names)} lines in provenance.jsonl, got '
+            f'{len(raw_lines)} — torn writes from concurrent large appends '
+            f'(provenance_lock should serialize them).'
         )
+        records = []
         for i, line in enumerate(raw_lines, start=1):
             try:
-                json.loads(line)
+                records.append(json.loads(line))
             except json.JSONDecodeError as exc:
                 pytest.fail(f'line {i} malformed: {exc!r}')
+        # Each record's identity survived intact (no cross-record contamination).
+        assert {r['annotator_id'] for r in records} == {
+            f'big{i}' for i in range(len(store_names))
+        }
+
+    def test_record_provenance_serializes_via_meta_lock(
+        self,
+        stores_dir_factory,
+        monkeypatch,
+    ):
+        """``record_provenance`` must take ``provenance_lock`` around its
+        append: while a child holds the meta lock, an in-process append with
+        a short lock timeout raises ``filelock.Timeout``.
+
+        This has teeth — it fails if the append is ever unlocked (the write
+        would simply succeed and no ``Timeout`` would be raised).  Running
+        in-process lets us monkeypatch the lock timeout without a CLI knob,
+        while still exercising the real ``record_provenance`` code path.
+        """
+        stores_dir = stores_dir_factory(('alpha',), with_annotations=True)
+        ann_path = 'annotations/alice-xyz45678/inner-ear-structures-20260101-ab12/data'
+        (stores_dir / '.meta').mkdir(parents=True, exist_ok=True)
+
+        def _short_lock(sd: Path, *, timeout: float = 10.0) -> FileLock:
+            del timeout
+            return provenance_lock(sd, timeout=0.3)
+
+        monkeypatch.setattr(server_provenance, 'provenance_lock', _short_lock)
+
+        ctx = mp.get_context('fork')
+        acquired = ctx.Event()
+        release = ctx.Event()
+        proc = ctx.Process(
+            target=_hold_provenance_lock_child,
+            args=(str(stores_dir), acquired, release),
+        )
+        proc.start()
+        try:
+            assert acquired.wait(timeout=10.0)
+            with pytest.raises(Timeout):
+                record_provenance(
+                    stores_dir,
+                    'alpha',
+                    ann_path,
+                    annotator_id='alice',
+                    machine_id='machine-x',
+                    nano_id='aaaa1111',
+                    pull_session_id='session-x',
+                    ontology='inner-ear-structures',
+                    ontology_version=1,
+                    source_nrrd_checksum='sha256:' + '0' * 64,
+                    source_file='seg.nrrd',
+                )
+        finally:
+            release.set()
+            proc.join(timeout=10.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2.0)
+
+    def test_concurrent_torn_appends_serialized_by_lock(
+        self,
+        tmp_path,
+    ):
+        """Deterministic tear/fix demonstration of ``provenance_lock``.
+
+        ``record_provenance`` writes each record in a single ``write()`` that
+        the kernel serializes, so on a local FS the real path never tears (see
+        ``test_large_jsonl_record_still_atomic``).  To exercise the *lock*, N
+        workers append one record across several ``write()`` syscalls with a
+        sleep between — the non-atomic pattern the lock exists to guard (NFS,
+        or a future multi-write record path).  Unlocked the lines interleave
+        and tear; guarded by ``provenance_lock`` every record lands intact.
+        """
+        nproc = 6
+
+        def _run(*, use_lock: bool) -> tuple[int, int]:
+            stores_dir = tmp_path / ('locked' if use_lock else 'unlocked')
+            (stores_dir / '.meta').mkdir(parents=True, exist_ok=True)
+            targets = [
+                (str(stores_dir), f't{i:02d}', use_lock, 10, 0.004) for i in range(nproc)
+            ]
+            ctx = mp.get_context('fork')
+            procs = [ctx.Process(target=_torn_append_worker, args=(t,)) for t in targets]
+            for p in procs:
+                p.start()
+            for p in procs:
+                p.join(timeout=60.0)
+            assert all(p.exitcode == 0 for p in procs), [p.exitcode for p in procs]
+
+            jsonl_path = stores_dir / '.meta' / 'provenance.jsonl'
+            raw = [
+                ln
+                for ln in jsonl_path.read_text(encoding='utf-8').splitlines()
+                if ln.strip()
+            ]
+            bad = 0
+            for ln in raw:
+                try:
+                    json.loads(ln)
+                except json.JSONDecodeError:
+                    bad += 1
+            return len(raw), bad
+
+        # With the lock: exactly N intact JSON lines.
+        n_lines, bad = _run(use_lock=True)
+        assert n_lines == nproc, f'locked: expected {nproc} lines, got {n_lines}'
+        assert bad == 0, f'locked: {bad} torn line(s) despite provenance_lock'
+
+        # Control — the scenario has teeth: unlocked, the multi-write appends
+        # interleave and produce lines that do not parse as JSON.  This is the
+        # exact tearing the lock prevents.
+        _, bad_unlocked = _run(use_lock=False)
+        assert bad_unlocked > 0, (
+            'expected the unlocked multi-write appends to tear; if this ever '
+            'stops reproducing, the locked assertion above no longer '
+            'demonstrates provenance_lock is load-bearing'
+        )
 
     def test_jsonl_append_lock_contention_stress(
         self,
