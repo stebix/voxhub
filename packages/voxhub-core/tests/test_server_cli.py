@@ -1105,7 +1105,7 @@ class TestIntegrateAnnotationsHappy:
         seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
         correct_checksum = server_cli.compute_sha256(seg_file)
 
-        server_cli._run_integrate_annotations(
+        server_cli._shim_integrate_annotations(
             _integrate_argv(
                 server_argv,
                 stores_dir=stores_dir,
@@ -1141,7 +1141,7 @@ class TestIntegrateAnnotationsErrors:
 
         bogus = f'sha256:{"0" * 64}'
         with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_integrate_annotations(
+            server_cli._shim_integrate_annotations(
                 _integrate_argv(
                     server_argv,
                     stores_dir=stores_dir,
@@ -1468,7 +1468,7 @@ class TestIntegrateChecksumFailClosed:
         # Checksum supplied for the segmentation but NOT the landmarks file.
         # A failed store makes the batch exit non-zero (task 2.8).
         with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_integrate_annotations(
+            server_cli._shim_integrate_annotations(
                 _integrate_argv(
                     server_argv,
                     stores_dir=stores_dir,
@@ -1497,7 +1497,7 @@ class TestIntegrateChecksumFailClosed:
         # it is not a well-formed ``<name>:sha256:<hex>`` token.  A failed
         # store makes the batch exit non-zero (task 2.8).
         with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_integrate_annotations(
+            server_cli._shim_integrate_annotations(
                 _integrate_argv(
                     server_argv,
                     stores_dir=stores_dir,
@@ -1639,7 +1639,7 @@ class TestIntegrateLoopRobustness:
         )
 
         with pytest.raises(SystemExit) as excinfo:
-            server_cli._run_integrate_annotations(
+            server_cli._shim_integrate_annotations(
                 _integrate_argv(
                     server_argv,
                     stores_dir=stores_dir,

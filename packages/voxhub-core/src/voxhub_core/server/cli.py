@@ -1,9 +1,15 @@
 """SSH-invoked server CLI.
 
-Commands: list-stores, prepare-pull, integrate-annotations, cleanup, gc,
-validate-attributes, healthcheck.
+Annotator-facing transport: the single ``rpc`` subcommand (wire
+protocol v2) reads one JSON request object from stdin —
+``{"protocol_version": 2, "method": ..., "params": {...}}`` — and
+writes one JSON response to stdout.  The per-method subcommands
+(list-stores, prepare-pull, integrate-annotations, cleanup,
+healthcheck) remain for one release as deprecated shims over the same
+dispatch.  Operator commands (gc, catalog, validate-attributes) stay
+plain subcommands and are not reachable via ``rpc``.
 
-Every command writes a single JSON object to stdout and exits.
+Every invocation writes a single JSON object to stdout and exits.
 Structured errors use the ``ServerError`` envelope.  Logs go to
 stderr via structlog.
 """
@@ -11,6 +17,7 @@ stderr via structlog.
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import sys
@@ -18,7 +25,10 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import zarr
 
@@ -66,9 +76,16 @@ from voxhub_schema import (
     PROTOCOL_VERSION,
     UNCONSTRAINED_SEGMENTATION,
     AnnotatorSlugError,
+    ChecksumEntry,
+    CleanupResponse,
+    IntegrateRequest,
+    IntegrateResponse,
+    IntegrateResult,
     IssueRecord,
     ManifestError,
     Ontology,
+    PrepareRequest,
+    PrepareResponse,
     PullAnnotationEntry,
     PullManifest,
     ServerError,
@@ -81,6 +98,9 @@ from voxhub_schema import (
 )
 
 STAGING_DIR_PREFIX: str = 'vxhb-staging-'
+
+_SHA256_HEX64 = re.compile(r'[0-9a-f]{64}')
+"""Bare sha256 digest shape used by legacy ``--checksums`` translation."""
 
 # Segmentation extraction holds an extra transient copy compared to the raw
 # volume path (label_map + pynrrd internal buffer + astype).  Bump the
@@ -660,22 +680,22 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
         identity_source=identity_source,
     )
 
-    _write_dict(
-        {
-            'protocol_version': PROTOCOL_VERSION,
-            'staging_dir': str(staging_dir),
-            'server_host': socket.getfqdn(),
-            'server_stores_dir': str(stores_dir),
-            'store_name': store_name,
-            'raw_name': 'raw.nrrd',
-            'raw_checksum': meta['raw_checksum'],
-            'shape': meta['shape'],
-            'spacing_mm': meta['spacing_mm'],
-            'origin_lps': meta['origin_lps'],
-            'space_directions': meta['space_directions'],
-            'skipped_annotations': skipped_annotations,
-            'memory_warnings': [w.to_dict() for w in memory_warnings],
-        }
+    _write_json(
+        PrepareResponse(
+            protocol_version=PROTOCOL_VERSION,
+            staging_dir=str(staging_dir),
+            server_host=socket.getfqdn(),
+            server_stores_dir=str(stores_dir),
+            store_name=store_name,
+            raw_name='raw.nrrd',
+            raw_checksum=meta['raw_checksum'],
+            shape=meta['shape'],
+            spacing_mm=meta['spacing_mm'],
+            origin_lps=meta['origin_lps'],
+            space_directions=meta['space_directions'],
+            skipped_annotations=skipped_annotations,
+            memory_warnings=[w.to_dict() for w in memory_warnings],
+        )
     )
 
 
@@ -799,7 +819,14 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     machine_id = args.machine_id
     nano_id = args.nano_id
     force = args.force
-    checksums = args.checksums or []
+    checksums: list[ChecksumEntry] = args.checksums or []
+    # Staging-dir-relative POSIX paths covered by a malformed legacy
+    # ``--checksums`` token.  Only ever non-empty on the deprecated
+    # subcommand path: the rpc path rejects malformed entries wholesale at
+    # deserialization (``ChecksumEntry.from_dict``).
+    malformed_checksum_paths: set[str] = set(
+        getattr(args, 'malformed_checksum_paths', None) or ()
+    )
     declared_ontologies: list[str] = list(args.expected_ontology or [])
     unconstrained: bool = bool(args.unconstrained)
 
@@ -855,22 +882,11 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         declared_ontologies=declared_ontologies,
     )
 
-    # Parse expected checksums.  A well-formed token is
-    # ``<filename>:sha256:<hexdigest>``.  Malformed tokens are NOT silently
-    # dropped (task 2.5): the filename they were meant to cover is recorded
-    # so the owning store fails closed rather than integrating an unverified
-    # file.
-    expected_checksums: dict[str, str] = {}
-    malformed_checksum_files: set[str] = set()
-    for entry in checksums:
-        parts = entry.split(':', 2)
-        if len(parts) == 3 and parts[1] and parts[2]:
-            expected_checksums[parts[0]] = f'{parts[1]}:{parts[2]}'
-        else:
-            # Keep the intended filename (text before the first ':') so the
-            # store that owns it can be failed with a clear message.
-            malformed_checksum_files.add(parts[0])
-            log.error('malformed_checksum_token', token=entry)
+    # Expected checksums keyed by staging-dir-relative POSIX path
+    # (``<store-dir>/<filename>``).  Path keys keep equal basenames in
+    # different store subdirectories distinct (triage 2026-07-11 P1); the
+    # values are bare 64-hex sha256 digests.
+    expected_checksums: dict[str, str] = {e.path: e.sha256 for e in checksums}
 
     date_str = datetime.now(UTC).strftime('%Y%m%d')
     annotator_dir = f'{annotator_id}-{nano_id}'
@@ -898,29 +914,32 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
             continue
 
         # Fail-closed checksum verification (task 2.5).  When the client
-        # supplies any --checksums it is asserting the integrity of every
-        # uploaded file; a file missing from the set, or a malformed token,
+        # supplies any checksums it is asserting the integrity of every
+        # uploaded file; a file missing from the set, or a malformed entry,
         # would silently skip its integrity check.  Refuse the store instead.
-        if expected_checksums or malformed_checksum_files:
+        # Files are addressed by staging-dir-relative POSIX path so equal
+        # basenames across store subdirectories stay distinct.
+        if expected_checksums or malformed_checksum_paths:
             checksum_issue: str | None = None
             for ann_file in (seg_file, lmk_file):
                 if ann_file is None:
                     continue
-                if ann_file.name in malformed_checksum_files:
+                rel_path = ann_file.relative_to(staging_dir).as_posix()
+                if rel_path in malformed_checksum_paths:
                     checksum_issue = (
-                        f'Malformed checksum entry for {ann_file.name}; '
+                        f'Malformed checksum entry for {rel_path}; '
                         'refusing to integrate an unverified file.'
                     )
-                elif ann_file.name not in expected_checksums:
+                elif rel_path not in expected_checksums:
                     checksum_issue = (
-                        f'No checksum provided for {ann_file.name}; '
+                        f'No checksum provided for {rel_path}; '
                         'refusing to integrate an unverified file.'
                     )
                 if checksum_issue is not None:
                     log.error(
                         'checksum_verification_failed',
                         store=store_name,
-                        file=ann_file.name,
+                        file=rel_path,
                     )
                     break
             if checksum_issue is not None:
@@ -940,17 +959,18 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
             for ann_file in (seg_file, lmk_file):
                 if ann_file is None:
                     continue
+                rel_path = ann_file.relative_to(staging_dir).as_posix()
                 actual = compute_sha256(ann_file)
-                expected = expected_checksums.get(ann_file.name)
-                if expected and actual != expected:
+                expected = expected_checksums.get(rel_path)
+                if expected and actual != f'sha256:{expected}':
                     checksum_mismatch = (
-                        f'Checksum mismatch for {ann_file.name}: '
-                        f'expected {expected}, got {actual}'
+                        f'Checksum mismatch for {rel_path}: '
+                        f'expected sha256:{expected}, got {actual}'
                     )
                     log.error(
                         'checksum_mismatch',
                         store=store_name,
-                        file=ann_file.name,
+                        file=rel_path,
                     )
                     break
             if checksum_mismatch is not None:
@@ -1283,11 +1303,16 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
     # Always emit the full per-store JSON so the client can reconcile every
     # store's outcome, then signal partial or total failure via a non-zero
     # exit (task 2.8).  An empty batch (no stores discovered) is a success.
-    _write_dict(
-        {
-            'protocol_version': PROTOCOL_VERSION,
-            'stores': stores_result,
-        }
+    # Routing through IntegrateResponse keeps the wire shape pinned to the
+    # schema model.
+    _write_json(
+        IntegrateResponse(
+            protocol_version=PROTOCOL_VERSION,
+            stores={
+                name: IntegrateResult.from_dict(info)
+                for name, info in stores_result.items()
+            },
+        )
     )
 
     if any_failed:
@@ -1340,12 +1365,7 @@ def _run_cleanup(args: argparse.Namespace) -> None:
     else:
         log.warning('cleanup_not_found', staging_dir=str(staging_dir))
 
-    _write_dict(
-        {
-            'protocol_version': PROTOCOL_VERSION,
-            'status': 'ok',
-        }
-    )
+    _write_json(CleanupResponse(protocol_version=PROTOCOL_VERSION, status='ok'))
 
 
 # -- gc ----------------------------------------------------------------------
@@ -1688,6 +1708,322 @@ def _run_healthcheck(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+# -- rpc dispatch -------------------------------------------------------------
+#
+# The annotator-facing wire protocol (v2) is a single JSON object on stdin:
+# ``{"protocol_version": 2, "method": <name>, "params": {...}}``.  ``params``
+# is deserialized through the schema request models so the models are the
+# actual contract; the deprecated per-method subcommands are shims that build
+# the same params dict and go through the same ``_dispatch``, so the two
+# surfaces cannot drift.
+
+
+def _params_list_stores(params: dict[str, Any]) -> dict[str, Any]:
+    """Map ``list-stores`` params (no request model) to handler fields."""
+    return {'if_version': params.get('if_version')}
+
+
+def _params_prepare_pull(params: dict[str, Any]) -> dict[str, Any]:
+    """Deserialize ``prepare-pull`` params via :class:`PrepareRequest`."""
+    req = PrepareRequest.from_dict(params)
+    return {
+        'store': req.store_name,
+        'include_existing_annotations': req.include_existing_annotations,
+        'compress': req.compress,
+        'annotator_id': req.annotator_id,
+    }
+
+
+def _params_integrate_annotations(params: dict[str, Any]) -> dict[str, Any]:
+    """Deserialize ``integrate-annotations`` params via :class:`IntegrateRequest`."""
+    req = IntegrateRequest.from_dict(params)
+    return {
+        'staging_dir': req.staging_dir,
+        'annotator_id': req.annotator_id,
+        'machine_id': req.machine_id,
+        'nano_id': req.nano_id,
+        'checksums': req.checksums,
+        'expected_ontology': req.expected_ontology,
+        'unconstrained': req.unconstrained,
+        'force': req.force,
+        # Malformed legacy tokens only exist on the shim path; the rpc path
+        # rejects them wholesale in ChecksumEntry.from_dict.
+        'malformed_checksum_paths': set(),
+    }
+
+
+def _params_cleanup(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate ``cleanup`` params (``{"staging_dir": str}``, no model)."""
+    staging_dir = params['staging_dir']
+    if not isinstance(staging_dir, str):
+        raise TypeError(f'Expected string for staging_dir, got {type(staging_dir)}')
+    return {'staging_dir': staging_dir}
+
+
+def _params_healthcheck(params: dict[str, Any]) -> dict[str, Any]:
+    """``healthcheck`` takes no params."""
+    return {}
+
+
+type _MethodSpec = tuple['Callable[[dict[str, Any]], dict[str, Any]]', str]
+
+# Annotator-reachable method surface.  ``prepare-push`` is reserved for
+# Phase 4 — adding a method is one entry here.  Operator commands (gc,
+# catalog, validate-attributes) are deliberately absent: they stay plain
+# subcommands and are unreachable via ``rpc`` (and therefore unreachable
+# over annotator SSH, whose forced command only allows ``rpc``).
+#
+# Handlers are referenced by NAME and resolved at dispatch time so tests
+# (and future instrumentation) can monkeypatch the module attribute.
+_RPC_METHODS: dict[str, _MethodSpec] = {
+    'list-stores': (_params_list_stores, '_run_list_stores'),
+    'prepare-pull': (_params_prepare_pull, '_run_prepare_pull'),
+    'integrate-annotations': (
+        _params_integrate_annotations,
+        '_run_integrate_annotations',
+    ),
+    'cleanup': (_params_cleanup, '_run_cleanup'),
+    'healthcheck': (_params_healthcheck, '_run_healthcheck'),
+}
+
+
+def _dispatch(
+    method: str,
+    params: dict[str, Any],
+    base_args: argparse.Namespace,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> None:
+    """Dispatch one method call to its ``_run_*`` handler.
+
+    Both the ``rpc`` subcommand and the deprecated per-method shims funnel
+    through here, so their behaviour is identical by construction.
+
+    Parameters
+    ----------
+    method : str
+        Method name; must be a key of :data:`_RPC_METHODS`, otherwise an
+        ``unknown_method`` envelope is written and the process exits 1.
+    params : dict[str, Any]
+        Raw request params, deserialized through the method's schema
+        request model.  Model errors become an ``invalid_params`` envelope.
+    base_args : argparse.Namespace
+        The parsed invocation namespace; supplies the settings-injected
+        attributes (``stores_dir``, ``staging_root``, ``memory_settings``).
+    overrides : dict[str, Any] | None
+        Extra handler fields applied after params deserialization.  Used by
+        the legacy integrate shim to carry malformed-checksum bookkeeping.
+    """
+    spec = _RPC_METHODS.get(method)
+    if spec is None:
+        _write_error(
+            'unknown_method',
+            f'unknown method {method!r}; expected one of {sorted(_RPC_METHODS)}',
+        )
+        sys.exit(1)
+    build_fields, handler_name = spec
+    handler: Callable[[argparse.Namespace], None] = globals()[handler_name]
+
+    try:
+        fields = build_fields(params)
+    except (KeyError, TypeError, ValueError) as exc:
+        detail = f'missing field {exc}' if isinstance(exc, KeyError) else str(exc)
+        _write_error('invalid_params', f'invalid params for {method!r}: {detail}')
+        sys.exit(1)
+
+    ns = argparse.Namespace(**vars(base_args))
+    for key, value in fields.items():
+        setattr(ns, key, value)
+    for key, value in (overrides or {}).items():
+        setattr(ns, key, value)
+    handler(ns)
+
+
+def _run_rpc(args: argparse.Namespace) -> None:
+    """Serve a single JSON request from stdin (wire protocol v2).
+
+    Reads stdin to EOF, parses exactly one JSON object, validates
+    ``protocol_version`` bidirectionally, and dispatches on ``method``.
+    Every failure is a structured ``ServerError`` envelope on stdout with
+    exit code 1 — never a traceback.
+    """
+    log = get_logger(command='rpc')
+    raw = sys.stdin.read()
+
+    try:
+        request = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log.error('rpc_malformed_request', error=str(exc))
+        _write_error(
+            'malformed_request',
+            f'stdin must carry exactly one JSON object: {exc}',
+        )
+        sys.exit(1)
+    if not isinstance(request, dict):
+        log.error('rpc_malformed_request', error='not a JSON object')
+        _write_error(
+            'malformed_request',
+            f'request must be a JSON object, got {type(request).__name__}',
+        )
+        sys.exit(1)
+
+    declared = request.get('protocol_version')
+    if declared != PROTOCOL_VERSION:
+        log.error('rpc_protocol_mismatch', declared=declared)
+        _write_error(
+            'protocol_mismatch',
+            f'server speaks protocol_version {PROTOCOL_VERSION}, request '
+            f'declared {declared!r}; upgrade the client or server so the '
+            'versions match',
+        )
+        sys.exit(1)
+
+    method = request.get('method')
+    if not isinstance(method, str) or not method:
+        log.error('rpc_malformed_request', error='missing method')
+        _write_error('malformed_request', 'request is missing a string "method"')
+        sys.exit(1)
+
+    params = request.get('params', {})
+    if not isinstance(params, dict):
+        log.error('rpc_malformed_request', error='params not an object')
+        _write_error(
+            'malformed_request',
+            f'"params" must be a JSON object, got {type(params).__name__}',
+        )
+        sys.exit(1)
+
+    log.info('rpc_request', method=method)
+    _dispatch(method, params, args)
+
+
+# -- deprecated per-method shims ----------------------------------------------
+#
+# Kept for one release (operator muscle memory + rollout overlap), then
+# deleted — see docs/issues.md.  Each shim builds the params dict its rpc
+# equivalent would receive and calls the same _dispatch.
+
+_DEPRECATION_NOTE = (
+    'Deprecated compatibility shim over `voxhub-server rpc`; '
+    'will be removed one release after protocol v2 ships (docs/issues.md).'
+)
+
+
+def _shim_list_stores(args: argparse.Namespace) -> None:
+    """Deprecated ``list-stores`` subcommand — shim over ``rpc``."""
+    params: dict[str, Any] = {}
+    if getattr(args, 'if_version', None) is not None:
+        params['if_version'] = args.if_version
+    _dispatch('list-stores', params, args)
+
+
+def _shim_prepare_pull(args: argparse.Namespace) -> None:
+    """Deprecated ``prepare-pull`` subcommand — shim over ``rpc``."""
+    params: dict[str, Any] = {
+        'store_name': args.store,
+        'include_existing_annotations': args.include_existing_annotations,
+        'compress': args.compress,
+        'annotator_id': args.annotator_id,
+    }
+    _dispatch('prepare-pull', params, args)
+
+
+def _translate_legacy_checksums(
+    tokens: list[str],
+    staging_dir: Path,
+) -> tuple[list[dict[str, str]], set[str]]:
+    """Translate legacy ``<filename>:sha256:<hex>`` tokens to path entries.
+
+    Legacy tokens are keyed by basename; verification is keyed by
+    staging-dir-relative POSIX path.  Each well-formed token is expanded to
+    every staged file carrying that basename — reproducing the legacy
+    (deliberately ambiguous) semantics under the one internal format.
+    Tokens that are not well-formed ``<filename>:sha256:<64 lowercase hex>``
+    mark their matching files malformed instead, so the owning store fails
+    closed exactly as before (task 2.5).
+
+    Parameters
+    ----------
+    tokens : list[str]
+        Raw ``--checksums`` values.
+    staging_dir : Path
+        The already-validated staging directory to expand basenames against.
+
+    Returns
+    -------
+    tuple[list[dict[str, str]], set[str]]
+        ``(entries, malformed_paths)`` — serialized :class:`ChecksumEntry`
+        dicts and the relative paths covered by malformed tokens.
+    """
+    staged_files = [p for p in sorted(staging_dir.rglob('*')) if p.is_file()]
+    entries: list[dict[str, str]] = []
+    malformed_paths: set[str] = set()
+    for token in tokens:
+        parts = token.split(':', 2)
+        name = parts[0]
+        well_formed = (
+            len(parts) == 3
+            and parts[1] == 'sha256'
+            and _SHA256_HEX64.fullmatch(parts[2]) is not None
+        )
+        for staged in staged_files:
+            if staged.name != name:
+                continue
+            rel_path = staged.relative_to(staging_dir).as_posix()
+            if well_formed:
+                entries.append({'path': rel_path, 'sha256': parts[2]})
+            else:
+                malformed_paths.add(rel_path)
+    return entries, malformed_paths
+
+
+def _shim_integrate_annotations(args: argparse.Namespace) -> None:
+    """Deprecated ``integrate-annotations`` subcommand — shim over ``rpc``.
+
+    Translates the legacy ``--checksums`` string format into path-keyed
+    entries at this boundary so verification internals see exactly one
+    format.
+    """
+    tokens: list[str] = args.checksums or []
+    entries: list[dict[str, str]] = []
+    malformed_paths: set[str] = set()
+    if tokens:
+        try:
+            staging_dir = _validate_echoed_staging_dir(
+                args.staging_dir, Path(args.staging_root)
+            )
+        except ValueError as exc:
+            _write_error('invalid_staging_dir', str(exc))
+            sys.exit(1)
+        entries, malformed_paths = _translate_legacy_checksums(tokens, staging_dir)
+    params: dict[str, Any] = {
+        'staging_dir': args.staging_dir,
+        'annotator_id': args.annotator_id,
+        'machine_id': args.machine_id,
+        'nano_id': args.nano_id,
+        'checksums': entries,
+        'expected_ontology': list(args.expected_ontology or []),
+        'unconstrained': bool(args.unconstrained),
+        'force': bool(args.force),
+    }
+    _dispatch(
+        'integrate-annotations',
+        params,
+        args,
+        overrides={'malformed_checksum_paths': malformed_paths},
+    )
+
+
+def _shim_cleanup(args: argparse.Namespace) -> None:
+    """Deprecated ``cleanup`` subcommand — shim over ``rpc``."""
+    _dispatch('cleanup', {'staging_dir': args.staging_dir}, args)
+
+
+def _shim_healthcheck(args: argparse.Namespace) -> None:
+    """Deprecated ``healthcheck`` subcommand — shim over ``rpc``."""
+    _dispatch('healthcheck', {}, args)
+
+
 # -- Parser ------------------------------------------------------------------
 
 
@@ -1706,8 +2042,24 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest='command')
 
-    # list-stores
-    ls = subparsers.add_parser('list-stores')
+    # rpc — the annotator-facing transport (wire protocol v2).
+    rpc = subparsers.add_parser(
+        'rpc',
+        help='Serve one JSON request from stdin (wire protocol v2).',
+        description=(
+            'Read a single JSON object {"protocol_version": 2, "method": '
+            '<name>, "params": {...}} from stdin (to EOF), dispatch, and '
+            'write a single JSON response to stdout.'
+        ),
+    )
+    rpc.set_defaults(func=_run_rpc)
+
+    # list-stores (deprecated shim)
+    ls = subparsers.add_parser(
+        'list-stores',
+        help=f'[deprecated] List zarr stores. {_DEPRECATION_NOTE}',
+        description=_DEPRECATION_NOTE,
+    )
     ls.add_argument(
         '--if-version',
         type=int,
@@ -1719,14 +2071,18 @@ def main() -> None:
             'full catalog.'
         ),
     )
-    ls.set_defaults(func=_run_list_stores)
+    ls.set_defaults(func=_shim_list_stores)
 
-    # prepare-pull (single-store)
+    # prepare-pull (single-store, deprecated shim)
     # Note: ``--staging-dir`` used to be a client-controllable override but
     # was removed for security — the server is now authoritative over the
     # staging path.  Operators redirect staging via ``[storage].staging_dir``
     # in server.toml.
-    pp = subparsers.add_parser('prepare-pull')
+    pp = subparsers.add_parser(
+        'prepare-pull',
+        help=f'[deprecated] Stage a store for pull. {_DEPRECATION_NOTE}',
+        description=_DEPRECATION_NOTE,
+    )
     pp.add_argument('--store', required=True, help='Store name to pull.')
     pp.add_argument('--include-existing-annotations', nargs='*')
     pp.add_argument('--compress', action='store_true')
@@ -1739,10 +2095,14 @@ def main() -> None:
             'overrides this flag; a disagreement fails the request.'
         ),
     )
-    pp.set_defaults(func=_run_prepare_pull)
+    pp.set_defaults(func=_shim_prepare_pull)
 
-    # integrate-annotations
-    ia = subparsers.add_parser('integrate-annotations')
+    # integrate-annotations (deprecated shim)
+    ia = subparsers.add_parser(
+        'integrate-annotations',
+        help=f'[deprecated] Integrate pushed annotations. {_DEPRECATION_NOTE}',
+        description=_DEPRECATION_NOTE,
+    )
     ia.add_argument('staging_dir')
     ia.add_argument('--annotator-id', required=True)
     ia.add_argument('--machine-id', required=True)
@@ -1769,12 +2129,16 @@ def main() -> None:
             'exactly one must be specified.'
         ),
     )
-    ia.set_defaults(func=_run_integrate_annotations)
+    ia.set_defaults(func=_shim_integrate_annotations)
 
-    # cleanup
-    cl = subparsers.add_parser('cleanup')
+    # cleanup (deprecated shim)
+    cl = subparsers.add_parser(
+        'cleanup',
+        help=f'[deprecated] Remove a staging dir. {_DEPRECATION_NOTE}',
+        description=_DEPRECATION_NOTE,
+    )
     cl.add_argument('staging_dir')
-    cl.set_defaults(func=_run_cleanup)
+    cl.set_defaults(func=_shim_cleanup)
 
     # gc
     gc = subparsers.add_parser('gc')
@@ -1786,9 +2150,13 @@ def main() -> None:
     va.add_argument('--stores', nargs='*')
     va.set_defaults(func=_run_validate_attributes)
 
-    # healthcheck
-    hc = subparsers.add_parser('healthcheck')
-    hc.set_defaults(func=_run_healthcheck)
+    # healthcheck (deprecated shim)
+    hc = subparsers.add_parser(
+        'healthcheck',
+        help=f'[deprecated] Server self-check. {_DEPRECATION_NOTE}',
+        description=_DEPRECATION_NOTE,
+    )
+    hc.set_defaults(func=_shim_healthcheck)
 
     # catalog
     cat = subparsers.add_parser(
