@@ -1224,13 +1224,16 @@ class TestIntegrateAnnotationsErrors:
         errors = [i for i in store_result['issues'] if i['severity'] == 'error']
         assert errors
 
-    def test_force_allows_integration_despite_errors(
+    def test_force_cannot_bypass_validation_errors(
         self,
         stores_dir_factory,
         staging_dir_with_annotations,
         server_argv,
         parsed_stdout,
     ):
+        """Error-severity issues always fail the store — ``--force`` may
+        only accept warnings (arch plan A.2, decision 3).  No annotation
+        group lands in zarr and no provenance line is written."""
         stores_dir = stores_dir_factory(('alpha',))
         staging = staging_dir_with_annotations(
             store_names=['alpha'],
@@ -1238,15 +1241,109 @@ class TestIntegrateAnnotationsErrors:
             seg_segments=[{'id': 's0', 'name': 'cochlea', 'label_value': 1}],
         )
 
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv, stores_dir=stores_dir, staging_dir=staging, force=True
+                )
+            )
+        assert excinfo.value.code == 1
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'failed'
+        assert store_result['code'] == 'validation_failed'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+        assert not (stores_dir / '.meta' / 'provenance.jsonl').exists()
+
+    def test_warnings_only_with_force_integrates_and_stamps_forced(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Warnings-only + force → integrated; the accepted warnings land
+        in the provenance record together with ``forced: true``, and the
+        annotation's zarr attrs carry ``forced: true``."""
+        stores_dir = stores_dir_factory(('alpha',))
+        # Label 1 present in the volume but not declared in the header:
+        # warning-severity only under the unconstrained ontology.
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        staging = staging_dir_with_annotations(
+            store_names=['alpha'],
+            seg_label_map=lm,
+            seg_segments=[],
+        )
+
         server_cli._run_integrate_annotations(
             _integrate_argv(
-                server_argv, stores_dir=stores_dir, staging_dir=staging, force=True
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                unconstrained=True,
+                force=True,
             )
         )
 
         store_result = parsed_stdout()['stores']['alpha']
         assert store_result['status'] == 'integrated'
-        assert len(_written_annotations(stores_dir / 'alpha.zarr')) == 1
+        warnings = [i for i in store_result['issues'] if i['severity'] == 'warning']
+        assert warnings
+
+        jsonl_path = stores_dir / '.meta' / 'provenance.jsonl'
+        lines = [
+            json.loads(line)
+            for line in jsonl_path.read_text().splitlines()
+            if line.strip()
+        ]
+        assert len(lines) == 1
+        record = lines[0]
+        assert record['forced'] is True
+        assert [i['severity'] for i in record['issues']] == ['warning']
+
+        written = _written_annotations(stores_dir / 'alpha.zarr')
+        assert len(written) == 1
+        arr = zarr.open_array(written[0] / 'data', mode='r')
+        assert dict(arr.attrs)['forced'] is True
+
+    def test_warnings_only_without_force_integrates_without_forced_stamp(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Warnings never block integration; without force there is no
+        ``forced`` stamp anywhere — pre-A.2 records stay byte-identical."""
+        stores_dir = stores_dir_factory(('alpha',))
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        staging = staging_dir_with_annotations(
+            store_names=['alpha'],
+            seg_label_map=lm,
+            seg_segments=[],
+        )
+
+        server_cli._run_integrate_annotations(
+            _integrate_argv(
+                server_argv,
+                stores_dir=stores_dir,
+                staging_dir=staging,
+                unconstrained=True,
+            )
+        )
+
+        store_result = parsed_stdout()['stores']['alpha']
+        assert store_result['status'] == 'integrated'
+
+        jsonl_path = stores_dir / '.meta' / 'provenance.jsonl'
+        record = json.loads(jsonl_path.read_text().splitlines()[0])
+        assert 'forced' not in record
+
+        written = _written_annotations(stores_dir / 'alpha.zarr')
+        arr = zarr.open_array(written[0] / 'data', mode='r')
+        assert 'forced' not in dict(arr.attrs)
 
     def test_parse_error_recorded_in_issues(
         self,

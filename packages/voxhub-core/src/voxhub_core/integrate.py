@@ -69,6 +69,7 @@ def write_segmentation_to_zarr(
     *,
     ontology: Ontology | None = None,
     force: bool = False,
+    forced: bool = False,
 ) -> None:
     """Write a segmentation label map into a zarr store.
 
@@ -84,6 +85,10 @@ def write_segmentation_to_zarr(
         Ontology to record in array attributes.
     force : bool
         Overwrite existing group/array if present.
+    forced : bool
+        The annotation was accepted with warnings under a caller's force
+        flag.  Stamped as an additive ``forced: true`` zarr attr only
+        when set, so audits can find force-accepted annotations.
     """
     root = zarr.open_group(zarr_path, mode='r+')
 
@@ -131,6 +136,8 @@ def write_segmentation_to_zarr(
     if ontology is not None:
         attributes['ontology'] = ontology.name
         attributes['ontology_version'] = ontology.version
+    if forced:
+        attributes['forced'] = True
 
     arr.update_attributes(attributes)
 
@@ -142,6 +149,7 @@ def write_landmarks_to_zarr(
     *,
     ontology: Ontology | None = None,
     force: bool = False,
+    forced: bool = False,
 ) -> None:
     """Write landmark points into a zarr store.
 
@@ -157,6 +165,10 @@ def write_landmarks_to_zarr(
         Ontology to record in array attributes.
     force : bool
         Overwrite existing group/array if present.
+    forced : bool
+        The annotation was accepted with warnings under a caller's force
+        flag.  Stamped as an additive ``forced: true`` zarr attr only
+        when set, so audits can find force-accepted annotations.
     """
     root = zarr.open_group(zarr_path, mode='r+')
 
@@ -198,6 +210,8 @@ def write_landmarks_to_zarr(
     if ontology is not None:
         attributes['ontology'] = ontology.name
         attributes['ontology_version'] = ontology.version
+    if forced:
+        attributes['forced'] = True
 
     arr.update_attributes(attributes)
 
@@ -253,7 +267,12 @@ def integrate(
         Explicit opt-in to unconstrained integration.  Mutually
         exclusive with ``ontology``.
     force : bool
-        Overwrite existing annotations / ignore errors.
+        Overwrite existing annotation arrays and proceed past stores
+        whose validation produced error-severity issues.  Those stores
+        are still never integrated — the same rule the server enforces:
+        force may only accept *warnings*, never errors (arch plan A.2).
+        A store integrated with warnings under force gets an additive
+        ``forced: true`` zarr attr for auditability.
     validate_only : bool
         Only validate, don't write to zarr.
     console : Console | None
@@ -462,6 +481,13 @@ def integrate(
     for store_name, zarr_path, seg_data, lmk_data in stores_to_integrate:
         console.print(f'  Integrating [green]{store_name}[/green] ...')
 
+        # Workflow parity with the server (arch plan A.2): ``force`` was
+        # exercised iff it accepted warnings — stamp ``forced: true`` in
+        # the annotation's zarr attrs so audits can find force-accepted
+        # annotations.  Stores with errors never reach this loop.
+        warnings_ = [i for i in all_issues.get(store_name, []) if i.severity == 'warning']
+        forced = force and bool(warnings_)
+
         try:
             if seg_data is not None:
                 short_random = generate_nano_id(size=4)
@@ -474,6 +500,7 @@ def integrate(
                     seg_path,
                     ontology=seg_ontology,
                     force=force,
+                    forced=forced,
                 )
                 console.print(f'    wrote segmentation -> {seg_path}')
 
@@ -488,6 +515,7 @@ def integrate(
                     lmk_path,
                     ontology=lmk_ontology,
                     force=force,
+                    forced=forced,
                 )
                 console.print(f'    wrote landmarks -> {lmk_path}')
 

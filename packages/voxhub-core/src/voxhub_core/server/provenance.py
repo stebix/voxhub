@@ -31,6 +31,7 @@ def record_provenance(
     source_file: str,
     identity_source: str | None = None,
     issues: list[IssueRecord] | None = None,
+    forced: bool = False,
 ) -> None:
     """Record full provenance for an annotation integration.
 
@@ -68,6 +69,12 @@ def record_provenance(
         supplied; readers must tolerate its absence on older records.
     issues : list[IssueRecord] | None
         Validation issues (warnings that were accepted).
+    forced : bool
+        ``True`` when the annotation was accepted with warnings under
+        ``--force`` (force may never override error-severity issues).
+        Recorded as an additive ``forced: true`` field in both the zarr
+        attrs and the JSONL line only when set, so audits can find
+        force-accepted annotations; readers must tolerate its absence.
     """
     timestamp = datetime.now(UTC).isoformat()
     zarr_path = stores_dir / f'{store_name}.zarr'
@@ -93,6 +100,10 @@ def record_provenance(
     # Additive field: only stamp when known so pre-B records stay unchanged.
     if identity_source is not None:
         provenance_attrs['identity_source'] = identity_source
+    # Additive field: only stamp when force actually accepted warnings, so
+    # clean integrations stay byte-identical to pre-A.2 records.
+    if forced:
+        provenance_attrs['forced'] = True
     node.update_attributes(provenance_attrs)
 
     # Append to provenance JSONL index.
@@ -120,6 +131,9 @@ def record_provenance(
     # pre-B lines round-trip unchanged.
     if identity_source is not None:
         record['identity_source'] = identity_source
+    # Additive field: only present when force accepted warnings (A.2).
+    if forced:
+        record['forced'] = True
 
     # The central JSONL is appended to across *all* stores, so the per-store
     # store_lock does not serialize these writes.  O_APPEND atomicity only

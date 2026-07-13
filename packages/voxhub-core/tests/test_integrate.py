@@ -470,6 +470,96 @@ class TestIntegrate:
         root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
         assert 'annotations' in list(root)
 
+    def test_force_never_integrates_error_stores(self, tmp_path, inner_ear_ontology):
+        """Server parity (arch plan A.2): ``force=True`` suppresses the
+        RuntimeError but a store with error-severity issues is still
+        never written — no flag combination can land an invalid
+        annotation."""
+        stores_dir = tmp_path / 'zarr'
+        stores_dir.mkdir()
+        create_zarr_store(stores_dir / 'mystore.zarr')
+
+        staging = tmp_path / 'staging'
+        build_staging_dir(
+            staging,
+            'mystore',
+            seg_label_map=np.zeros((8, 12, 14), dtype=np.int16),  # wrong shape
+            seg_segments=[],
+        )
+
+        issues = integrate(
+            staging,
+            stores_dir,
+            annotator_id='alice',
+            nano_id='abc12345',
+            ontology=inner_ear_ontology,
+            force=True,
+        )
+
+        assert _errors(issues['mystore'])
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
+        assert 'annotations' not in list(root)
+
+    def test_force_with_warnings_stamps_forced_attr(self, tmp_path):
+        """Server parity: warnings-only + force → integrated, and the
+        annotation's zarr attrs carry an additive ``forced: true``."""
+        stores_dir = tmp_path / 'zarr'
+        stores_dir.mkdir()
+        create_zarr_store(stores_dir / 'mystore.zarr')
+
+        staging = tmp_path / 'staging'
+        # Label 1 present in the volume but not declared in the header:
+        # warning-severity only under the unconstrained ontology.
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        build_staging_dir(staging, 'mystore', seg_label_map=lm, seg_segments=[])
+
+        issues = integrate(
+            staging,
+            stores_dir,
+            annotator_id='alice',
+            nano_id='abc12345',
+            unconstrained=True,
+            force=True,
+        )
+
+        assert _errors(issues['mystore']) == []
+        assert any(i.severity == 'warning' for i in issues['mystore'])
+
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
+        ann_dir = root['annotations']['alice-abc12345']
+        instance = next(iter(ann_dir.group_keys()))
+        attrs = dict(ann_dir[instance]['data'].attrs)
+        assert attrs['forced'] is True
+
+    def test_warnings_without_force_leave_no_forced_attr(self, tmp_path):
+        """Warnings never block integration; without force there is no
+        ``forced`` stamp — clean records stay byte-identical."""
+        stores_dir = tmp_path / 'zarr'
+        stores_dir.mkdir()
+        create_zarr_store(stores_dir / 'mystore.zarr')
+
+        staging = tmp_path / 'staging'
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        lm[0, 0, 0] = 1
+        build_staging_dir(staging, 'mystore', seg_label_map=lm, seg_segments=[])
+
+        issues = integrate(
+            staging,
+            stores_dir,
+            annotator_id='alice',
+            nano_id='abc12345',
+            unconstrained=True,
+        )
+
+        assert any(i.severity == 'warning' for i in issues['mystore'])
+
+        root = zarr.open_group(stores_dir / 'mystore.zarr', mode='r')
+        ann_dir = root['annotations']['alice-abc12345']
+        instance = next(iter(ann_dir.group_keys()))
+        attrs = dict(ann_dir[instance]['data'].attrs)
+        assert 'forced' not in attrs
+
     def test_multi_annotator_isolation(self, tmp_path, inner_ear_ontology):
         """Two annotators integrating to the same store get separate paths."""
         stores_dir, staging1 = self._setup(tmp_path)

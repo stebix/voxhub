@@ -421,6 +421,11 @@ class IntegrateResult:
     annotations: list[IntegratedAnnotation]
     issues: list[IssueRecord]
 
+    code: str | None = None
+    """Machine-readable failure code, additive.  ``'validation_failed'``
+    when the store failed because error-severity validation issues were
+    present (never overridable by client flags); ``None`` otherwise."""
+
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
@@ -432,10 +437,12 @@ class IntegrateResult:
             IssueRecord.from_dict(i)  # type: ignore[arg-type]
             for i in d.get('issues', [])  # type: ignore[union-attr]
         ]
+        code = d.get('code')
         return cls(
             status=str(d['status']),
             annotations=annotations,
             issues=issues,
+            code=str(code) if code is not None else None,
         )
 
 

@@ -1012,6 +1012,11 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         issues.extend(seg_ont_issues)
         issues.extend(lmk_ont_issues)
         annotations_written: list[dict[str, Any]] = []
+        # Set when error-severity validation issues block a write.  Errors
+        # always fail the store — ``--force`` may only accept warnings
+        # (arch plan A.2, decision 3) — and the failure is reported with
+        # ``code='validation_failed'`` so the client can render it.
+        validation_failed = False
 
         with store_lock(zarr_path):
             # Integrate segmentation.
@@ -1072,13 +1077,26 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                         issues.extend(seg_issues)
 
                         errors = [i for i in seg_issues if i.severity == 'error']
-                        if errors and not force:
+                        if errors:
+                            # Error-severity issues always fail the store:
+                            # no client flag combination (including
+                            # --force) can override them (arch plan A.2).
+                            validation_failed = True
                             log.warning(
                                 'seg_validation_errors',
                                 store=store_name,
                                 errors=[i.message for i in errors],
+                                force_requested=force,
                             )
                         else:
+                            seg_warnings = [
+                                i for i in seg_issues if i.severity == 'warning'
+                            ]
+                            # ``force`` was exercised iff it accepted
+                            # warnings; stamp that in provenance + zarr
+                            # attrs so audits can find force-accepted
+                            # annotations.
+                            seg_forced = force and bool(seg_warnings)
                             seg_data = parse_seg_nrrd(seg_file)
                             ont_name = (
                                 seg_ontology.name if seg_ontology else 'unconstrained'
@@ -1095,6 +1113,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                 seg_path,
                                 ontology=seg_ontology,
                                 force=force,
+                                forced=seg_forced,
                             )
 
                             seg_checksum = compute_sha256(seg_file)
@@ -1118,9 +1137,8 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                     source_nrrd_checksum=seg_checksum,
                                     source_file=seg_file.name,
                                     identity_source=identity_source,
-                                    issues=[
-                                        i for i in seg_issues if i.severity == 'warning'
-                                    ],
+                                    issues=seg_warnings,
+                                    forced=seg_forced,
                                 )
                             except Exception:
                                 _rollback_annotation_group(zarr_path, seg_path)
@@ -1196,13 +1214,26 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                         issues.extend(lmk_issues)
 
                         errors = [i for i in lmk_issues if i.severity == 'error']
-                        if errors and not force:
+                        if errors:
+                            # Error-severity issues always fail the store:
+                            # no client flag combination (including
+                            # --force) can override them (arch plan A.2).
+                            validation_failed = True
                             log.warning(
                                 'lmk_validation_errors',
                                 store=store_name,
                                 errors=[i.message for i in errors],
+                                force_requested=force,
                             )
                         else:
+                            lmk_warnings = [
+                                i for i in lmk_issues if i.severity == 'warning'
+                            ]
+                            # ``force`` was exercised iff it accepted
+                            # warnings; stamp that in provenance + zarr
+                            # attrs so audits can find force-accepted
+                            # annotations.
+                            lmk_forced = force and bool(lmk_warnings)
                             lmk_data = parse_mrk_json(lmk_file)
                             ont_name = (
                                 lmk_ontology.name if lmk_ontology else 'unconstrained'
@@ -1219,6 +1250,7 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                 lmk_path,
                                 ontology=lmk_ontology,
                                 force=force,
+                                forced=lmk_forced,
                             )
 
                             lmk_checksum = compute_sha256(lmk_file)
@@ -1242,9 +1274,8 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                                     source_nrrd_checksum=lmk_checksum,
                                     source_file=lmk_file.name,
                                     identity_source=identity_source,
-                                    issues=[
-                                        i for i in lmk_issues if i.severity == 'warning'
-                                    ],
+                                    issues=lmk_warnings,
+                                    forced=lmk_forced,
                                 )
                             except Exception:
                                 _rollback_annotation_group(zarr_path, lmk_path)
@@ -1285,11 +1316,14 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                     error=str(exc),
                 )
 
-        stores_result[store_name] = {
+        store_result: dict[str, Any] = {
             'status': ('integrated' if annotations_written else 'failed'),
             'annotations': annotations_written,
             'issues': [{'severity': i.severity, 'message': i.message} for i in issues],
         }
+        if store_result['status'] == 'failed' and validation_failed:
+            store_result['code'] = 'validation_failed'
+        stores_result[store_name] = store_result
 
     duration = time.monotonic() - t0
     any_failed = any(r['status'] != 'integrated' for r in stores_result.values())
