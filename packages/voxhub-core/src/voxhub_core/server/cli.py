@@ -72,6 +72,7 @@ from voxhub_core.server.settings import (
     SettingsError,
     load_settings,
 )
+from voxhub_core.slicer import estimate_seg_nrrd_ram_bytes
 from voxhub_schema import (
     PROTOCOL_VERSION,
     UNCONSTRAINED_SEGMENTATION,
@@ -1057,9 +1058,15 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
                         # 2.6): validate_seg_preflight materializes the full
                         # .seg.nrrd into memory to validate it (and the write
                         # path below re-parses it once more), so refuse this
-                        # store rather than risk an OOM kill.
+                        # store rather than risk an OOM kill.  Budget on the
+                        # DECOMPRESSED size estimated from the NRRD header
+                        # (shape x itemsize) — Slicer writes gzip NRRD and
+                        # label maps compress 20-100x, so the on-disk file
+                        # size wildly under-estimates the parse cost.  A
+                        # header that cannot be read raises (malformed NRRD)
+                        # and fails this store closed via the handler below.
                         seg_mem_warnings = check_memory_budget(
-                            seg_file.stat().st_size,
+                            estimate_seg_nrrd_ram_bytes(seg_file),
                             budget=seg_budget,
                             context=store_name,
                         )

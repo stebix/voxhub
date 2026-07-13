@@ -864,6 +864,83 @@ class TestIntegrateMemoryAndDiskPreconditions:
         assert any('memory' in i['message'].lower() for i in result['issues'])
         assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
+    def test_memory_gate_keys_on_decompressed_estimate_not_file_size(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+        monkeypatch,
+    ):
+        """A tiny gzip NRRD whose header declares a huge volume must be
+        refused: the gate keys on the header's decompressed-size estimate
+        (shape x itemsize), not the compressed on-disk size.  Slicer
+        writes gzip NRRD; label maps compress 20-100x, so a 3 GB volume
+        arrives as ~30 MB and would previously sail through the gate and
+        OOM the box at parse time."""
+        from voxhub_core import memory_budget as mb
+        from voxhub_core.server import settings as settings_mod
+
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+        # Overwrite the staged seg with a hand-written header claiming an
+        # 8 GB uint8 volume, in a sub-KB file.  Only the header is ever
+        # read before the gate fires, so no voxel data is needed.
+        seg_file = staging / 'alpha' / 'segmentation.seg.nrrd'
+        seg_file.write_text(
+            'NRRD0004\n'
+            'type: unsigned char\n'
+            'dimension: 3\n'
+            'sizes: 2000 2000 2000\n'
+            'encoding: gzip\n'
+            '\n'
+        )
+        assert seg_file.stat().st_size < 1024
+
+        memory = settings_mod.MemorySettings(
+            max_safe_volume_mb=512,
+            refuse_when_low_memory=True,
+            safety_factor=2.0,
+        )
+        # 100 MB available: ample against the on-disk size (the old,
+        # broken gate input) but hopeless against the ~8 GB estimate.
+        monkeypatch.setattr(mb, 'read_available_bytes', lambda: 100 * 1024 * 1024)
+
+        argv = _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+        argv.memory_settings = memory
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(argv)
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        assert any('memory' in i['message'].lower() for i in result['issues'])
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_unreadable_nrrd_header_fails_store_closed(
+        self,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """If the header needed for the memory estimate cannot be read,
+        the store fails (malformed NRRD) — the gate is never skipped."""
+        stores_dir = stores_dir_factory(('alpha',))
+        staging = staging_dir_with_annotations(store_names=['alpha'])
+        (staging / 'alpha' / 'segmentation.seg.nrrd').write_bytes(b'NOT AN NRRD')
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        assert any(i['severity'] == 'error' for i in result['issues'])
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
     def test_integrate_refuses_when_disk_full(
         self,
         stores_dir_factory,

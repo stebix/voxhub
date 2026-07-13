@@ -19,6 +19,7 @@ from typing import Any
 import attrs
 import nrrd
 import numpy as np
+from nrrd.reader import _determine_datatype
 
 
 class SlicerParseError(ValueError):
@@ -197,6 +198,61 @@ def _parse_segment(header: dict[str, Any], idx: int, path: Path) -> Segment:
         label_value=label_value,
         color=color,
     )
+
+
+def estimate_seg_nrrd_ram_bytes(path: str | Path) -> int:
+    """Estimate the in-RAM size of an NRRD's voxel array from its header.
+
+    Reads only the NRRD header (``nrrd.read_header`` — no voxel data), so
+    the cost is O(header) regardless of file size.  The estimate is
+    ``prod(sizes) * dtype.itemsize``: the RAM the array occupies once
+    materialized, independent of the on-disk encoding (raw, gzip, bzip2
+    all decode to the same array).  Slicer writes gzip NRRD and label
+    maps compress 20-100x, so the compressed *file size* wildly
+    under-estimates the parse cost — never gate memory budgets on it.
+
+    Parameters
+    ----------
+    path : str | Path
+        Path to the ``.nrrd`` / ``.seg.nrrd`` file.
+
+    Returns
+    -------
+    int
+        Predicted raw array bytes of the parsed volume.
+
+    Raises
+    ------
+    SegNrrdParseError
+        If the header cannot be read or does not declare usable
+        ``sizes`` / ``type`` fields (malformed NRRD).  Callers gating
+        memory budgets must treat this as a failure of the file, not
+        skip the check (fail closed).
+    """
+    path = Path(path)
+    try:
+        header = nrrd.read_header(str(path))
+        # The same header->numpy-dtype resolution nrrd.read() itself
+        # applies (handles the endian requirement for multi-byte types).
+        dtype = np.dtype(_determine_datatype(header))
+    except Exception as exc:
+        raise SegNrrdParseError(
+            path, f'failed to read NRRD header for memory estimation: {exc}'
+        ) from exc
+
+    sizes = header.get('sizes')
+    if sizes is None:
+        raise SegNrrdParseError(path, 'NRRD header missing sizes', field='sizes')
+    shape = [int(s) for s in np.atleast_1d(np.asarray(sizes))]
+    if not shape or any(s <= 0 for s in shape):
+        raise SegNrrdParseError(
+            path, f'NRRD header declares invalid sizes {shape}', field='sizes'
+        )
+
+    n_elements = 1
+    for s in shape:
+        n_elements *= s
+    return n_elements * dtype.itemsize
 
 
 def parse_seg_nrrd(path: str | Path) -> SegmentationData:

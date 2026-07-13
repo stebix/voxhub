@@ -14,6 +14,7 @@ from voxhub_core.slicer import (
     SegNrrdParseError,
     SlicerParseError,
     build_seg_nrrd_header,
+    estimate_seg_nrrd_ram_bytes,
     parse_mrk_json,
     parse_seg_nrrd,
     write_mrk_json,
@@ -359,3 +360,70 @@ class TestParseMrkJsonErrors:
             parse_mrk_json(path)
         assert exc.value.path == path
         assert exc.value.reason  # non-empty
+
+
+# ===================================================================
+# HEADER-ONLY RAM ESTIMATION
+# ===================================================================
+
+
+class TestEstimateSegNrrdRamBytes:
+    """Covers ``estimate_seg_nrrd_ram_bytes`` — the header-only estimate
+    the server's integrate memory gate keys on (launch plan blocker:
+    gzip NRRD label maps compress 20-100x, so file size is useless)."""
+
+    def test_matches_shape_times_itemsize(self, tmp_path):
+        lm = np.zeros(SHAPE, dtype=np.int16)
+        path = _write_seg(tmp_path / 'test.seg.nrrd', lm, [])
+        expected = int(np.prod(SHAPE)) * np.dtype(np.int16).itemsize
+        assert estimate_seg_nrrd_ram_bytes(path) == expected
+
+    def test_keys_on_declared_sizes_not_file_size(self, tmp_path):
+        """A tiny file whose header declares a huge volume must estimate
+        the huge decompressed size — the whole point of the gate."""
+        path = tmp_path / 'big.seg.nrrd'
+        path.write_text(
+            'NRRD0004\n'
+            'type: unsigned char\n'
+            'dimension: 3\n'
+            'sizes: 2000 2000 2000\n'
+            'encoding: gzip\n'
+            '\n'
+        )
+        assert path.stat().st_size < 1024
+        assert estimate_seg_nrrd_ram_bytes(path) == 2000 * 2000 * 2000
+
+    def test_estimate_is_encoding_independent(self, tmp_path):
+        """raw and gzip encodings decode to the same array, so the
+        estimate must be identical for identical shape/dtype headers."""
+        header = 'NRRD0004\ntype: unsigned char\ndimension: 3\nsizes: 64 64 64\n'
+        raw = tmp_path / 'raw.seg.nrrd'
+        raw.write_text(header + 'encoding: raw\n\n')
+        gz = tmp_path / 'gz.seg.nrrd'
+        gz.write_text(header + 'encoding: gzip\n\n')
+        assert estimate_seg_nrrd_ram_bytes(raw) == estimate_seg_nrrd_ram_bytes(gz)
+        assert estimate_seg_nrrd_ram_bytes(raw) == 64 * 64 * 64
+
+    def test_malformed_file_raises_parse_error(self, tmp_path):
+        path = tmp_path / 'bad.seg.nrrd'
+        path.write_bytes(b'NOT AN NRRD')
+        with pytest.raises(SegNrrdParseError) as exc:
+            estimate_seg_nrrd_ram_bytes(path)
+        assert exc.value.path == path
+
+    def test_missing_file_raises_parse_error(self, tmp_path):
+        with pytest.raises(SegNrrdParseError):
+            estimate_seg_nrrd_ram_bytes(tmp_path / 'absent.seg.nrrd')
+
+    def test_zero_size_dimension_raises(self, tmp_path):
+        path = tmp_path / 'zero.seg.nrrd'
+        path.write_text(
+            'NRRD0004\n'
+            'type: unsigned char\n'
+            'dimension: 3\n'
+            'sizes: 0 10 10\n'
+            'encoding: gzip\n'
+            '\n'
+        )
+        with pytest.raises(SegNrrdParseError):
+            estimate_seg_nrrd_ram_bytes(path)
