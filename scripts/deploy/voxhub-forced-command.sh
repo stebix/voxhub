@@ -9,8 +9,9 @@
 # Two-branch contract (docs/plans/c-transport-rpc-implementation-plan.md,
 # "Forced-command wrapper contract"):
 #
-#   1. SSH_ORIGINAL_COMMAND starts with 'rsync ' → exec rrsync READ-ONLY,
-#      rooted at the staging root (bulk data transfer).
+#   1. SSH_ORIGINAL_COMMAND starts with 'rsync ' → exec rrsync READ-WRITE,
+#      rooted at the staging root (bulk data transfer: pull downloads AND
+#      push uploads into server-issued staging dirs).
 #   2. SSH_ORIGINAL_COMMAND equals 'voxhub-server rpc' or bare 'rpc' →
 #      exec voxhub-server rpc.  The JSON-RPC request flows over stdin and
 #      the response over stdout, both untouched by this wrapper.
@@ -24,11 +25,19 @@
 # subcommands run only via a real shell on the server.
 #
 # Security notes:
-#   * rrsync stays read-only (-ro) until push ships (launch plan 4.1-4.3).
-#     The future writable flip (launch 4.3) must add symlink defenses
-#     first: rsync -a preserves symlinks, so a writable staging root would
-#     let a malicious peer upload a symlink pointing at stores_dir or
-#     .meta/provenance.jsonl.  Read-only makes that moot for pull.
+#   * rrsync ran read-only (-ro) until push shipped (launch plan 4.3),
+#     because rsync -a preserves symlinks: a writable staging root lets a
+#     malicious peer upload a symlink pointing at stores_dir or
+#     .meta/provenance.jsonl, which later server-side file reads would
+#     follow.  The writable flip is now paired with the defenses that
+#     reasoning demanded: the client pushes with --no-links (no
+#     legitimate symlink exists in a push), and — the authoritative
+#     backstop, since a hostile client controls its own rsync flags —
+#     integrate-annotations refuses any staging entry that is a symlink
+#     or resolves outside the staging dir (per-store failure
+#     'invalid_staging_content', nothing integrated).  Writes remain
+#     confined to the staging root by rrsync; stores and provenance are
+#     only ever mutated by voxhub-server itself.
 #   * VOXHUB_ANNOTATOR (injected by sshd from the connecting key's
 #     environment= option; PermitUserEnvironment allowlists exactly that
 #     one variable) is left untouched: exec preserves the environment, so
@@ -80,14 +89,16 @@ case "$CMD" in
     'rsync '*)
         # Bulk-transfer branch.  rrsync re-parses SSH_ORIGINAL_COMMAND
         # itself (exec preserves the environment) and confines every path
-        # to $STAGING_ROOT.  -ro: read-only until push ships (see header).
+        # to $STAGING_ROOT.  Read-write since launch 4.3 (push uploads);
+        # symlink defenses live in the client (--no-links) and in
+        # integrate-annotations (see header security notes).
         if [[ -z "$STAGING_ROOT" || ! -d "$STAGING_ROOT" ]]; then
             # Unrendered wrapper without the env fallback, or a staging dir
             # that has vanished — refuse loudly rather than handing rrsync
             # a garbage root.
             deny server_misconfigured 'staging root is not configured on this server'
         fi
-        exec "$RRSYNC" -ro "$STAGING_ROOT"
+        exec "$RRSYNC" "$STAGING_ROOT"
         ;;
     'voxhub-server rpc' | 'rpc')
         # RPC branch: single fixed argv, stdin/stdout pass through.

@@ -194,8 +194,13 @@ def test_annotator_env_absent_is_not_fabricated(tmp_path):
 # -- rsync branch ------------------------------------------------------------
 
 
-def test_rsync_execs_rrsync_readonly_rooted_at_staging(tmp_path):
-    """An rsync server command re-execs through rrsync -ro <staging root>.
+def test_rsync_execs_rrsync_writable_rooted_at_staging(tmp_path):
+    """An rsync server command re-execs through rrsync <staging root>.
+
+    Read-WRITE since launch 4.3 (push uploads into server-issued staging
+    dirs) — no ``-ro`` flag.  The symlink threat that kept it read-only
+    is handled by the client's ``--no-links`` and the server's
+    ``invalid_staging_content`` refusal in integrate-annotations.
 
     The repo copy of the wrapper is unrendered (deploy.sh injects the
     staging root at install time), so this also covers the
@@ -212,7 +217,7 @@ def test_rsync_execs_rrsync_readonly_rooted_at_staging(tmp_path):
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload['stub'] == 'rrsync'
-    assert payload['argv'] == ['-ro', str(staging)]
+    assert payload['argv'] == [str(staging)]
     # rrsync re-parses SSH_ORIGINAL_COMMAND itself; exec must preserve it.
     assert payload['SSH_ORIGINAL_COMMAND'] == _RSYNC_CMD
     assert not _stub_ran(bin_dir, 'voxhub-server')

@@ -19,6 +19,7 @@ from _core_helpers import (
     ORIGIN_LPS,
     SHAPE,
     SPACING_MM,
+    build_staging_dir_entries,
     default_seg_label_map,
     write_seg_nrrd,
 )
@@ -28,6 +29,7 @@ from voxhub_core.server import cli as server_cli
 from voxhub_schema import (
     PROTOCOL_VERSION,
     UNCONSTRAINED_SEGMENTATION,
+    ChecksumEntry,
     validate_seg_preflight,
 )
 
@@ -1685,6 +1687,150 @@ class TestIntegrateChecksumFailClosed:
         assert result['status'] == 'failed'
         errors = [i for i in result['issues'] if i['severity'] == 'error']
         assert any('malformed' in e['message'].lower() for e in errors)
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+
+# ===========================================================================
+# _run_integrate_annotations (symlink defense — task 4.3)
+# ===========================================================================
+
+
+class TestIntegrateSymlinkDefense:
+    """The push transport is writable (rrsync without -ro, launch 4.3) and
+    rsync ``-a`` preserves symlinks: a symlink in staging pointing at
+    stores_dir or ``.meta/provenance.jsonl`` could fool later file reads.
+    The client pushes with ``--no-links``; the server independently
+    refuses any staging entry that is a symlink or resolves outside the
+    staging dir — per-store failure ``code='invalid_staging_content'``,
+    nothing integrated.
+    """
+
+    def test_symlinked_annotation_file_fails_store(
+        self,
+        tmp_path,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        # A real, ontology-valid seg file OUTSIDE the staging dir — the
+        # symlink's read would succeed if the defense were missing.
+        outside = tmp_path / 'outside'
+        build_staging_dir_entries(outside)
+        staging = staging_dir_with_annotations(store_names=[])
+        store_dir = staging / 'alpha'
+        store_dir.mkdir()
+        (store_dir / 'segmentation.seg.nrrd').symlink_to(
+            outside / 'segmentation.seg.nrrd'
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        assert result['code'] == 'invalid_staging_content'
+        errors = [i for i in result['issues'] if i['severity'] == 'error']
+        assert any('symlink' in e['message'] for e in errors)
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_symlinked_store_dir_fails_store(
+        self,
+        tmp_path,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        stores_dir = stores_dir_factory(('alpha',))
+        outside = tmp_path / 'outside'
+        build_staging_dir_entries(outside)
+        staging = staging_dir_with_annotations(store_names=[])
+        (staging / 'alpha').symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['status'] == 'failed'
+        assert result['code'] == 'invalid_staging_content'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+
+    def test_clean_sibling_store_still_integrates(
+        self,
+        tmp_path,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """The refusal is per-store: a symlink in alpha must not block
+        bravo's clean integration (task 2.8 isolation contract)."""
+        stores_dir = stores_dir_factory(('alpha', 'bravo'))
+        outside = tmp_path / 'outside'
+        build_staging_dir_entries(outside)
+        staging = staging_dir_with_annotations(store_names=['bravo'])
+        store_dir = staging / 'alpha'
+        store_dir.mkdir()
+        (store_dir / 'segmentation.seg.nrrd').symlink_to(
+            outside / 'segmentation.seg.nrrd'
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(server_argv, stores_dir=stores_dir, staging_dir=staging)
+            )
+        assert excinfo.value.code == 1  # alpha failed → non-zero batch
+
+        payload = parsed_stdout()
+        assert payload['stores']['alpha']['status'] == 'failed'
+        assert payload['stores']['alpha']['code'] == 'invalid_staging_content'
+        assert payload['stores']['bravo']['status'] == 'integrated'
+        assert _written_annotations(stores_dir / 'alpha.zarr') == []
+        assert len(_written_annotations(stores_dir / 'bravo.zarr')) == 1
+
+    def test_symlink_refused_before_checksum_verification(
+        self,
+        tmp_path,
+        stores_dir_factory,
+        staging_dir_with_annotations,
+        server_argv,
+        parsed_stdout,
+    ):
+        """Even a symlink whose target would pass checksum verification is
+        refused — the content scan runs before any file read."""
+        stores_dir = stores_dir_factory(('alpha',))
+        outside = tmp_path / 'outside'
+        build_staging_dir_entries(outside)
+        target = outside / 'segmentation.seg.nrrd'
+        staging = staging_dir_with_annotations(store_names=[])
+        store_dir = staging / 'alpha'
+        store_dir.mkdir()
+        (store_dir / 'segmentation.seg.nrrd').symlink_to(target)
+        digest = server_cli.compute_sha256(target).removeprefix('sha256:')
+
+        with pytest.raises(SystemExit) as excinfo:
+            server_cli._run_integrate_annotations(
+                _integrate_argv(
+                    server_argv,
+                    stores_dir=stores_dir,
+                    staging_dir=staging,
+                    checksums=[
+                        ChecksumEntry(path='alpha/segmentation.seg.nrrd', sha256=digest)
+                    ],
+                )
+            )
+        assert excinfo.value.code == 1
+
+        result = parsed_stdout()['stores']['alpha']
+        assert result['code'] == 'invalid_staging_content'
         assert _written_annotations(stores_dir / 'alpha.zarr') == []
 
 

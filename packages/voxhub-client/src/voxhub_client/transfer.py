@@ -92,7 +92,12 @@ class RsyncTransfer:
 
         dst = f'{self.target.ssh_destination}:{remote_path}'
 
-        cmd = ['rsync', '-az']
+        # --no-links: there is no legitimate symlink in a push, and a
+        # symlink landing in server staging could point at server files
+        # (rsync -a would otherwise preserve it).  The server refuses
+        # symlinks independently (invalid_staging_content) — this flag
+        # keeps well-behaved clients from ever tripping that refusal.
+        cmd = ['rsync', '-az', '--no-links']
         if progress:
             cmd.append('--progress')
         cmd.extend(['-e', self._ssh_option(), local_path, dst])

@@ -112,6 +112,21 @@ class TestRsyncPush:
         assert cmd[-2].endswith('/')
         assert cmd[-1].endswith('/')
 
+    def test_push_refuses_symlinks(self, target):
+        """Push always carries --no-links: no legitimate symlink exists in
+        a push, and a symlink in server staging is an attack vector
+        (launch 4.3).  Pull does NOT carry it — pulls never contain
+        symlinks server-side, and adding it there would mask a server bug
+        rather than defend against anything."""
+        xfer = RsyncTransfer(target=target)
+        with patch('subprocess.run') as mock:
+            xfer.push('/local', '/remote', progress=False)
+        assert '--no-links' in mock.call_args[0][0]
+
+        with patch('subprocess.run') as mock:
+            xfer.pull('/remote', '/local', progress=False)
+        assert '--no-links' not in mock.call_args[0][0]
+
 
 # ===================================================================
 # SCP FALLBACK

@@ -823,6 +823,45 @@ def _resolve_ontologies(
     return ontologies, issues
 
 
+def _find_invalid_staging_entries(store_dir: Path, staging_dir: Path) -> list[str]:
+    """Detect symlinks and staging-escaping paths in a staged store dir.
+
+    The push transport is writable (rrsync without ``-ro``, launch 4.3)
+    and rsync ``-a`` preserves symlinks: a symlink in staging pointing at
+    ``stores_dir`` or ``.meta/provenance.jsonl`` could otherwise fool the
+    file reads below (checksum, parse, provenance).  The voxhub client
+    uploads with ``--no-links``, so any symlink arriving here is at best
+    a non-voxhub client and at worst an attack — the owning store is
+    refused wholesale (``code='invalid_staging_content'``) before any
+    staged file is read.
+
+    Checks the store dir itself plus every entry beneath it: an entry is
+    an offender when it ``is_symlink()`` or when its ``resolve()``
+    escapes the staging dir (belt-and-braces for resolution tricks a
+    plain symlink check might miss).
+
+    Returns
+    -------
+    list[str]
+        Human-readable offender descriptions; empty means clean.
+    """
+    root = staging_dir.resolve()
+    offenders: list[str] = []
+    for entry in (store_dir, *sorted(store_dir.rglob('*'))):
+        rel = entry.relative_to(staging_dir)
+        if entry.is_symlink():
+            offenders.append(f'{rel} is a symlink')
+            continue
+        try:
+            resolved = entry.resolve()
+        except OSError as exc:
+            offenders.append(f'{rel} could not be resolved: {exc}')
+            continue
+        if not resolved.is_relative_to(root):
+            offenders.append(f'{rel} resolves outside the staging dir ({resolved})')
+    return offenders
+
+
 def _rollback_annotation_group(zarr_path: Path, data_path: str) -> None:
     """Delete a just-written annotation group after a post-write failure.
 
@@ -979,6 +1018,31 @@ def _run_integrate_annotations(args: argparse.Namespace) -> None:
         zarr_path = stores_dir / f'{store_name}.zarr'
 
         if not zarr_path.is_dir():
+            continue
+
+        # Symlink / escape defense (task 4.3): refuse the store before
+        # reading ANY staged file — checksum verification of a symlink's
+        # target would otherwise "succeed" and launder outside content.
+        invalid_entries = _find_invalid_staging_entries(store_dir, staging_dir)
+        if invalid_entries:
+            detail = '; '.join(invalid_entries)
+            log.error('invalid_staging_content', store=store_name, detail=detail)
+            stores_result[store_name] = {
+                'status': 'failed',
+                'annotations': [],
+                'issues': [
+                    {
+                        'severity': 'error',
+                        'message': (
+                            f'Invalid staging content: {detail}. Symlinks '
+                            f'and paths escaping the staging dir are '
+                            f'refused; nothing from this store was '
+                            f'integrated.'
+                        ),
+                    }
+                ],
+                'code': 'invalid_staging_content',
+            }
             continue
 
         seg_file, lmk_file = find_annotation_files(store_dir)
