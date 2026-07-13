@@ -1,16 +1,17 @@
 # Loopback-sshd End-to-End Suite
 
-Launch plan 1.4 — the final regression gate for the SSH transport. Where the
-client loopback suite (`test_pull_e2e.py`, see the README) replaces ssh/rsync
-with in-process shims, this suite uses **all three for real**, on localhost,
-no root needed:
+Launch plan 1.4 + 4.4 — the final regression gate for the SSH transport.
+Where the client loopback suites (`test_pull_e2e.py` / `test_push_e2e.py`,
+see the README) replace ssh/rsync with in-process shims, this suite uses
+**all three for real**, on localhost, no root needed:
 
 - a throwaway `sshd` on a free high port, launched as the current user,
 - the repo's real `scripts/deploy/voxhub-forced-command.sh` as the per-key
   forced command,
-- the real `rrsync` confining the rsync branch to the staging root,
-- the real `SshRunner` / `RsyncTransfer` / `_run_pull` client code and the
-  real `voxhub-server rpc` dispatch (wire protocol v2).
+- the real `rrsync` confining the rsync branch (read-**write** since launch
+  4.3 — push uploads flow through it) to the staging root,
+- the real `SshRunner` / `RsyncTransfer` / `_run_pull` / `_run_push` client
+  code and the real `voxhub-server rpc` dispatch (wire protocol v3).
 
 This is the layer that hid launch findings 1.1–1.3 from every earlier suite,
 and the layer that exposed the absolute-staging-path rsync defect (see
@@ -60,12 +61,16 @@ injected transports are the real ones.
 
 | test | proves |
 |---|---|
-| `test_list_stores_end_to_end` | RPC through real sshd + wrapper returns the seeded store, `protocol_version` 2 |
+| `test_list_stores_end_to_end` | RPC through real sshd + wrapper returns the seeded store with the current `protocol_version` |
 | `test_forbidden_subcommand_rejected` | raw `ssh ... 'voxhub-server gc'` → `forbidden` envelope on stdout, exit 1 |
 | `test_key_bound_identity_reaches_server` | the key's `environment="VOXHUB_ANNOTATOR=…"` survives sshd + wrapper exec: a disagreeing client-sent `annotator_id` is refused (`identity_mismatch`), the agreeing one succeeds |
 | `test_pull_end_to_end` | full `_run_pull`: NRRD lands, checksums verify, manifest + trust sidecar written, staging dir reaped by the cleanup ACK |
 | `test_pull_with_spaces_in_dest` | a local destination containing spaces survives the real rsync (guards launch 1.2) |
 | `test_rsync_confined_to_staging` | rrsync serves the issued staging session (root-relative name) and refuses `stores_dir` via absolute path or `..` traversal |
+| `test_push_end_to_end` | full `_run_push` after a real pull: the annotation lands in the server zarr at the annotator-scoped path with provenance attrs (`identity_source: ssh_key`, no `forced` stamp), `.meta/provenance.jsonl` gains exactly one line, the push staging dir is reaped |
+| `test_push_rejects_bad_checksum` | a file corrupted after client-side checksum computation fails the store server-side (`Checksum mismatch` rendered per-store, exit 1); nothing is integrated |
+| `test_rsync_write_confined_to_staging` | writable rrsync still confines writes: a raw rsync write aimed at `stores_dir` (via `..` or absolute path) never lands there |
+| `test_symlink_via_raw_rsync_is_refused_by_integrate` | a symlink planted in staging via raw rsync (bypassing the client's `--no-links`) is refused by `integrate-annotations` with `code='invalid_staging_content'`; nothing is integrated (launch 4.3 defense, hostile-client path) |
 
 ## Requirements and skip behavior
 

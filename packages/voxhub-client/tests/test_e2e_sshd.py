@@ -7,8 +7,10 @@ this suite uses all three **for real**, on localhost, no root needed:
 * the repo's real ``scripts/deploy/voxhub-forced-command.sh`` as the
   per-key forced command (unrendered — env fallbacks supply the staging
   root and binary paths, exactly the contract the wrapper documents),
-* the real ``rrsync`` confining the rsync branch to the staging root,
-* the real ``SshRunner`` / ``RsyncTransfer`` / ``_run_pull`` client code.
+* the real ``rrsync`` confining the rsync branch (read-write since
+  launch 4.3) to the staging root,
+* the real ``SshRunner`` / ``RsyncTransfer`` / ``_run_pull`` /
+  ``_run_push`` client code.
 
 The ``authorized_keys`` entry mirrors ``scripts/deploy/add-annotator.sh``
 verbatim (``command=``, ``environment="VOXHUB_ANNOTATOR=..."``, the
@@ -40,7 +42,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
@@ -48,6 +50,8 @@ import attrs
 import pytest
 from _core_helpers import (  # pyright: ignore[reportMissingImports]
     create_zarr_store,
+    default_seg_label_map,
+    write_seg_nrrd,
 )
 
 from voxhub_client.cli import _compute_sha256
@@ -55,7 +59,12 @@ from voxhub_client.identity import Identity
 from voxhub_client.server_config import ServerConfig
 from voxhub_client.ssh import RemoteError, SshRunner, SshTarget
 from voxhub_client.transfer import RsyncTransfer
-from voxhub_schema import PROTOCOL_VERSION, PrepareResponse, PullManifest
+from voxhub_schema import (
+    PROTOCOL_VERSION,
+    PreparePushResponse,
+    PrepareResponse,
+    PullManifest,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WRAPPER = _REPO_ROOT / 'scripts' / 'deploy' / 'voxhub-forced-command.sh'
@@ -212,6 +221,27 @@ class SshdLoopback:
             ssh_cmd,
             f'{self.target.ssh_destination}:{remote}',
             f'{dest}/',
+        ]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+    def rsync_push(self, src: Path, remote_path: str) -> subprocess.CompletedProcess[str]:
+        """Run a raw ``rsync`` push (no client code, symlinks preserved).
+
+        Deliberately plain ``-az`` (which includes ``-l``): this is the
+        hostile-client path — the voxhub client's ``--no-links`` is a
+        courtesy, not a defense, so the raw invocation must be able to
+        deliver symlinks for the server-side refusal tests.
+        """
+        assert _RSYNC is not None
+        remote = remote_path if remote_path.endswith('/') else f'{remote_path}/'
+        ssh_cmd = f'ssh -p {self.target.port} ' + ' '.join(self.ssh_options)
+        cmd = [
+            _RSYNC,
+            '-az',
+            '-e',
+            ssh_cmd,
+            f'{src}/',
+            f'{self.target.ssh_destination}:{remote}',
         ]
         return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
@@ -410,6 +440,76 @@ def e2e_pull_env(
     return SimpleNamespace(run_pull=run_pull, lb=lb)
 
 
+_SEG_SEGMENTS: list[dict[str, object]] = [
+    {'id': 's0', 'name': 'cochlea', 'label_value': 1, 'color': '1 0 0'},
+    {'id': 's1', 'name': 'vestibule', 'label_value': 2, 'color': '0 1 0'},
+    {'id': 's2', 'name': 'semicircular_canals', 'label_value': 3, 'color': '0 0 1'},
+]
+
+
+@pytest.fixture
+def e2e_push_env(
+    e2e_pull_env: SimpleNamespace,
+    tmp_path: Path,
+) -> SimpleNamespace:
+    """A real pulled session plus a ``run_push`` over the same transports.
+
+    The zarr store and provenance log are module-scoped (shared with the
+    other tests), so the helpers report *deltas*: capture state before
+    the push, assert on what changed.
+    """
+    import voxhub_client.cli as client_cli
+
+    lb = e2e_pull_env.lb
+    session = tmp_path / 'push-session'
+    session.mkdir()
+    e2e_pull_env.run_pull(session)
+
+    def _write_seg(name: str = 'my-work.seg.nrrd') -> Path:
+        return write_seg_nrrd(session / name, default_seg_label_map(), _SEG_SEGMENTS)
+
+    def _run_push(
+        *,
+        ontology: list[str] | None = None,
+        unconstrained: bool = False,
+        validate_only: bool = False,
+        force: bool = False,
+    ) -> None:
+        ns = argparse.Namespace(
+            session_dir=str(session),
+            ontology=ontology,
+            unconstrained=unconstrained,
+            validate_only=validate_only,
+            force=force,
+        )
+        client_cli._run_push(ns)
+
+    zarr_path = lb.stores_dir / f'{_STORE}.zarr'
+    provenance_path = lb.stores_dir / '.meta' / 'provenance.jsonl'
+
+    def _annotation_instances() -> set[str]:
+        """Server-side annotation instance dirs for this suite's annotator."""
+        slug_dir = zarr_path / 'annotations' / f'{_ANNOTATOR}-e2e12345'
+        if not slug_dir.is_dir():
+            return set()
+        return {p.name for p in slug_dir.iterdir() if p.is_dir()}
+
+    def _provenance_lines() -> list[str]:
+        if not provenance_path.is_file():
+            return []
+        return provenance_path.read_text().splitlines()
+
+    return SimpleNamespace(
+        lb=lb,
+        session=session,
+        zarr_path=zarr_path,
+        write_seg=_write_seg,
+        run_push=_run_push,
+        annotation_instances=_annotation_instances,
+        provenance_lines=_provenance_lines,
+    )
+
+
 def _assert_valid_session(dest: Path) -> PullManifest:
     """Common post-pull assertions: manifest, checksums, trust sidecar."""
     manifest = PullManifest.read(dest)
@@ -528,5 +628,183 @@ class TestRsyncPath:
                 proc = lb.rsync_pull(remote, denied_dest)
                 assert proc.returncode != 0, f'rsync of {remote!r} must fail, got rc=0'
                 assert list(denied_dest.iterdir()) == []
+        finally:
+            lb.rpc('cleanup', {'staging_dir': staging_dir})
+
+
+class TestPushPath:
+    """Full push over real sshd + wrapper + writable rrsync (launch 4.4).
+
+    This is the final launch gate: pull → annotate (simulated) → push,
+    over real ssh + rsync + forced command.
+    """
+
+    @requires_rsync
+    def test_push_end_to_end(self, e2e_push_env: SimpleNamespace):
+        """Full ``_run_push``: the annotation lands in the server zarr with
+        provenance attrs (forced flag absent), .meta/provenance.jsonl
+        gains exactly one line, and the push staging dir is reaped."""
+        env = e2e_push_env
+        lb = env.lb
+        instances_before = env.annotation_instances()
+        provenance_before = env.provenance_lines()
+        sessions_before = lb.staging_sessions()
+
+        seg = env.write_seg()
+        seg_digest = _compute_sha256(seg)
+        env.run_push(ontology=['inner-ear-structures'])
+
+        # -- annotation group landed at the annotator-scoped path ---------
+        new_instances = env.annotation_instances() - instances_before
+        assert len(new_instances) == 1
+        instance = new_instances.pop()
+        assert instance.startswith('inner-ear-structures-')
+
+        # -- zarr attrs carry provenance; forced flag absent ---------------
+        import zarr
+
+        root = zarr.open_group(env.zarr_path, mode='r')
+        arr = root[f'annotations/{_ANNOTATOR}-e2e12345/{instance}/data']
+        a = dict(arr.attrs)
+        assert a['annotator_id'] == _ANNOTATOR
+        assert a['machine_id'] == 'm-e2e'
+        assert a['nano_id'] == 'e2e12345'
+        assert a['ontology'] == 'inner-ear-structures'
+        assert a['source_nrrd_checksum'] == seg_digest
+        # The key-bound VOXHUB_ANNOTATOR travelled sshd → wrapper → server.
+        assert a['identity_source'] == 'ssh_key'
+        assert 'forced' not in a
+
+        # -- exactly one new provenance line --------------------------------
+        new_lines = env.provenance_lines()[len(provenance_before) :]
+        assert len(new_lines) == 1
+        record = json.loads(new_lines[0])
+        assert record['event'] == 'push'
+        assert record['annotator_id'] == _ANNOTATOR
+        assert record['identity_source'] == 'ssh_key'
+        assert 'forced' not in record
+
+        # -- push staging dir reaped by the cleanup ACK ---------------------
+        assert lb.staging_sessions() == sessions_before
+
+    @requires_rsync
+    def test_push_rejects_bad_checksum(
+        self,
+        e2e_push_env: SimpleNamespace,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        """A file corrupted after checksum computation (simulated in-flight
+        tamper) fails the store server-side; nothing is integrated."""
+        import voxhub_client.cli as client_cli
+
+        env = e2e_push_env
+        lb = env.lb
+
+        @attrs.define
+        class _TamperingTransfer(_KeyedRsyncTransfer):
+            """Corrupts the local upload mirror between checksum and rsync."""
+
+            def push(
+                self, local_path: str, remote_path: str, *, progress: bool = True
+            ) -> None:
+                for f in Path(local_path).rglob('*.seg.nrrd'):
+                    f.write_bytes(f.read_bytes() + b'CORRUPTED-IN-FLIGHT')
+                super().push(local_path, remote_path, progress=progress)
+
+        monkeypatch.setattr(
+            client_cli,
+            'RsyncTransfer',
+            lambda target: _TamperingTransfer(
+                target=lb.target, extra_ssh=' '.join(lb.ssh_options)
+            ),
+        )
+
+        instances_before = env.annotation_instances()
+        provenance_before = env.provenance_lines()
+        env.write_seg()
+
+        with pytest.raises(SystemExit) as excinfo:
+            env.run_push(ontology=['inner-ear-structures'])
+        assert excinfo.value.code == 1
+
+        captured = capsys.readouterr()
+        assert 'Checksum mismatch' in captured.out
+        assert 'failed' in captured.out
+
+        # Nothing integrated: no new annotation, no new provenance line.
+        assert env.annotation_instances() == instances_before
+        assert env.provenance_lines() == provenance_before
+
+    @requires_rsync
+    def test_rsync_write_confined_to_staging(
+        self, sshd_loopback: SshdLoopback, tmp_path: Path
+    ):
+        """Writable rrsync still confines writes to the staging root: a raw
+        rsync write aimed at stores_dir never lands there."""
+        lb = sshd_loopback
+        payload = tmp_path / 'payload'
+        payload.mkdir()
+        (payload / 'evil.txt').write_text('injected\n')
+        stores_before = sorted(p.name for p in lb.stores_dir.rglob('*'))
+
+        # ``..`` traversal: refused outright by rrsync.
+        proc = lb.rsync_push(payload, f'../{lb.stores_dir.name}')
+        assert proc.returncode != 0
+
+        # Absolute path: rrsync re-roots it under the staging root, so the
+        # write may "succeed" — but only inside the confined area.
+        lb.rsync_push(payload, str(lb.stores_dir))
+
+        assert sorted(p.name for p in lb.stores_dir.rglob('*')) == stores_before
+        assert not (lb.stores_dir / 'evil.txt').exists()
+
+        # Hygiene: drop whatever the re-rooted absolute write left under
+        # the module-scoped staging root.
+        for leftover in lb.staging_root.iterdir():
+            if not leftover.name.startswith('vxhb-staging-'):
+                shutil.rmtree(leftover, ignore_errors=True)
+
+    @requires_rsync
+    def test_symlink_via_raw_rsync_is_refused_by_integrate(
+        self, sshd_loopback: SshdLoopback, tmp_path: Path
+    ):
+        """A symlink planted in staging via raw rsync (bypassing the
+        client's --no-links) is refused by integrate-annotations with
+        code='invalid_staging_content'; nothing is integrated."""
+        lb = sshd_loopback
+        response = lb.rpc('prepare-push', {})
+        staging_dir = PreparePushResponse.from_dict(response).staging_dir
+
+        try:
+            # Local payload: <store>/segmentation.seg.nrrd is a symlink to
+            # a server-side file inside the zarr store.
+            payload = tmp_path / 'payload'
+            store_dir = payload / _STORE
+            store_dir.mkdir(parents=True)
+            (store_dir / 'segmentation.seg.nrrd').symlink_to(
+                lb.stores_dir / f'{_STORE}.zarr' / 'zarr.json'
+            )
+
+            proc = lb.rsync_push(payload, PurePosixPath(staging_dir).name)
+            assert proc.returncode == 0, proc.stderr
+            planted = Path(staging_dir) / _STORE / 'segmentation.seg.nrrd'
+            assert planted.is_symlink(), 'test premise: the symlink must land'
+
+            result = lb.rpc(
+                'integrate-annotations',
+                {
+                    'staging_dir': staging_dir,
+                    'annotator_id': _ANNOTATOR,
+                    'machine_id': 'm-e2e',
+                    'nano_id': 'e2e12345',
+                    'expected_ontology': ['inner-ear-structures'],
+                },
+            )
+            store_result = result['stores'][_STORE]
+            assert store_result['status'] == 'failed'
+            assert store_result['code'] == 'invalid_staging_content'
+            assert store_result['annotations'] == []
+            assert any('symlink' in i['message'] for i in store_result['issues'])
         finally:
             lb.rpc('cleanup', {'staging_dir': staging_dir})
