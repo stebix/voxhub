@@ -8,7 +8,7 @@ import hashlib
 import subprocess
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import attrs
 from rich.console import Console
@@ -328,8 +328,17 @@ def _run_pull(args: argparse.Namespace) -> None:
     skipped_annotations = prepare.skipped_annotations
 
     # -- 5. rsync ----------------------------------------------------------
+    # The rsync transport is confined by rrsync to the operator's staging
+    # root (forced-command wrapper contract), which resolves every
+    # requested path relative to that root — an absolute path would be
+    # re-rooted underneath it and fail.  Staging dirs are minted as direct
+    # children of the root (server contract), so the rsync-visible name of
+    # the session is exactly the staging dir's basename.  The absolute
+    # ``staging_dir_remote`` stays in play for the RPC surface, where
+    # ``cleanup`` (and later ``integrate-annotations``) echo it verbatim.
+    staging_rsync_name = PurePosixPath(staging_dir_remote).name
     try:
-        transfer.pull(staging_dir_remote, dest_str)
+        transfer.pull(staging_rsync_name, dest_str)
     except subprocess.CalledProcessError as exc:
         err_console.print(
             f'[red]rsync failed[/red] (exit {exc.returncode}); '

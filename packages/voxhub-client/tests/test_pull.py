@@ -442,6 +442,11 @@ class TestRunPullHappyPath:
             },
         )
 
+        # rsync sees the staging dir's BASENAME (rrsync on the server is
+        # rooted at the staging root; an absolute path would be re-rooted
+        # underneath it and fail), while cleanup echoes the absolute path.
+        assert transfer.calls[0][0] == 'vxhb-staging-xyz'
+
         # Cleanup was called with the staging dir as a params dict.
         assert ('cleanup', {'staging_dir': '/tmp/vxhb-staging-xyz'}) in runner.calls
 
