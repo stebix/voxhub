@@ -101,13 +101,18 @@ and ``TestCleanup::test_refuses_path_{without_staging_prefix,outside_staging_roo
 
 ## 3. Should-fix before real annotators start (high-priority)
 
-- **No backup strategy anywhere in the repo or deploy scripts.** Annotations are
-  the only non-reproducible artifact on this system (raw volumes can be re-exported
-  from DICOM sources). **Recommendation:** turn on Hetzner snapshot backups (~20%
-  of instance cost) *and* add a nightly `rsync -a --link-dest` of
-  `$STORES_DIR/.meta/provenance.jsonl` + `$STORES_DIR/*/annotations/` to a second
-  location. `.meta/provenance.jsonl` is the audit log — back it up separately, it's
-  small and invaluable.
+- **No backup strategy anywhere in the repo or deploy scripts.** — **RESOLVED**
+  (launch plan 6.1). Annotations are the only non-reproducible artifact on this
+  system (raw volumes can be re-exported from DICOM sources).
+  `scripts/deploy/backup.sh` now takes a nightly `rsync -a --link-dest` hardlink
+  snapshot of `$STORES_DIR/.meta/` + `$STORES_DIR/*/annotations/` into a
+  configurable target (default `<stores-dir parent>/backups`; point it at a
+  second disk/volume or `host:/path` via `deploy.sh --backup-target` /
+  `VOXHUB_BACKUP_TARGET`), rotates snapshots after 14 days
+  (`--retention-days`), and appends one structlog-style JSON line per run to
+  `/var/log/voxhub/backup.log`. `deploy.sh` installs the 03:30 cron
+  idempotently. Hetzner snapshots on instance + volume remain an operator
+  action — checklist §6. Restore drill: §6a.
 
 - **No fsync/error handling on `.meta/provenance.jsonl` writes.** If the disk fills
   mid-push, the provenance line may tear. Provenance is the audit log — torn lines
@@ -204,9 +209,17 @@ Ordered, do-this-before-annotators-touch-it:
    check with a clean error.
 3. **Attach a Hetzner volume, add it to `/etc/fstab`, mount it at
    `/mnt/storage/voxhub`.** Verify with `findmnt`.
-4. **Enable Hetzner daily snapshots** on the instance + volume.
+4. **Enable Hetzner daily snapshots on the instance + the attached volume**
+   (~20% of instance cost). These are the disaster-recovery layer *under* the
+   application-level backup cron — you want both.
 5. **Run `sudo ./scripts/deploy/deploy.sh --stores-dir /mnt/storage/voxhub/data`**
-   (dry-run first).
+   (dry-run first). Pass `--backup-target` pointing at a second disk/volume —
+   the default (`<stores-dir parent>/backups`) lives on the same volume and
+   only protects against bad pushes / operator error, not disk failure.
+   After deploy: `sudo crontab -u voxhub -l` must show both the gc and the
+   `voxhub-backup.sh` entries; run the backup once by hand
+   (`sudo -u voxhub /usr/local/bin/voxhub-backup.sh --stores-dir ... --target ...`)
+   and check `/var/log/voxhub/backup.log` for a `backup_completed` line.
 6. **Add one test annotator:** `sudo ./scripts/deploy/add-annotator.sh alice alice.pub`.
 7. **Smoke test from the client box:**
    - `voxhub remote-catalog voxhub@<ip>`
@@ -222,6 +235,40 @@ Ordered, do-this-before-annotators-touch-it:
     server returns a structured error rather than crashing.
 11. **Add the second and third annotator** and have them run the smoke test in
     parallel. Watch CPU/memory with `htop` — if pegged, you've outgrown CX22.
+12. **Run the restore drill (§6a) once** before real annotators push — a backup
+    you have never restored from is a hypothesis, not a backup.
+
+---
+
+## 6a. Restore drill (annotations + provenance)
+
+Snapshots under the backup target are plain directory trees
+(`<target>/<UTC-stamp>/`, `latest` symlinks the newest); unchanged files are
+hardlinks between snapshots, so any single snapshot is a complete,
+self-contained copy of `.meta/` and every store's `annotations/`. Raw volumes
+are deliberately NOT in the backup — re-export them from DICOM.
+
+Drill (run against a scratch directory first; ~5 minutes):
+
+1. Pick the snapshot: `ls -1 <target>/` and choose the stamp, or use
+   `<target>/latest`.
+2. Restore into a scratch stores dir and inspect:
+   `rsync -a <target>/latest/ /tmp/restore-drill/`
+   — verify `/tmp/restore-drill/.meta/provenance.jsonl` parses
+   (`voxhub-server validate-attributes` or `python -c "import json,sys;
+   [json.loads(l) for l in open(sys.argv[1])]" ...`) and that each
+   `<store>.zarr/annotations/<annotator>-<nano>/...` tree you expect is present.
+3. For a real restore onto a rebuilt server: re-create the raw stores (DICOM
+   re-export / `voxhub export`), stop annotator access (comment the keys in
+   `~voxhub/.ssh/authorized_keys`), then
+   `rsync -a <target>/<stamp>/ $STORES_DIR/` to lay `.meta/` and the
+   `annotations/` trees back into place, and
+   `chown -R voxhub:voxhub $STORES_DIR`.
+4. Verify: `voxhub-server healthcheck`, then a `list-stores` from a client box
+   must show the restored annotations; cross-check one annotation's zarr attrs
+   against its `provenance.jsonl` line.
+5. Confirm the next nightly backup runs clean against the restored tree
+   (`backup_completed` in `/var/log/voxhub/backup.log`).
 
 ---
 

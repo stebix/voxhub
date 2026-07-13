@@ -45,6 +45,7 @@ step() {
 
 STORES_DIR=""
 STAGING_DIR=""
+BACKUP_TARGET=""
 REPO_URL="git@github.com:stebix/voxhub.git"
 BRANCH="main"
 DRY_RUN=false
@@ -71,6 +72,10 @@ Options:
   --staging-dir <path>   Operator-authoritative staging parent (default:
                          <stores-dir parent>/staging).  Clients can never
                          override this; see docs/architecture.md.
+  --backup-target <path> Snapshot target for the nightly annotation backup
+                         (default: <stores-dir parent>/backups).  Point
+                         this at a second disk/volume — a backup on the
+                         same disk only protects against operator error.
   --repo-url <url>       Git clone URL (default: $REPO_URL)
   --branch <name>        Branch to deploy (default: $BRANCH)
   --dry-run              Show what would be done without making changes
@@ -83,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --stores-dir)  STORES_DIR="$2"; shift 2 ;;
         --staging-dir) STAGING_DIR="$2"; shift 2 ;;
+        --backup-target) BACKUP_TARGET="$2"; shift 2 ;;
         --repo-url)    REPO_URL="$2"; shift 2 ;;
         --branch)      BRANCH="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=true; shift ;;
@@ -99,6 +105,13 @@ done
 if [[ -z "$STAGING_DIR" ]]; then
     STORES_PARENT="$(dirname "$STORES_DIR")"
     STAGING_DIR="$STORES_PARENT/staging"
+fi
+
+# Default backup target to a sibling of stores_dir.  Good enough to start
+# (protects against bad pushes / operator error); move it to a second
+# disk or host via --backup-target for real disk-failure protection.
+if [[ -z "$BACKUP_TARGET" ]]; then
+    BACKUP_TARGET="$(dirname "$STORES_DIR")/backups"
 fi
 
 # Hard guard: settings.py rejects equal paths at load time, but refuse
@@ -529,6 +542,55 @@ else
 fi
 
 # ===================================================================
+# Step 11b: Backup script + cron job
+# ===================================================================
+step "Install backup script + cron job"
+
+BACKUP_SRC="$SCRIPT_DIR/backup.sh"
+BACKUP_BIN="/usr/local/bin/voxhub-backup.sh"
+BACKUP_LOG="$LOG_DIR/backup.log"
+
+if [[ ! -f "$BACKUP_SRC" ]]; then
+    fail "Cannot find $BACKUP_SRC — run this script from the scripts/deploy/ directory"
+fi
+
+# Same idempotency pattern as the ForceCommand wrapper: install/upgrade
+# in place only when the content differs.
+if [[ -f "$BACKUP_BIN" ]] && cmp -s "$BACKUP_SRC" "$BACKUP_BIN"; then
+    skip "Backup script ($BACKUP_BIN)"
+else
+    info "Installing $BACKUP_BIN"
+    if ! $DRY_RUN; then
+        cp "$BACKUP_SRC" "$BACKUP_BIN"
+        chmod 755 "$BACKUP_BIN"
+    fi
+    ok "Installed backup script"
+fi
+
+# The backup target must be writable by the voxhub cron user.
+if [[ -d "$BACKUP_TARGET" ]]; then
+    skip "Backup target ($BACKUP_TARGET)"
+else
+    info "Creating $BACKUP_TARGET"
+    run mkdir -p "$BACKUP_TARGET"
+fi
+run chown "$VOXHUB_USER:$VOXHUB_USER" "$BACKUP_TARGET"
+
+BACKUP_CRON="30 3 * * * $BACKUP_BIN --stores-dir $STORES_DIR --target $BACKUP_TARGET --log-file $BACKUP_LOG"
+
+# Same idempotent pattern as the gc cron above.
+if crontab -u "$VOXHUB_USER" -l 2>/dev/null | grep -qF "voxhub-backup"; then
+    skip "Backup cron job"
+else
+    info "Adding nightly backup cron (03:30, 14-day retention)"
+    if ! $DRY_RUN; then
+        (crontab -u "$VOXHUB_USER" -l 2>/dev/null || true; echo "$BACKUP_CRON") \
+            | crontab -u "$VOXHUB_USER" -
+    fi
+    ok "Backup cron installed"
+fi
+
+# ===================================================================
 # Step 12: SSH key directory
 # ===================================================================
 step "Prepare SSH authorized_keys"
@@ -583,6 +645,8 @@ cat <<EOF
   Server config: $CONFIG_FILE
   SSH config:    $SSHD_CONF
   GC cron:       daily at 04:00 (48h TTL, reaps $STAGING_DIR)
+  Backup cron:   daily at 03:30 (annotations + .meta -> $BACKUP_TARGET,
+                 hardlink snapshots, 14-day retention, log: $LOG_DIR/backup.log)
 
   Next steps:
     1. Add annotator keys:
