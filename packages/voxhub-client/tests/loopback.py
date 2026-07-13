@@ -1,4 +1,4 @@
-"""Loopback transport shims for end-to-end pull tests.
+"""Loopback transport shims for end-to-end pull and push tests.
 
 Substitute for :class:`voxhub_client.ssh.SshRunner` and
 :class:`voxhub_client.transfer.RsyncTransfer` so tests can drive the
@@ -246,6 +246,36 @@ class LoopbackRsyncTransfer:
             if existing.exists():
                 existing.unlink()
         shutil.copytree(src, dst, dirs_exist_ok=True)
+
+    def push(
+        self,
+        local_path: str,
+        remote_path: str,
+        *,
+        progress: bool = True,
+    ) -> None:
+        """Copy ``local_path/*`` into ``staging_root/remote_path``.
+
+        Mirrors the real ``RsyncTransfer.push`` (trailing-slash
+        contents-into-dir semantics) with the same rrsync root-relative
+        resolution as :meth:`pull` — a client regression back to
+        pushing absolute staging paths fails here the same way it fails
+        against real rrsync.  Symlinks in the source tree are skipped,
+        mirroring the production ``--no-links`` flag (there is no
+        legitimate symlink in a push).
+        """
+        del progress  # signature parity with the real RsyncTransfer
+        src = Path(local_path)
+        dst = self.staging_root / remote_path.lstrip('/')
+        dst.mkdir(parents=True, exist_ok=True)
+        for source_file in src.rglob('*'):
+            if source_file.is_symlink() or not source_file.is_file():
+                continue
+            target = dst / source_file.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target.unlink()
+            shutil.copy2(source_file, target)
 
 
 # -- Fake server (script mode) -------------------------------------------------

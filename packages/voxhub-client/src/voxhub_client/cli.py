@@ -1,12 +1,14 @@
 """Annotator-facing CLI for voxhub remote annotation workflows.
 
-Commands: set-server, set-identity, whoami, list-stores, pull.
+Commands: set-server, set-identity, whoami, list-stores, pull, push.
 """
 
 import argparse
 import hashlib
+import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -27,16 +29,32 @@ from voxhub_client.ssh import RemoteError, SshRunner
 from voxhub_client.transfer import RsyncTransfer
 from voxhub_schema import (
     PROTOCOL_VERSION,
+    UNCONSTRAINED_SEGMENTATION,
+    ChecksumEntry,
     CleanupResponse,
+    IntegrateRequest,
+    IntegrateResponse,
+    IssueRecord,
     ManifestError,
+    Ontology,
+    PreparePushResponse,
     PrepareRequest,
     PrepareResponse,
     PullManifest,
+    RemoteManifest,
+    RemoteManifestEntry,
+    load_ontology,
+    validate_lmk_preflight,
+    validate_seg_preflight,
 )
 
 
 class ChecksumError(Exception):
     """Raised when a checksum verification fails after rsync."""
+
+
+class PushError(Exception):
+    """A fatal push precondition failure with a user-facing message."""
 
 
 # -- Pull helpers ------------------------------------------------------------
@@ -477,6 +495,628 @@ def _render_pull_summary(
         )
 
 
+# -- Push helpers --------------------------------------------------------------
+
+
+def _verify_push_session(session_dir: Path) -> PullManifest:
+    """Read and verify the session's pull manifest, sidecar, and raw volume.
+
+    The trust chain runs sidecar -> manifest -> raw volume: the sidecar
+    (written by pull, locked read-only) anchors the manifest, and the
+    manifest's checksum anchors the raw volume.  A broken link anywhere
+    means the session is not a faithful record of what was pulled — an
+    edited manifest could smuggle wrong spatial metadata past pre-flight
+    validation, and a modified raw volume means the annotation was drawn
+    over data the server never served (stale or tampered pull).
+
+    Returns
+    -------
+    PullManifest
+        The verified manifest.
+
+    Raises
+    ------
+    PushError
+        With a user-facing message naming the broken link and the
+        recovery path (re-pull).
+    """
+    try:
+        manifest = PullManifest.read(session_dir)
+    except FileNotFoundError as exc:
+        raise PushError(
+            f'{exc}; not a pull session directory — run '
+            f"'voxhub pull' first, then annotate inside the session dir."
+        ) from exc
+    except ManifestError as exc:
+        raise PushError(
+            f'pull manifest unreadable or malformed: {exc}; re-pull the store.'
+        ) from exc
+
+    if manifest.protocol_version != PROTOCOL_VERSION:
+        raise PushError(
+            f'pull manifest has protocol version {manifest.protocol_version}, '
+            f'this client expects {PROTOCOL_VERSION} — update voxhub on both '
+            f'sides and re-pull with a current client.'
+        )
+
+    sidecar_path = session_dir / '.voxhub_pull.sha256'
+    if not sidecar_path.is_file():
+        raise PushError(
+            f'trust sidecar missing: {sidecar_path}; the session was not '
+            f'completed by a successful pull — re-pull the store.'
+        )
+    manifest_digest = _compute_sha256(session_dir / '.voxhub_pull.json')
+    if sidecar_path.read_text().strip() != manifest_digest:
+        raise PushError(
+            'pull manifest does not match its trust sidecar — the manifest '
+            'has been modified since pull; re-pull the store.'
+        )
+
+    raw_path = session_dir / manifest.raw_name
+    if not raw_path.is_file():
+        raise PushError(
+            f'raw volume missing: {raw_path}; re-pull the store before pushing.'
+        )
+    if _compute_sha256(raw_path) != manifest.raw_checksum:
+        raise PushError(
+            f'{manifest.raw_name} does not match the pull manifest checksum — '
+            f'the raw volume was modified after pull (stale or tampered '
+            f'session); re-pull the store and re-export the annotation.'
+        )
+
+    return manifest
+
+
+def _discover_annotation_files(session_dir: Path) -> list[Path]:
+    """Find the annotation files to push inside a session directory.
+
+    Scans recursively for ``*.seg.nrrd`` / ``*.mrk.json``, excluding the
+    pulled ``reference/`` directory (server-exported reference
+    annotations must never be re-pushed; the raw volume never matches
+    either glob).  The server integrates at most one segmentation and
+    one landmark file per store, so more than one of a kind is an
+    error, not a silent pick.
+
+    Raises
+    ------
+    PushError
+        No annotation files, more than one of a kind, or a symlinked
+        annotation (push uploads with ``--no-links``, so a symlink would
+        silently not arrive).
+    """
+    reference_dir = session_dir / 'reference'
+    discovered: list[Path] = []
+    for pattern in ('*.seg.nrrd', '*.mrk.json'):
+        for path in sorted(session_dir.rglob(pattern)):
+            if reference_dir in path.parents:
+                continue
+            if path.is_symlink():
+                raise PushError(
+                    f'annotation file is a symlink: {path}; push uploads '
+                    f'with --no-links, so symlinks cannot be pushed — '
+                    f'replace it with the real file.'
+                )
+            if path.is_file():
+                discovered.append(path)
+
+    if not discovered:
+        raise PushError(
+            f'no annotation files (*.seg.nrrd, *.mrk.json) found in '
+            f'{session_dir} (the pulled reference/ directory is excluded); '
+            f'export your annotation from 3D Slicer into the session '
+            f'directory first.'
+        )
+
+    for kind, suffix in (('segmentation', '.seg.nrrd'), ('landmark', '.mrk.json')):
+        matches = [p for p in discovered if p.name.endswith(suffix)]
+        if len(matches) > 1:
+            listing = ', '.join(str(p) for p in matches)
+            raise PushError(
+                f'found {len(matches)} {kind} files ({listing}); a push '
+                f'session integrates at most one {kind} file — remove the '
+                f'extras or push them from separate sessions.'
+            )
+
+    return discovered
+
+
+def _resolve_ontology_declaration(
+    ontology_flags: list[str] | None,
+    unconstrained: bool,
+    manifest: PullManifest,
+) -> tuple[list[str], bool]:
+    """Resolve the ontology declaration for this push.
+
+    Mirrors the server's strict policy (exactly one of declared /
+    unconstrained): explicit ``--ontology`` / ``--unconstrained`` flags
+    win; otherwise the ontologies of the reference annotations recorded
+    in the pull manifest are the declared expectation.  A session with
+    neither flags nor manifest ontologies must state intent explicitly —
+    silent fallback to unconstrained would corrupt provenance.
+
+    Returns
+    -------
+    tuple[list[str], bool]
+        ``(declared_ontologies, unconstrained)``.
+
+    Raises
+    ------
+    PushError
+        On a contradictory or missing declaration.
+    """
+    declared = list(ontology_flags or [])
+    if declared and unconstrained:
+        raise PushError(
+            '--ontology and --unconstrained are mutually exclusive; '
+            'pass one or the other.'
+        )
+    if unconstrained:
+        return [], True
+    if declared:
+        return declared, False
+
+    from_manifest: list[str] = []
+    for entry in manifest.annotations:
+        if entry.ontology and entry.ontology not in from_manifest:
+            from_manifest.append(entry.ontology)
+    if not from_manifest:
+        raise PushError(
+            'no ontology declared: the pull manifest records no reference '
+            'annotations to derive one from — pass --ontology <name> '
+            '(repeatable) for enforced integration, or --unconstrained to '
+            'explicitly opt out.'
+        )
+    return from_manifest, False
+
+
+def _match_files_to_ontologies(
+    files: list[Path],
+    declared: list[str],
+    unconstrained: bool,
+) -> dict[Path, Ontology | None]:
+    """Match each annotation file to the ontology it must validate against.
+
+    Mirrors the server's resolution in ``_run_integrate_annotations``:
+    segmentations take the first declared segmentation-type ontology,
+    landmarks the first landmarks-type one; under ``--unconstrained``,
+    segmentations validate against the shipped ``unconstrained``
+    ontology (structural constraints) and landmarks against ``None``.
+
+    Raises
+    ------
+    PushError
+        When a declared ontology cannot be loaded, or a file's
+        annotation type has no matching declared ontology (the server
+        would fail that store — surface it before any upload).
+    """
+    if unconstrained:
+        return {
+            f: (UNCONSTRAINED_SEGMENTATION if f.name.endswith('.seg.nrrd') else None)
+            for f in files
+        }
+
+    ontologies: list[Ontology] = []
+    for name in declared:
+        try:
+            ontologies.append(load_ontology(name))
+        except FileNotFoundError as exc:
+            raise PushError(
+                f'unknown ontology {name!r}: not shipped with this voxhub-schema version.'
+            ) from exc
+
+    matched: dict[Path, Ontology | None] = {}
+    for path in files:
+        ann_type = 'segmentation' if path.name.endswith('.seg.nrrd') else 'landmarks'
+        candidates = [o for o in ontologies if o.type == ann_type]
+        if not candidates:
+            raise PushError(
+                f'{path.name} matches no declared ontology: declared '
+                f'{declared!r} contain no {ann_type}-type ontology — the '
+                f'server would refuse this store. Add a matching --ontology '
+                f'or pass --unconstrained to opt out explicitly.'
+            )
+        matched[path] = candidates[0]
+    return matched
+
+
+def _preflight_validate(
+    matched: dict[Path, Ontology | None],
+    manifest: PullManifest,
+) -> dict[Path, list[IssueRecord]]:
+    """Run the canonical pre-flight validators over each annotation file.
+
+    Uses the same ``voxhub_schema.validation`` functions the server runs
+    at integrate time, against the spatial metadata recorded in the
+    (verified) pull manifest, so a clean local pass predicts a clean
+    server-side pass.
+    """
+    manifest_entry = {
+        'shape': manifest.shape,
+        'origin_lps': manifest.origin_lps,
+        'space_directions': manifest.space_directions,
+        'spacing_mm': manifest.spacing_mm,
+    }
+    results: dict[Path, list[IssueRecord]] = {}
+    for path, ontology in matched.items():
+        if path.name.endswith('.seg.nrrd'):
+            results[path] = validate_seg_preflight(path, manifest_entry, ontology)
+        else:
+            results[path] = validate_lmk_preflight(path, manifest_entry, ontology)
+    return results
+
+
+def _render_validation_results(
+    console: Console,
+    results: dict[Path, list[IssueRecord]],
+) -> tuple[int, int]:
+    """Render per-file validation issues; return ``(n_errors, n_warnings)``."""
+    n_errors = 0
+    n_warnings = 0
+    for path, issues in results.items():
+        if not issues:
+            console.print(f'[green]ok[/green]       {path.name}')
+            continue
+        lines: list[str] = []
+        for issue in issues:
+            if issue.severity == 'error':
+                n_errors += 1
+                lines.append(f'[red]error[/red]    {issue.message}')
+            else:
+                n_warnings += 1
+                lines.append(f'[yellow]warning[/yellow]  {issue.message}')
+        has_error = any(i.severity == 'error' for i in issues)
+        console.print(
+            Panel(
+                '\n'.join(lines),
+                title=path.name,
+                border_style='red' if has_error else 'yellow',
+            )
+        )
+    return n_errors, n_warnings
+
+
+def _push_checksum_entries(files: list[Path], store_name: str) -> list[ChecksumEntry]:
+    """Build staging-dir-relative checksum entries for the upload.
+
+    Uploads land at ``<staging>/<store_name>/<basename>``, so the entry
+    path is exactly ``<store_name>/<basename>`` (POSIX separators).
+    ``ChecksumEntry`` carries the *bare* 64-hex digest, so the
+    ``'sha256:'`` prefix produced by :func:`_compute_sha256` is stripped
+    deliberately here — the wire contract owns the format.
+    """
+    return [
+        ChecksumEntry(
+            path=f'{store_name}/{f.name}',
+            sha256=_compute_sha256(f).removeprefix('sha256:'),
+        )
+        for f in files
+    ]
+
+
+def _render_integrate_results(
+    console: Console,
+    integrate: IntegrateResponse,
+) -> bool:
+    """Render per-store integration outcomes; return whether any failed."""
+    any_failed = False
+    for store_name, result in sorted(integrate.stores.items()):
+        ok = result.status == 'integrated'
+        any_failed = any_failed or not ok
+
+        table = Table(title=f'Store {store_name!r}', show_header=False)
+        table.add_column(style='bold')
+        table.add_column()
+        status = '[green]integrated[/green]' if ok else '[red]failed[/red]'
+        if result.code:
+            status += f' [red]({result.code})[/red]'
+        table.add_row('Status', status)
+        for ann in result.annotations:
+            table.add_row(
+                'Annotation',
+                f'{ann.path} ({ann.ontology} v{ann.ontology_version})',
+            )
+        console.print(table)
+
+        if result.issues:
+            lines = [
+                (
+                    f'[red]error[/red]    {i.message}'
+                    if i.severity == 'error'
+                    else f'[yellow]warning[/yellow]  {i.message}'
+                )
+                for i in result.issues
+            ]
+            console.print(
+                Panel(
+                    '\n'.join(lines),
+                    title=f'[bold]{store_name}[/bold] issues',
+                    border_style='red' if not ok else 'yellow',
+                )
+            )
+    return any_failed
+
+
+def _flip_local_manifest(
+    session_dir: Path,
+    pull_manifest: PullManifest,
+    integrate: IntegrateResponse,
+    *,
+    declared_ontologies: list[str],
+    unconstrained: bool,
+    push_session_id: str,
+) -> None:
+    """Record ``integrated`` status in the client-owned local manifest.
+
+    The pull flow writes only the server-authoritative
+    ``.voxhub_pull.json``; the client-owned workflow-state manifest
+    (``.voxhub_manifest.json``, :class:`RemoteManifest`) is created here
+    on the first successful push and updated in place afterwards.
+    ``pull_session_id`` records the *push* staging session's ID — the
+    same value the server stamps as ``pull_session_id`` in its
+    provenance line — so the two records reconcile.
+
+    Raises
+    ------
+    OSError, ManifestError
+        Propagated to the caller, which treats a failed status flip as
+        a warning (the annotation is already safely integrated).
+    """
+    integrated = [
+        name for name, result in integrate.stores.items() if result.status == 'integrated'
+    ]
+    if not integrated:
+        return
+
+    try:
+        local = RemoteManifest.read(session_dir)
+    except FileNotFoundError:
+        local = RemoteManifest(
+            server_host=pull_manifest.server_host,
+            server_stores_dir=pull_manifest.server_stores_dir,
+            protocol_version=PROTOCOL_VERSION,
+            pull_session_id=push_session_id,
+            pulled_at=pull_manifest.prepared_at,
+            stores={},
+        )
+
+    expected = declared_ontologies or (['unconstrained'] if unconstrained else [])
+    for store_name in integrated:
+        entry = local.stores.get(store_name)
+        if entry is None:
+            local.stores[store_name] = RemoteManifestEntry(
+                status='integrated',
+                raw_checksum=pull_manifest.raw_checksum,
+                shape=list(pull_manifest.shape),
+                spacing_mm=list(pull_manifest.spacing_mm),
+                origin_lps=list(pull_manifest.origin_lps),
+                space_directions=[list(r) for r in pull_manifest.space_directions],
+                expected_ontologies=list(expected),
+                included_annotations=[],
+            )
+        else:
+            entry.status = 'integrated'
+    local.write(session_dir)
+
+
+def _run_push(args: argparse.Namespace) -> None:
+    """Push a session's annotation files back to the remote server.
+
+    Steps (launch plan 4.2, adapted to the rpc wire contract):
+
+    1.  Load identity — friendly abort if unconfigured.
+    2.  Verify the session: pull manifest + trust sidecar + raw volume
+        checksum (stale/tampered sessions abort before any upload).
+    3.  Resolve the ontology declaration (flags, else manifest).
+    4.  Discover annotation files (``*.seg.nrrd`` / ``*.mrk.json``,
+        excluding ``reference/``); match each to a declared ontology.
+    5.  Pre-flight validation via ``voxhub_schema.validation``.
+        Errors ALWAYS abort — the server enforces the same rule, so no
+        client flag can bypass it; warnings are printed and do not
+        abort.  ``--validate-only`` stops here with zero SSH calls.
+    6.  Compute staging-relative checksums.
+    7.  ``prepare-push`` -> server-issued staging dir; rsync the files
+        into ``<staging>/<store_name>/`` (addressed by basename — the
+        rrsync root-relative contract, see ``_run_pull`` step 5).
+    8.  ``integrate-annotations`` (``--force`` forwards for the
+        provenance stamp on accepted warnings); render per-store
+        results; any failed store makes the exit code non-zero.
+    9.  ``cleanup`` — non-fatal (GC backstop).
+    10. Flip the local manifest status to ``integrated`` — non-fatal.
+    """
+    console = Console()
+    err_console = Console(stderr=True)
+
+    # -- 1. identity --------------------------------------------------------
+    try:
+        identity = get_identity()
+    except FileNotFoundError as exc:
+        err_console.print(f'[red]{exc}[/red]')
+        sys.exit(1)
+
+    session_dir = Path(args.session_dir)
+    if not session_dir.is_dir():
+        err_console.print(f'[red]session directory not found:[/red] {session_dir}')
+        sys.exit(1)
+
+    # -- 2.-4. session verification, ontology policy, discovery -------------
+    try:
+        manifest = _verify_push_session(session_dir)
+        declared, unconstrained = _resolve_ontology_declaration(
+            args.ontology, bool(args.unconstrained), manifest
+        )
+        files = _discover_annotation_files(session_dir)
+        matched = _match_files_to_ontologies(files, declared, unconstrained)
+    except PushError as exc:
+        err_console.print(f'[red]push aborted:[/red] {exc}')
+        sys.exit(1)
+
+    store_name = manifest.store_name
+    ontology_note = (
+        'unconstrained (explicit opt-out)' if unconstrained else ', '.join(declared)
+    )
+    console.print(
+        f'Pushing [bold]{len(files)}[/bold] annotation file(s) for store '
+        f'[cyan]{store_name}[/cyan] (ontology: {ontology_note})'
+    )
+
+    # -- 5. pre-flight validation -------------------------------------------
+    results = _preflight_validate(matched, manifest)
+    n_errors, n_warnings = _render_validation_results(console, results)
+
+    if n_errors:
+        # Error-severity issues can NEVER integrate: the server refuses
+        # them regardless of client flags (--force only accepts
+        # warnings), so pushing would just fail remotely after a full
+        # upload.  Abort here with the rendering above as the guide.
+        err_console.print(
+            f'[red]push aborted:[/red] {n_errors} validation error(s) — '
+            f'errors always abort (the server enforces the same rule; '
+            f'--force only accepts warnings). Fix the files and retry.'
+        )
+        sys.exit(1)
+    if n_warnings:
+        note = (
+            'accepted explicitly (--force is recorded in provenance)'
+            if args.force
+            else 'the server integrates warnings by default; pass --force '
+            'to record explicit acceptance in provenance'
+        )
+        console.print(f'[yellow]{n_warnings} warning(s)[/yellow] — {note}')
+
+    if args.validate_only:
+        console.print('[green]validation passed[/green] (--validate-only: stopping)')
+        return
+
+    # -- server + transport (constructed only past --validate-only) ---------
+    try:
+        server = get_server()
+    except FileNotFoundError as exc:
+        err_console.print(f'[red]{exc}[/red]')
+        sys.exit(1)
+
+    target = server.to_ssh_target()
+    runner = SshRunner(target=target)
+    transfer = RsyncTransfer(target=target)
+
+    # -- 6. checksums --------------------------------------------------------
+    checksums = _push_checksum_entries(files, store_name)
+
+    # -- 7. prepare-push + rsync upload --------------------------------------
+    try:
+        response = runner.run('prepare-push', {})
+    except RemoteError as exc:
+        err_console.print(f'[red]prepare-push failed:[/red] {exc}')
+        sys.exit(1)
+
+    try:
+        prepare = PreparePushResponse.from_dict(response)
+    except (KeyError, TypeError, ValueError) as exc:
+        err_console.print(
+            f'[red]malformed prepare-push response:[/red] {exc!r}; '
+            f'server and client schema versions have likely drifted.'
+        )
+        sys.exit(1)
+
+    staging_dir_remote = prepare.staging_dir
+    # Same rrsync contract as _run_pull step 5: the transport addresses
+    # the issued staging dir by its staging-root-relative basename; the
+    # absolute path stays on the RPC surface (integrate-annotations and
+    # cleanup take it verbatim).
+    staging_rsync_name = PurePosixPath(staging_dir_remote).name
+
+    # Mirror the upload layout locally (<store_name>/<basename>) so one
+    # rsync call lands everything where integrate-annotations iterates
+    # (per-store subdirectories of the staging dir).
+    with tempfile.TemporaryDirectory(prefix='voxhub-push-') as tmp:
+        upload_root = Path(tmp)
+        store_dir = upload_root / store_name
+        store_dir.mkdir()
+        for f in files:
+            shutil.copy2(f, store_dir / f.name)
+
+        try:
+            transfer.push(str(upload_root), staging_rsync_name)
+        except subprocess.CalledProcessError as exc:
+            err_console.print(
+                f'[red]rsync upload failed[/red] (exit {exc.returncode}); '
+                f'nothing was integrated; server staging dir left in place, '
+                f'GC will reap.'
+            )
+            sys.exit(1)
+
+    # -- 8. integrate-annotations --------------------------------------------
+    request = IntegrateRequest(
+        staging_dir=staging_dir_remote,
+        annotator_id=identity.annotator_id,
+        machine_id=identity.machine_id,
+        nano_id=identity.nano_id,
+        checksums=checksums,
+        expected_ontology=declared,
+        unconstrained=unconstrained,
+        force=bool(args.force),
+    )
+
+    try:
+        response = runner.run('integrate-annotations', attrs.asdict(request))
+    except RemoteError as exc:
+        err_console.print(
+            f'[red]integrate-annotations failed:[/red] {exc}; '
+            f'server staging dir left in place for diagnosis, GC will reap.'
+        )
+        sys.exit(1)
+
+    try:
+        integrate = IntegrateResponse.from_dict(response)
+    except (KeyError, TypeError, ValueError) as exc:
+        err_console.print(
+            f'[red]malformed integrate-annotations response:[/red] {exc!r}; '
+            f'server and client schema versions have likely drifted.'
+        )
+        sys.exit(1)
+
+    any_failed = _render_integrate_results(console, integrate)
+
+    # -- 9. cleanup ACK (non-fatal) -------------------------------------------
+    try:
+        CleanupResponse.from_dict(
+            runner.run('cleanup', {'staging_dir': staging_dir_remote})
+        )
+    except RemoteError as exc:
+        err_console.print(
+            f'[yellow]warning: cleanup ACK failed ({exc}); '
+            f'GC will reap the staging dir.[/yellow]'
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        err_console.print(
+            f'[yellow]warning: malformed cleanup response ({exc!r}); '
+            f'GC will reap the staging dir if the ACK was lost.[/yellow]'
+        )
+
+    # -- 10. local manifest status (non-fatal) --------------------------------
+    try:
+        _flip_local_manifest(
+            session_dir,
+            manifest,
+            integrate,
+            declared_ontologies=declared,
+            unconstrained=unconstrained,
+            push_session_id=staging_rsync_name,
+        )
+    except (OSError, ManifestError) as exc:
+        err_console.print(
+            f'[yellow]warning: could not update local manifest status: {exc}[/yellow]'
+        )
+
+    if any_failed:
+        err_console.print(
+            '[red]push finished with failed store(s)[/red] — see the '
+            'issues above; nothing from a failed store was integrated.'
+        )
+        sys.exit(1)
+
+    console.print('[green]push complete[/green]')
+
+
 def main() -> None:
     """Entry point for the annotator-facing ``voxhub`` CLI."""
     parser = argparse.ArgumentParser(
@@ -542,6 +1182,52 @@ def main() -> None:
         ),
     )
     pull.set_defaults(func=_run_pull)
+
+    # push
+    push = subparsers.add_parser(
+        'push',
+        help='Push session annotations back to the remote server.',
+    )
+    push.add_argument(
+        'session_dir',
+        help='Local pull-session directory containing the annotation files.',
+    )
+    push.add_argument(
+        '--ontology',
+        action='append',
+        default=None,
+        metavar='NAME',
+        help=(
+            'Ontology declared for this push (repeatable). Defaults to the '
+            'ontologies of the reference annotations recorded in the pull '
+            'manifest; required when the manifest records none. Mutually '
+            'exclusive with --unconstrained.'
+        ),
+    )
+    push.add_argument(
+        '--unconstrained',
+        action='store_true',
+        help=(
+            'Explicitly opt out of ontology enforcement (structural checks '
+            'still apply). Mutually exclusive with --ontology.'
+        ),
+    )
+    push.add_argument(
+        '--validate-only',
+        action='store_true',
+        dest='validate_only',
+        help='Run client-side pre-flight validation and stop — no server contact.',
+    )
+    push.add_argument(
+        '--force',
+        action='store_true',
+        help=(
+            'Accept validation WARNINGS explicitly; recorded in server '
+            'provenance ("forced"). Errors always abort — no flag bypasses '
+            'them.'
+        ),
+    )
+    push.set_defaults(func=_run_push)
 
     args = parser.parse_args()
 

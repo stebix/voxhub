@@ -25,12 +25,16 @@ DEFAULT_TIMEOUT_S: float = 60.0
 
 METHOD_TIMEOUTS_S: dict[str, float] = {
     'prepare-pull': 1800.0,
+    'integrate-annotations': 1800.0,
 }
 """Per-method timeout policy.
 
 ``prepare-pull`` stages a full volume server-side (RAM load + NRRD
 write + sha256) and routinely exceeds the 60 s default on large
-stores; everything else (``list-stores``, ``cleanup``,
+stores; ``integrate-annotations`` materializes the pushed
+segmentation into RAM, validates it voxel-by-voxel, and writes it to
+zarr under the store lock, so it gets the same headroom.  Everything
+else (``list-stores``, ``prepare-push``, ``cleanup``,
 ``healthcheck``) is metadata-sized and keeps the short default.
 """
 

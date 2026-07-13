@@ -71,12 +71,17 @@ class RsyncTransfer:
     ) -> None:
         """Push files to the remote server.
 
+        Like :meth:`pull`, the remote side is confined by rrsync rooted
+        at the operator's staging root, so ``remote_path`` must be the
+        staging-root-relative name of a server-issued staging dir (its
+        basename), never an absolute path.
+
         Parameters
         ----------
         local_path : str
-            Local source directory.
+            Local source directory (its *contents* are uploaded).
         remote_path : str
-            Path on the remote server (directory).
+            Staging-root-relative path on the remote server (directory).
         progress : bool
             Show rsync progress.
         """
