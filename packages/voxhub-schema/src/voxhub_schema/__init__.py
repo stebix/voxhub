@@ -11,9 +11,11 @@ from voxhub_schema.manifest import (
 from voxhub_schema.models import (
     PROTOCOL_VERSION,
     AnnotationInfo,
+    ChecksumEntry,
     CleanupResponse,
     DatasetAttributes,
     GcResponse,
+    IntegratedAnnotation,
     IntegrateRequest,
     IntegrateResponse,
     IntegrateResult,
@@ -67,12 +69,14 @@ __all__ = [
     'AnnotatorSlugError',
     # ontology
     'ChannelMode',
+    'ChecksumEntry',
     'CleanupResponse',
     'DatasetAttributes',
     'GcResponse',
     'IntegrateRequest',
     'IntegrateResponse',
     'IntegrateResult',
+    'IntegratedAnnotation',
     'IssueRecord',
     'LengthUnit',
     # manifest

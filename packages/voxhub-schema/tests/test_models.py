@@ -2,11 +2,16 @@
 
 import json
 
+import pytest
+
 from voxhub_schema.models import (
     PROTOCOL_VERSION,
     AnnotationInfo,
+    ChecksumEntry,
     CleanupResponse,
     GcResponse,
+    IntegratedAnnotation,
+    IntegrateRequest,
     IntegrateResponse,
     IntegrateResult,
     IssueRecord,
@@ -101,11 +106,10 @@ class TestIntegrateResponse:
                 'store-a': IntegrateResult(
                     status='ok',
                     annotations=[
-                        AnnotationInfo(
+                        IntegratedAnnotation(
+                            path='annotations/alice-xyz45678/inner-20260101-ab12/data',
                             ontology='inner-ear-structures',
                             ontology_version=1,
-                            annotator_id='alice',
-                            integrated_at='2026-01-01T00:00:00',
                         ),
                     ],
                     issues=[
@@ -119,8 +123,88 @@ class TestIntegrateResponse:
         assert result.status == 'ok'
         assert len(result.annotations) == 1
         assert result.annotations[0].ontology == 'inner-ear-structures'
+        assert result.annotations[0].path.startswith('annotations/alice-')
         assert len(result.issues) == 1
         assert result.issues[0].severity == 'warning'
+
+
+class TestChecksumEntry:
+    def test_round_trip(self):
+        orig = ChecksumEntry(path='alpha/segmentation.seg.nrrd', sha256='ab' * 32)
+        rt = _round_trip(orig, ChecksumEntry)
+        assert rt == orig
+
+    @pytest.mark.parametrize(
+        'sha256',
+        [
+            'AB' * 32,  # uppercase hex
+            'ab' * 31,  # too short
+            'ab' * 33,  # too long
+            'sha256:' + 'ab' * 32,  # packed legacy prefix
+            'g' * 64,  # non-hex characters
+            '',  # empty
+            42,  # not a string
+        ],
+    )
+    def test_rejects_non_64_lowercase_hex(self, sha256):
+        with pytest.raises(ValueError, match='64 lowercase hex'):
+            ChecksumEntry.from_dict({'path': 'a/b.nrrd', 'sha256': sha256})
+
+    def test_rejects_empty_path(self):
+        with pytest.raises(ValueError, match='non-empty'):
+            ChecksumEntry.from_dict({'path': '', 'sha256': 'ab' * 32})
+
+    def test_missing_field_raises_key_error(self):
+        with pytest.raises(KeyError):
+            ChecksumEntry.from_dict({'path': 'a/b.nrrd'})
+
+
+class TestIntegrateRequest:
+    def test_round_trip(self):
+        orig = IntegrateRequest(
+            staging_dir='/tmp/vxhb-staging-abc',
+            annotator_id='alice',
+            machine_id='machine-xyz',
+            nano_id='deadbeef',
+            checksums=[
+                ChecksumEntry(path='alpha/segmentation.seg.nrrd', sha256='ab' * 32),
+            ],
+            expected_ontology=['inner-ear-structures'],
+            unconstrained=False,
+            force=True,
+        )
+        rt = _round_trip(orig, IntegrateRequest)
+        assert rt == orig
+
+    def test_defaults(self):
+        req = IntegrateRequest.from_dict(
+            {
+                'staging_dir': '/tmp/vxhb-staging-abc',
+                'annotator_id': 'alice',
+                'machine_id': 'machine-xyz',
+                'nano_id': 'deadbeef',
+            }
+        )
+        assert req.checksums == []
+        assert req.expected_ontology == []
+        assert req.unconstrained is False
+        assert req.force is False
+
+    def test_missing_required_field_raises_key_error(self):
+        with pytest.raises(KeyError):
+            IntegrateRequest.from_dict({'staging_dir': '/tmp/x'})
+
+    def test_bad_checksum_entry_propagates(self):
+        with pytest.raises(ValueError, match='64 lowercase hex'):
+            IntegrateRequest.from_dict(
+                {
+                    'staging_dir': '/tmp/vxhb-staging-abc',
+                    'annotator_id': 'alice',
+                    'machine_id': 'machine-xyz',
+                    'nano_id': 'deadbeef',
+                    'checksums': [{'path': 'a/b.nrrd', 'sha256': 'nope'}],
+                }
+            )
 
 
 class TestServerError:
@@ -141,9 +225,28 @@ class TestPrepareRequest:
         req = PrepareRequest(store_name='store-a')
         d = json.loads(serialize(req))
         assert d['store_name'] == 'store-a'
-        assert d['staging_dir'] is None
         assert d['include_existing_annotations'] is None
         assert d['compress'] is False
+        assert d['annotator_id'] is None
+
+    def test_round_trip(self):
+        orig = PrepareRequest(
+            store_name='store-a',
+            include_existing_annotations=['annotations/alice-xyz45678/inst'],
+            compress=True,
+            annotator_id='alice',
+        )
+        rt = _round_trip(orig, PrepareRequest)
+        assert rt == orig
+
+    def test_no_client_controllable_staging_dir(self):
+        """The staging path is server-authoritative: the request model
+        must not grow a staging_dir field again."""
+        assert 'staging_dir' not in json.loads(serialize(PrepareRequest('s')))
+
+    def test_missing_store_name_raises_key_error(self):
+        with pytest.raises(KeyError):
+            PrepareRequest.from_dict({})
 
 
 class TestCleanupAndGc:
