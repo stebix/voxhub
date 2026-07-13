@@ -24,7 +24,9 @@ Dependency DAG: `core -> schema <- client` (core and client never depend on each
 
 ## Commands
 
-- **Install**: `uv sync --group dev`
+- **Install**: `uv sync --all-packages --group dev` (the workspace root is
+  `package = false`, so a plain `uv sync` skips the members' runtime deps in a
+  fresh checkout)
 - **Lint**: `uv run ruff check packages/`
 - **Format**: `uv run ruff format packages/`
 - **Type check**: `uv run pyright`
