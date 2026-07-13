@@ -430,9 +430,9 @@ class TestRpcPath:
     """RPC branch through real sshd + wrapper (no rsync required)."""
 
     def test_list_stores_end_to_end(self, sshd_loopback: SshdLoopback):
-        """list-stores returns the seeded store with protocol_version 2."""
+        """list-stores returns the seeded store with the current protocol."""
         response = sshd_loopback.rpc('list-stores', {})
-        assert response['protocol_version'] == PROTOCOL_VERSION == 2
+        assert response['protocol_version'] == PROTOCOL_VERSION
         names = [s['name'] for s in response['stores']]
         assert names == [_STORE]
 

@@ -33,6 +33,7 @@ from voxhub_core.server import cli as server_cli
 from voxhub_schema import (
     PROTOCOL_VERSION,
     IntegrateResponse,
+    PreparePushResponse,
     PrepareResponse,
 )
 
@@ -245,6 +246,35 @@ class TestRpcGoldenPairs:
         assert result.annotations[0].ontology == 'inner-ear-structures'
         assert result.annotations[0].path.startswith('annotations/alice-deadbeef/')
 
+    def test_prepare_push(self, tmp_path, run_rpc, parsed_stdout):
+        """prepare-push mints a prefixed mkdtemp child of the staging root
+        and responds ``{protocol_version, staging_dir}`` (rpc-only, 4.1)."""
+        staging_root = tmp_path / 'staging_root'
+        staging_root.mkdir()
+
+        run_rpc(_request('prepare-push'), staging_root=staging_root)
+
+        payload = parsed_stdout()
+        assert set(payload) == {'protocol_version', 'staging_dir'}
+        parsed = PreparePushResponse.from_dict(payload)
+        assert parsed.protocol_version == PROTOCOL_VERSION
+        staging_dir = Path(parsed.staging_dir)
+        assert staging_dir.is_absolute()
+        assert staging_dir.parent == staging_root
+        assert staging_dir.name.startswith(server_cli.STAGING_DIR_PREFIX)
+        assert staging_dir.is_dir()
+        assert list(staging_dir.iterdir()) == []
+
+    def test_prepare_push_dirs_are_unique(self, tmp_path, run_rpc, parsed_stdout):
+        staging_root = tmp_path / 'staging_root'
+        staging_root.mkdir()
+
+        minted: set[str] = set()
+        for _ in range(2):
+            run_rpc(_request('prepare-push'), staging_root=staging_root)
+            minted.add(parsed_stdout()['staging_dir'])
+        assert len(minted) == 2
+
     def test_cleanup(self, tmp_path, run_rpc, parsed_stdout):
         staging = tmp_path / f'{server_cli.STAGING_DIR_PREFIX}golden'
         staging.mkdir()
@@ -273,6 +303,82 @@ class TestRpcGoldenPairs:
 
 
 # ===========================================================================
+# prepare-push preconditions and surface (launch plan 4.1)
+# ===========================================================================
+
+
+class TestPreparePushPreconditions:
+    """Disk-full refusal, key-bound identity, and the rpc-only surface."""
+
+    def test_refuses_when_disk_full(self, tmp_path, run_rpc, parsed_stdout, monkeypatch):
+        """A staging filesystem >=90% full → ``disk_full`` envelope, exit 1,
+        and no staging dir minted (same precondition as prepare-pull)."""
+        import collections
+
+        staging_root = tmp_path / 'staging_root'
+        staging_root.mkdir()
+        usage = collections.namedtuple('usage', ['total', 'used', 'free'])
+        monkeypatch.setattr(
+            server_cli.shutil, 'disk_usage', lambda _p: usage(1000, 950, 50)
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            run_rpc(_request('prepare-push'), staging_root=staging_root)
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['error'] is True
+        assert envelope['code'] == 'disk_full'
+        assert list(staging_root.iterdir()) == []
+
+    def test_key_bound_identity_mismatch_refused(
+        self, tmp_path, run_rpc, parsed_stdout, monkeypatch
+    ):
+        """A client-sent annotator_id disagreeing with VOXHUB_ANNOTATOR fails
+        the request — same transport-enforced binding as prepare-pull."""
+        staging_root = tmp_path / 'staging_root'
+        staging_root.mkdir()
+        monkeypatch.setenv('VOXHUB_ANNOTATOR', 'alice')
+
+        with pytest.raises(SystemExit) as excinfo:
+            run_rpc(
+                _request('prepare-push', {'annotator_id': 'mallory'}),
+                staging_root=staging_root,
+            )
+        assert excinfo.value.code == 1
+
+        envelope = parsed_stdout()
+        assert envelope['code'] == 'identity_mismatch'
+        assert list(staging_root.iterdir()) == []
+
+    def test_non_string_annotator_id_is_invalid_params(
+        self, tmp_path, run_rpc, parsed_stdout
+    ):
+        staging_root = tmp_path / 'staging_root'
+        staging_root.mkdir()
+
+        with pytest.raises(SystemExit) as excinfo:
+            run_rpc(
+                _request('prepare-push', {'annotator_id': 42}),
+                staging_root=staging_root,
+            )
+        assert excinfo.value.code == 1
+        assert parsed_stdout()['code'] == 'invalid_params'
+
+    def test_no_legacy_subcommand_exists(self):
+        """prepare-push is rpc-only: no argparse shim (new surface needs no
+        one-release compatibility window)."""
+        result = subprocess.run(
+            [sys.executable, '-m', 'voxhub_core.server.cli', 'prepare-push'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 2  # argparse: invalid choice
+        assert 'invalid choice' in result.stderr
+
+
+# ===========================================================================
 # Error envelopes
 # ===========================================================================
 
@@ -293,7 +399,10 @@ class TestRpcErrorEnvelopes:
         [
             '',
             'not json {',
-            '{"protocol_version": 2, "method": "healthcheck"} {"again": 1}',
+            (
+                f'{{"protocol_version": {PROTOCOL_VERSION}, '
+                f'"method": "healthcheck"}} {{"again": 1}}'
+            ),
             '"just a string"',
             '[1, 2, 3]',
             '42',
@@ -305,7 +414,10 @@ class TestRpcErrorEnvelopes:
         assert excinfo.value.code == 1
         self._assert_error(parsed_stdout, 'malformed_request')
 
-    @pytest.mark.parametrize('declared', [None, 1, 3, '2', 'two'])
+    @pytest.mark.parametrize(
+        'declared',
+        [None, PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1, str(PROTOCOL_VERSION), 'two'],
+    )
     def test_protocol_version_missing_or_mismatched(
         self, declared, run_rpc, parsed_stdout
     ):
@@ -345,7 +457,6 @@ class TestRpcErrorEnvelopes:
         'method',
         [
             'does-not-exist',
-            'prepare-push',  # reserved for Phase 4, must not dispatch yet
             'gc',  # operator command, not annotator-reachable
             'catalog',
             'validate-attributes',

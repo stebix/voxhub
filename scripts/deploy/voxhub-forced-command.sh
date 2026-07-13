@@ -64,12 +64,13 @@ RRSYNC="${VOXHUB_RRSYNC:-$(command -v rrsync || echo /usr/local/bin/rrsync)}"
 
 # Emit a ServerError-shaped envelope (voxhub_schema.models.ServerError) on
 # STDOUT and fail.  protocol_version tracks voxhub_schema.PROTOCOL_VERSION
-# (pinned wire contract v2).  Both arguments must be fixed strings under
-# our control, and must not contain double quotes or backslashes —
-# SSH_ORIGINAL_COMMAND is attacker-controlled and interpolating it here
-# would allow JSON injection into the envelope.
+# (wire contract v3 — bump this literal in lockstep with the constant;
+# test_forced_command.py asserts the two agree).  Both arguments must be
+# fixed strings under our control, and must not contain double quotes or
+# backslashes — SSH_ORIGINAL_COMMAND is attacker-controlled and
+# interpolating it here would allow JSON injection into the envelope.
 deny() {
-    printf '{"protocol_version":2,"error":true,"code":"%s","message":"%s"}\n' "$1" "$2"
+    printf '{"protocol_version":3,"error":true,"code":"%s","message":"%s"}\n' "$1" "$2"
     exit 1
 }
 

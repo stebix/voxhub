@@ -1,13 +1,14 @@
 """SSH-invoked server CLI.
 
 Annotator-facing transport: the single ``rpc`` subcommand (wire
-protocol v2) reads one JSON request object from stdin —
-``{"protocol_version": 2, "method": ..., "params": {...}}`` — and
+protocol v3) reads one JSON request object from stdin —
+``{"protocol_version": 3, "method": ..., "params": {...}}`` — and
 writes one JSON response to stdout.  The per-method subcommands
 (list-stores, prepare-pull, integrate-annotations, cleanup,
 healthcheck) remain for one release as deprecated shims over the same
-dispatch.  Operator commands (gc, catalog, validate-attributes) stay
-plain subcommands and are not reachable via ``rpc``.
+dispatch; ``prepare-push`` is rpc-only (new surface, no legacy shim).
+Operator commands (gc, catalog, validate-attributes) stay plain
+subcommands and are not reachable via ``rpc``.
 
 Every invocation writes a single JSON object to stdout and exits.
 Structured errors use the ``ServerError`` envelope.  Logs go to
@@ -85,6 +86,7 @@ from voxhub_schema import (
     IssueRecord,
     ManifestError,
     Ontology,
+    PreparePushResponse,
     PrepareRequest,
     PrepareResponse,
     PullAnnotationEntry,
@@ -696,6 +698,75 @@ def _run_prepare_pull(args: argparse.Namespace) -> None:
             space_directions=meta['space_directions'],
             skipped_annotations=skipped_annotations,
             memory_warnings=[w.to_dict() for w in memory_warnings],
+        )
+    )
+
+
+# -- prepare-push --------------------------------------------------------------
+
+
+def _run_prepare_push(args: argparse.Namespace) -> None:
+    """Mint a server-authoritative staging dir for an upcoming push.
+
+    Mirrors ``prepare-pull``'s staging creation and confinement: the
+    directory is a ``mkdtemp`` child of the operator-configured staging
+    root carrying the :data:`STAGING_DIR_PREFIX`, so the echoed-path
+    validator accepts it for the follow-up ``integrate-annotations`` /
+    ``cleanup`` calls and rrsync (rooted at the staging root) can
+    address it by basename.  The old client-side ``mktemp`` push
+    staging is dead — the server is authoritative over the path.
+    """
+    log = get_logger(command='prepare-push')
+
+    staging_root = Path(args.staging_root)
+
+    # Resolve who is pushing from the SSH-key-bound identity (falling back
+    # to the optional param for local/dev), mirroring prepare-pull: the
+    # minted dir names the session later stamped into integrate provenance.
+    try:
+        pushed_by, identity_source = _resolve_annotator_identity(
+            getattr(args, 'annotator_id', None), log=log
+        )
+    except _IdentityMismatchError as exc:
+        log.error('identity_mismatch', error=str(exc))
+        _write_error('identity_mismatch', str(exc))
+        sys.exit(1)
+
+    log.info(
+        'prepare_push_started',
+        staging_root=str(staging_root),
+        annotator_id=pushed_by,
+        identity_source=identity_source,
+    )
+
+    # Disk-full precondition (before anything is touched) — same guard as
+    # prepare-pull: refuse to mint a staging dir the upload would then
+    # fill on an essentially-full filesystem.
+    disk_full = _check_disk_space([staging_root])
+    if disk_full is not None:
+        log.error('disk_full', staging_root=str(staging_root), detail=disk_full)
+        _write_error('disk_full', disk_full)
+        sys.exit(1)
+
+    session_id = generate_nano_id()
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f'{STAGING_DIR_PREFIX}{session_id}-',
+            dir=staging_root,
+        )
+    )
+
+    log.info(
+        'prepare_push_completed',
+        staging_dir=str(staging_dir),
+        annotator_id=pushed_by,
+        identity_source=identity_source,
+    )
+
+    _write_json(
+        PreparePushResponse(
+            protocol_version=PROTOCOL_VERSION,
+            staging_dir=str(staging_dir),
         )
     )
 
@@ -1751,8 +1822,8 @@ def _run_healthcheck(args: argparse.Namespace) -> None:
 
 # -- rpc dispatch -------------------------------------------------------------
 #
-# The annotator-facing wire protocol (v2) is a single JSON object on stdin:
-# ``{"protocol_version": 2, "method": <name>, "params": {...}}``.  ``params``
+# The annotator-facing wire protocol (v3) is a single JSON object on stdin:
+# ``{"protocol_version": 3, "method": <name>, "params": {...}}``.  ``params``
 # is deserialized through the schema request models so the models are the
 # actual contract; the deprecated per-method subcommands are shims that build
 # the same params dict and go through the same ``_dispatch``, so the two
@@ -1793,6 +1864,20 @@ def _params_integrate_annotations(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _params_prepare_push(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate ``prepare-push`` params (no request model).
+
+    Minimal by design: the server mints the staging dir itself, so the
+    only accepted field is the optional local/dev ``annotator_id``
+    (over SSH the key-bound ``VOXHUB_ANNOTATOR`` env var is
+    authoritative, exactly as for ``prepare-pull``).
+    """
+    annotator_id = params.get('annotator_id')
+    if annotator_id is not None and not isinstance(annotator_id, str):
+        raise TypeError(f'Expected string for annotator_id, got {type(annotator_id)}')
+    return {'annotator_id': annotator_id}
+
+
 def _params_cleanup(params: dict[str, Any]) -> dict[str, Any]:
     """Validate ``cleanup`` params (``{"staging_dir": str}``, no model)."""
     staging_dir = params['staging_dir']
@@ -1808,9 +1893,8 @@ def _params_healthcheck(params: dict[str, Any]) -> dict[str, Any]:
 
 type _MethodSpec = tuple['Callable[[dict[str, Any]], dict[str, Any]]', str]
 
-# Annotator-reachable method surface.  ``prepare-push`` is reserved for
-# Phase 4 — adding a method is one entry here.  Operator commands (gc,
-# catalog, validate-attributes) are deliberately absent: they stay plain
+# Annotator-reachable method surface.  Operator commands (gc, catalog,
+# validate-attributes) are deliberately absent: they stay plain
 # subcommands and are unreachable via ``rpc`` (and therefore unreachable
 # over annotator SSH, whose forced command only allows ``rpc``).
 #
@@ -1819,6 +1903,8 @@ type _MethodSpec = tuple['Callable[[dict[str, Any]], dict[str, Any]]', str]
 _RPC_METHODS: dict[str, _MethodSpec] = {
     'list-stores': (_params_list_stores, '_run_list_stores'),
     'prepare-pull': (_params_prepare_pull, '_run_prepare_pull'),
+    # rpc-only (protocol v3, launch plan 4.1): new surface, no legacy shim.
+    'prepare-push': (_params_prepare_push, '_run_prepare_push'),
     'integrate-annotations': (
         _params_integrate_annotations,
         '_run_integrate_annotations',
@@ -1881,7 +1967,7 @@ def _dispatch(
 
 
 def _run_rpc(args: argparse.Namespace) -> None:
-    """Serve a single JSON request from stdin (wire protocol v2).
+    """Serve a single JSON request from stdin (wire protocol v3).
 
     Reads stdin to EOF, parses exactly one JSON object, validates
     ``protocol_version`` bidirectionally, and dispatches on ``method``.
@@ -2083,12 +2169,12 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest='command')
 
-    # rpc — the annotator-facing transport (wire protocol v2).
+    # rpc — the annotator-facing transport (wire protocol v3).
     rpc = subparsers.add_parser(
         'rpc',
-        help='Serve one JSON request from stdin (wire protocol v2).',
+        help='Serve one JSON request from stdin (wire protocol v3).',
         description=(
-            'Read a single JSON object {"protocol_version": 2, "method": '
+            'Read a single JSON object {"protocol_version": 3, "method": '
             '<name>, "params": {...}} from stdin (to EOF), dispatch, and '
             'write a single JSON response to stdout.'
         ),

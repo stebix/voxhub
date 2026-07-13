@@ -36,6 +36,8 @@ from pathlib import Path
 
 import pytest
 
+from voxhub_schema import PROTOCOL_VERSION
+
 _DEPLOY_DIR = Path(__file__).resolve().parents[3] / 'scripts' / 'deploy'
 WRAPPER = _DEPLOY_DIR / 'voxhub-forced-command.sh'
 
@@ -129,7 +131,10 @@ def _assert_forbidden(proc: subprocess.CompletedProcess[bytes], bin_dir: Path) -
     payload = json.loads(proc.stdout)
     assert payload['error'] is True
     assert payload['code'] == 'forbidden'
-    assert 'protocol_version' in payload
+    # The wrapper hardcodes the version in its deny() envelope; this pins
+    # the literal to voxhub_schema.PROTOCOL_VERSION so a bump cannot ship
+    # without updating the wrapper.
+    assert payload['protocol_version'] == PROTOCOL_VERSION
     assert not _stub_ran(bin_dir, 'voxhub-server')
     assert not _stub_ran(bin_dir, 'rrsync')
 

@@ -13,13 +13,20 @@ from typing import Literal, Self, cast, get_args
 
 import attrs
 
-PROTOCOL_VERSION: int = 2
+PROTOCOL_VERSION: int = 3
 """Current wire protocol version.  Bumped on breaking changes.
 
 Version 2: requests travel as a single JSON object on the server
 process's stdin (``voxhub-server rpc``) instead of argv flags, and
 integrate checksums are path-keyed :class:`ChecksumEntry` objects
 instead of packed ``<filename>:sha256:<hex>`` strings.
+
+Version 3: adds the ``prepare-push`` method (server-minted push staging
+dirs, mirroring ``prepare-pull``'s confinement) and its
+:class:`PreparePushResponse`.  A protocol *addition* still bumps the
+version because the check is strict and bidirectional: both sides
+deploy together, and an old server must refuse a client that would
+try to push.
 """
 
 _SHA256_HEX64 = re.compile(r'[0-9a-f]{64}')
@@ -359,6 +366,37 @@ class PrepareResponse:
             ],
             skipped_annotations=skipped,
             memory_warnings=memory_warnings,
+        )
+
+
+# -- prepare-push --------------------------------------------------------------
+
+
+@attrs.define
+class PreparePushResponse:
+    """Response from ``prepare-push``.
+
+    Parameters
+    ----------
+    protocol_version : int
+    staging_dir : str
+        Absolute path of the freshly minted server-side staging
+        directory the client should rsync annotation files into
+        (``<staging_dir>/<store_name>/<files>``).  The rsync transport
+        addresses it by basename (rrsync is rooted at the staging
+        root); the RPC surface (``integrate-annotations``, ``cleanup``)
+        echoes this absolute path verbatim.
+    """
+
+    protocol_version: int
+    staging_dir: str
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> Self:
+        """Deserialize from a plain dict."""
+        return cls(
+            protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
+            staging_dir=str(d['staging_dir']),
         )
 
 
