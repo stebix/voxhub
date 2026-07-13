@@ -215,17 +215,23 @@ class TestSanitiseKeyInjectivity:
 
 
 class _StubRunner:
-    """Minimal stand-in for SshRunner that records sent args."""
+    """Minimal stand-in for SshRunner that records RPC calls."""
 
     def __init__(self, responses: list[dict]) -> None:
         self._responses = list(responses)
-        self.calls: list[tuple[str, ...]] = []
+        self.calls: list[tuple[str, dict]] = []
 
-    def run(self, *args: str, timeout: float | None = 60) -> dict:
+    def run(
+        self,
+        method: str,
+        params: dict,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
         del timeout
-        self.calls.append(args)
+        self.calls.append((method, params))
         if not self._responses:
-            msg = f'StubRunner has no more queued responses (got {args!r})'
+            msg = f'StubRunner has no more queued responses (got {method!r})'
             raise AssertionError(msg)
         return self._responses.pop(0)
 
@@ -257,7 +263,7 @@ class TestListStoresCached:
         result = list_stores_cached(runner, cache, 'voxhub_at_host')  # type: ignore[arg-type]
 
         # No --if-version flag on a cold cache.
-        assert runner.calls == [('list-stores',)]
+        assert runner.calls == [('list-stores', {})]
         assert result['catalog_version'] == 1
         assert result['stores'] == [{'name': 'alpha'}]
 
@@ -291,8 +297,8 @@ class TestListStoresCached:
         second = list_stores_cached(runner, cache, 'voxhub_at_host')  # type: ignore[arg-type]
 
         # First call: no --if-version. Second call: --if-version 5.
-        assert runner.calls[0] == ('list-stores',)
-        assert runner.calls[1] == ('list-stores', '--if-version', '5')
+        assert runner.calls[0] == ('list-stores', {})
+        assert runner.calls[1] == ('list-stores', {'if_version': 5})
 
         # Short-circuit response splices the cached stores back in.
         assert second['catalog_version'] == 5
@@ -352,7 +358,7 @@ class TestListStoresCached:
         )
 
         # No --if-version flag, even though the cache is warm.
-        assert runner.calls == [('list-stores',)]
+        assert runner.calls == [('list-stores', {})]
         assert result['catalog_version'] == 8
         assert result['stores'] == [{'name': 'alpha'}, {'name': 'bravo'}]
 
@@ -385,7 +391,7 @@ class TestListStoresCached:
 
         # Two calls: the first with no ``--if-version`` (cold cache),
         # the retry also without ``--if-version`` (force=True).
-        assert runner.calls == [('list-stores',), ('list-stores',)]
+        assert runner.calls == [('list-stores', {}), ('list-stores', {})]
         assert result['catalog_version'] == 5
         assert result['stores'] == [{'name': 'alpha'}]
 

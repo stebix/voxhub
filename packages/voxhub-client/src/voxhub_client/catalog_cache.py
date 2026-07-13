@@ -3,7 +3,7 @@
 The server (see ``voxhub_core.server.catalog_cache``) bumps a
 monotonic ``catalog_version`` counter on every catalog mutation. The
 client keeps the last response on disk, tagged with that version, and
-sends it back on the next call as ``--if-version N``. When the server
+sends it back on the next call as the ``if_version`` RPC param. When the server
 replies ``{"unchanged": true}``, the client reuses the cached payload
 without re-parsing megabytes of JSON.
 
@@ -257,7 +257,7 @@ def list_stores_cached(
     server_key : str
         Per-server cache key (see ``server_key_for``).
     force : bool, optional
-        If ``True``, omit ``--if-version`` so the server always returns
+        If ``True``, omit ``if_version`` so the server always returns
         the full payload. Useful for ``--no-cache`` debugging and for
         rebuilding a corrupt cache.
 
@@ -269,11 +269,11 @@ def list_stores_cached(
     """
     cached = None if force else cache.read(server_key)
 
-    args: list[str] = ['list-stores']
+    params: dict[str, Any] = {}
     if cached is not None:
-        args += ['--if-version', str(cached['catalog_version'])]
+        params['if_version'] = int(cached['catalog_version'])
 
-    response = runner.run(*args)
+    response = runner.run('list-stores', params)
 
     if response.get('unchanged'):
         if cached is not None:

@@ -10,6 +10,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import attrs
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -24,7 +25,14 @@ from voxhub_client.identity import get_identity, set_identity
 from voxhub_client.server_config import SERVER_INTERACTION_USER, get_server, set_server
 from voxhub_client.ssh import RemoteError, SshRunner
 from voxhub_client.transfer import RsyncTransfer
-from voxhub_schema import PROTOCOL_VERSION, ManifestError, PullManifest
+from voxhub_schema import (
+    PROTOCOL_VERSION,
+    CleanupResponse,
+    ManifestError,
+    PrepareRequest,
+    PrepareResponse,
+    PullManifest,
+)
 
 
 class ChecksumError(Exception):
@@ -254,7 +262,8 @@ def _run_pull(args: argparse.Namespace) -> None:
     3. Resolve local destination.
     4. Invoke remote ``prepare-pull`` over SSH.
     5. Rsync staging dir down.  Failure → no cleanup (GC will handle).
-    6. Read ``.voxhub_pull.json`` from the landed session.
+    6. Read ``.voxhub_pull.json`` from the landed session and enforce
+       its protocol version.
     7. Verify checksums — raw + every reference file.
     8. Write the trust sidecar (``.voxhub_pull.sha256``).  This is the
        one non-I/O-ignorable failure after rsync; without the anchor,
@@ -290,23 +299,33 @@ def _run_pull(args: argparse.Namespace) -> None:
     dest_str = str(dest)
 
     # -- 4. remote prepare-pull --------------------------------------------
-    prepare_args: list[str] = ['prepare-pull', '--store', args.store]
-    if args.compress:
-        prepare_args.append('--compress')
-    if args.include_existing_annotations:
-        prepare_args.append('--include-existing-annotations')
-        prepare_args.extend(args.include_existing_annotations)
+    request = PrepareRequest(
+        store_name=args.store,
+        include_existing_annotations=(
+            list(args.include_existing_annotations)
+            if args.include_existing_annotations
+            else None
+        ),
+        compress=bool(args.compress),
+    )
 
     try:
-        prepare = runner.run(*prepare_args)
+        response = runner.run('prepare-pull', attrs.asdict(request))
     except RemoteError as exc:
         err_console.print(f'[red]prepare-pull failed:[/red] {exc}')
         sys.exit(1)
 
-    staging_dir_remote: str = prepare['staging_dir']
-    skipped_annotations: list[dict[str, str]] = list(
-        prepare.get('skipped_annotations') or []
-    )
+    try:
+        prepare = PrepareResponse.from_dict(response)
+    except (KeyError, TypeError, ValueError) as exc:
+        err_console.print(
+            f'[red]malformed prepare-pull response:[/red] {exc!r}; '
+            f'server and client schema versions have likely drifted.'
+        )
+        sys.exit(1)
+
+    staging_dir_remote = prepare.staging_dir
+    skipped_annotations = prepare.skipped_annotations
 
     # -- 5. rsync ----------------------------------------------------------
     try:
@@ -332,6 +351,15 @@ def _run_pull(args: argparse.Namespace) -> None:
             f'[red]pull manifest unreadable or malformed:[/red] {exc}; '
             f'server staging dir left in place for diagnosis '
             f'(rsync corruption or schema drift).'
+        )
+        sys.exit(1)
+
+    if manifest.protocol_version != PROTOCOL_VERSION:
+        err_console.print(
+            f'[red]pull manifest has protocol version '
+            f'{manifest.protocol_version}, this client expects '
+            f'{PROTOCOL_VERSION}[/red] — update voxhub on both sides and '
+            f're-pull with a current client.'
         )
         sys.exit(1)
 
@@ -363,11 +391,18 @@ def _run_pull(args: argparse.Namespace) -> None:
 
     # -- 10. delivery ACK via cleanup (non-fatal) --------------------------
     try:
-        runner.run('cleanup', staging_dir_remote)
+        CleanupResponse.from_dict(
+            runner.run('cleanup', {'staging_dir': staging_dir_remote})
+        )
     except RemoteError as exc:
         err_console.print(
             f'[yellow]warning: cleanup ACK failed ({exc}); '
             f'GC will reap the staging dir.[/yellow]'
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        err_console.print(
+            f'[yellow]warning: malformed cleanup response ({exc!r}); '
+            f'GC will reap the staging dir if the ACK was lost.[/yellow]'
         )
 
     # -- 11. audit log (non-fatal) ----------------------------------------

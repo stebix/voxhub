@@ -39,6 +39,7 @@ def _build_manifest(
     *,
     raw_name: str = 'raw.nrrd',
     annotations: list[PullAnnotationEntry] | None = None,
+    protocol_version: int = PROTOCOL_VERSION,
 ) -> PullManifest:
     """Build a PullManifest aligned with existing files in *session_dir*.
 
@@ -47,7 +48,7 @@ def _build_manifest(
     raw_path = session_dir / raw_name
     raw_checksum = _compute_sha256(raw_path)
     manifest = PullManifest(
-        protocol_version=PROTOCOL_VERSION,
+        protocol_version=protocol_version,
         prepared_at='2026-04-14T12:00:00+00:00',
         server_host='server.example.com',
         server_stores_dir='/srv/voxhub/stores',
@@ -70,6 +71,7 @@ def _seed_session(
     raw_bytes: bytes = b'fake-raw-volume-bytes',
     refs: dict[str, bytes] | None = None,
     raw_name: str = 'raw.nrrd',
+    protocol_version: int = PROTOCOL_VERSION,
 ) -> PullManifest:
     """Create a pretend post-rsync session directory under *session_dir*."""
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -96,7 +98,12 @@ def _seed_session(
                 )
             )
 
-    return _build_manifest(session_dir, raw_name=raw_name, annotations=entries)
+    return _build_manifest(
+        session_dir,
+        raw_name=raw_name,
+        annotations=entries,
+        protocol_version=protocol_version,
+    )
 
 
 # -- _compute_sha256 ---------------------------------------------------------
@@ -289,16 +296,16 @@ class TestLockSession:
 
 
 class _FakeRunner:
-    """Monkey substitute for SshRunner: scripted responses per command."""
+    """Monkey substitute for SshRunner: scripted responses per RPC method."""
 
     def __init__(self, responses: list[object], *, cleanup_error: bool = False):
         self._responses = list(responses)
-        self.calls: list[tuple[str, ...]] = []
+        self.calls: list[tuple[str, dict]] = []
         self._cleanup_error = cleanup_error
 
-    def run(self, *args, **_kwargs):
-        self.calls.append(args)
-        if args[0] == 'cleanup' and self._cleanup_error:
+    def run(self, method, params, **_kwargs):
+        self.calls.append((method, params))
+        if method == 'cleanup' and self._cleanup_error:
             from voxhub_client.ssh import RemoteError
 
             raise RemoteError('ssh_failed', 'connection dropped')
@@ -424,8 +431,19 @@ class TestRunPullHappyPath:
         assert _mode(dest / 'raw.nrrd') == 0o444
         assert _mode(dest / 'reference' / 'a.seg.nrrd') == 0o444
 
-        # Cleanup was called with the staging dir.
-        assert ('cleanup', '/tmp/vxhb-staging-xyz') in runner.calls
+        # prepare-pull request is the serialized PrepareRequest model.
+        assert runner.calls[0] == (
+            'prepare-pull',
+            {
+                'store_name': 'patient-001',
+                'staging_dir': None,
+                'include_existing_annotations': None,
+                'compress': False,
+            },
+        )
+
+        # Cleanup was called with the staging dir as a params dict.
+        assert ('cleanup', {'staging_dir': '/tmp/vxhb-staging-xyz'}) in runner.calls
 
         # Audit log entry was written.
         from voxhub_client import pull_log as pl
@@ -595,6 +613,40 @@ class TestRunPullFailurePaths:
         # traceback leaks through.
         captured = capsys.readouterr()
         assert 'unreadable or malformed' in captured.err
+
+    def test_old_manifest_version_exits_with_clear_error(
+        self,
+        tmp_path,
+        fake_identity,
+        fake_server,
+        isolate_pull_log,
+        monkeypatch,
+        capsys,
+    ):
+        """A manifest from an old server → clear re-pull message, exit 1,
+        no traceback, no cleanup ACK."""
+        dest = tmp_path / 'dest'
+        stale_version = PROTOCOL_VERSION - 1
+
+        transfer = _FakeTransfer(
+            seed_fn=lambda p: _seed_session(p, protocol_version=stale_version)
+        )
+        runner = _FakeRunner(responses=[_prepare_response()])
+        monkeypatch.setattr(client_cli, 'SshRunner', lambda target: runner)
+        monkeypatch.setattr(client_cli, 'RsyncTransfer', lambda target: transfer)
+
+        with pytest.raises(SystemExit) as excinfo:
+            _run_pull(_pull_args(dest=dest))
+        assert excinfo.value.code == 1
+        assert all(c[0] != 'cleanup' for c in runner.calls)
+
+        # Rich wraps long lines at word boundaries, so assert on tokens
+        # that cannot straddle a soft line break.
+        captured = capsys.readouterr()
+        assert str(stale_version) in captured.err
+        assert str(PROTOCOL_VERSION) in captured.err
+        assert 're-pull' in captured.err
+        assert 'Traceback' not in captured.err
 
     def test_cleanup_ack_failure_is_non_fatal(
         self,

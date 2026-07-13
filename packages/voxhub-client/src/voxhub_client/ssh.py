@@ -1,6 +1,11 @@
 """SSH transport for server communication.
 
-Invokes ``voxhub-server`` commands over SSH and parses JSON responses.
+Speaks the JSON-over-stdin RPC contract: the remote command is always
+the constant ``voxhub-server rpc``; the request
+``{"protocol_version": N, "method": ..., "params": {...}}`` travels on
+the subprocess's stdin, and a single JSON response object comes back on
+stdout.  No method or parameter ever appears in argv, so quoting and
+injection concerns vanish by construction.
 """
 
 import getpass
@@ -11,6 +16,23 @@ from typing import Any, Self
 import attrs
 
 from voxhub_schema import PROTOCOL_VERSION
+
+RPC_REMOTE_COMMAND: str = 'voxhub-server rpc'
+"""The one and only remote command for RPC calls — no other argv ever."""
+
+DEFAULT_TIMEOUT_S: float = 60.0
+"""Fallback timeout for methods without an explicit policy entry."""
+
+METHOD_TIMEOUTS_S: dict[str, float] = {
+    'prepare-pull': 1800.0,
+}
+"""Per-method timeout policy.
+
+``prepare-pull`` stages a full volume server-side (RAM load + NRRD
+write + sha256) and routinely exceeds the 60 s default on large
+stores; everything else (``list-stores``, ``cleanup``,
+``healthcheck``) is metadata-sized and keeps the short default.
+"""
 
 
 class RemoteError(Exception):
@@ -103,48 +125,58 @@ class SshTarget:
 
 @attrs.define
 class SshRunner:
-    """Runs voxhub-server commands over SSH.
+    """Runs voxhub-server RPC methods over SSH.
+
+    Every call executes the constant remote command
+    ``voxhub-server rpc`` and pipes one JSON request object to its
+    stdin — methods and parameters never touch argv.
 
     Parameters
     ----------
     target : SshTarget
         Parsed SSH target.
-    remote_command : str
-        Name of the remote binary (default ``voxhub-server``).
+    ssh_options : tuple[str, ...]
+        Extra raw ssh arguments spliced into the command line before
+        the destination — e.g. ``('-i', '/path/key', '-o',
+        'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null')``.
+        Intended for test harnesses (loopback sshd on a high port);
+        production callers should leave it empty and configure ssh via
+        ``~/.ssh/config``.
     """
 
     target: SshTarget
-    remote_command: str = 'voxhub-server'
+    ssh_options: tuple[str, ...] = ()
 
     def _ssh_args(self) -> list[str]:
-        """Build the base SSH command arguments."""
+        """Build the base SSH command arguments (up to and incl. ``--``)."""
         args = ['ssh']
         if self.target.port is not None:
             args.extend(['-p', str(self.target.port)])
-        args.extend(
-            [
-                '-o',
-                'BatchMode=yes',
-                self.target.ssh_destination,
-                '--',
-            ]
-        )
+        args.extend(['-o', 'BatchMode=yes'])
+        args.extend(self.ssh_options)
+        args.extend([self.target.ssh_destination, '--'])
         return args
 
     def run(
         self,
-        *args: str,
-        timeout: float | None = 60,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Run a voxhub-server subcommand over SSH.
+        """Invoke a voxhub-server RPC method over SSH.
 
         Parameters
         ----------
-        *args : str
-            Command and arguments (e.g. ``'list-stores'``,
-            ``'/data/zarr'``).
+        method : str
+            RPC method name (e.g. ``'prepare-pull'``).
+        params : dict[str, Any]
+            JSON-serializable method parameters; the serialized form of
+            the method's schema request model where one exists.
         timeout : float | None
-            Command timeout in seconds.
+            Explicit timeout override in seconds.  ``None`` (default)
+            applies the per-method policy: ``METHOD_TIMEOUTS_S`` if the
+            method has an entry, else ``DEFAULT_TIMEOUT_S``.
 
         Returns
         -------
@@ -154,20 +186,40 @@ class SshRunner:
         Raises
         ------
         RemoteError
-            If the server returns a structured error.
+            If the server returns a structured error, the response is
+            unparseable, or the command times out.
         ProtocolMismatchError
-            If protocol versions differ.
-        subprocess.TimeoutExpired
-            If the command times out.
+            If the response is missing ``protocol_version`` or carries
+            a different one.
         """
-        cmd = [*self._ssh_args(), self.remote_command, *args]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        payload = json.dumps(
+            {
+                'protocol_version': PROTOCOL_VERSION,
+                'method': method,
+                'params': params,
+            }
         )
+        cmd = [*self._ssh_args(), RPC_REMOTE_COMMAND]
+        effective_timeout = (
+            timeout
+            if timeout is not None
+            else METHOD_TIMEOUTS_S.get(method, DEFAULT_TIMEOUT_S)
+        )
+
+        try:
+            result = subprocess.run(
+                cmd,
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=effective_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            msg = (
+                f'server command timed out after {effective_timeout:g} s '
+                f'(method {method!r})'
+            )
+            raise RemoteError('timeout', msg) from exc
 
         if result.returncode != 0 and not result.stdout.strip():
             msg = (
@@ -192,38 +244,41 @@ class SshRunner:
                 protocol_version=data.get('protocol_version'),
             )
 
-        # Check protocol version.
-        server_version = data.get('protocol_version')
-        if server_version is not None and server_version != PROTOCOL_VERSION:
-            raise ProtocolMismatchError(
-                code='protocol_mismatch',
-                message=(
-                    f'Server protocol version {server_version}, '
-                    f'client expects {PROTOCOL_VERSION}. '
-                    f'Update voxhub-schema on both sides.'
-                ),
-                protocol_version=server_version,
-            )
-
+        _check_protocol_version(data)
         return data
 
-    def mktemp(self) -> str:
-        """Create a temp directory on the server.
 
-        Returns
-        -------
-        str
-            Path to the temp directory on the server.
-        """
-        cmd = [
-            *self._ssh_args(),
-            'mktemp',
-            '-d',
-            '-t',
-            'dt-push-XXXXXXXX',
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            msg = result.stderr.strip() or 'Failed to create temp directory'
-            raise RemoteError('mktemp_failed', msg)
-        return result.stdout.strip()
+def _check_protocol_version(data: dict[str, Any]) -> None:
+    """Enforce the protocol version contract on a success response.
+
+    A missing field is treated as seriously as a mismatch — it is the
+    exact signature of a wrong or outdated binary on the other end of
+    the pipe (CLAUDE.md rule 4 promises an error, not a shrug).
+
+    Raises
+    ------
+    ProtocolMismatchError
+        If ``protocol_version`` is missing or differs from the
+        client's ``PROTOCOL_VERSION``.
+    """
+    server_version = data.get('protocol_version')
+    if server_version is None:
+        raise ProtocolMismatchError(
+            code='protocol_mismatch',
+            message=(
+                f'Server response is missing protocol_version — the remote '
+                f'voxhub-server is outdated or not a voxhub server at all. '
+                f'Client expects protocol version {PROTOCOL_VERSION}.'
+            ),
+            protocol_version=None,
+        )
+    if server_version != PROTOCOL_VERSION:
+        raise ProtocolMismatchError(
+            code='protocol_mismatch',
+            message=(
+                f'Server protocol version {server_version}, '
+                f'client expects {PROTOCOL_VERSION}. '
+                f'Update voxhub-schema on both sides.'
+            ),
+            protocol_version=server_version,
+        )
