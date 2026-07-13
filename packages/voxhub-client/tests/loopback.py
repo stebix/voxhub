@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -192,13 +193,26 @@ class LoopbackRsyncTransfer:
     trailing slashes to both src and dst so the *contents* of the
     source directory land inside the destination.
 
+    Like production rrsync (which the forced-command wrapper roots at
+    the operator's staging root), ``remote_path`` is resolved relative
+    to ``staging_root`` — leading slashes are stripped, exactly as
+    rrsync does.  A client regression back to sending absolute staging
+    paths therefore fails these loopback tests the same way it fails
+    against real rrsync.
+
     Parameters
     ----------
     target : SshTarget
         Signature parity with the real transfer; unused at runtime.
+    staging_root : Path
+        Root the remote path is resolved against.  Defaults to
+        :func:`tempfile.gettempdir`, matching the server settings
+        default for ``[storage].staging_dir`` (the loopback fixture's
+        ``server.toml`` does not set one).
     """
 
     target: SshTarget
+    staging_root: Path = attrs.Factory(lambda: Path(tempfile.gettempdir()))
 
     def pull(
         self,
@@ -221,7 +235,8 @@ class LoopbackRsyncTransfer:
         exactly as rsync-without-``--delete`` leaves them.
         """
         del progress  # signature parity with the real RsyncTransfer
-        src = Path(remote_path)
+        # rrsync semantics: strip leading slashes, resolve under the root.
+        src = self.staging_root / remote_path.lstrip('/')
         dst = Path(local_path)
         dst.mkdir(parents=True, exist_ok=True)
         for source_file in src.rglob('*'):

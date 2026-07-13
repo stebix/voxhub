@@ -198,3 +198,12 @@ uv run pytest     # runs everything
 Each e2e test spawns a fresh `voxhub-server` subprocess per SSH call, so the
 suite is noticeably slower than the unit tests — expect it to live in CI's
 integration lane rather than the pre-commit hook.
+
+## Loopback-sshd end-to-end suite (launch 1.4)
+
+One layer further out than the loopback suite: real `sshd`, real forced
+command, real `rrsync`, real `rsync`, on localhost, no root needed. This is
+the transport regression gate; see
+[loopback-sshd-e2e.md](loopback-sshd-e2e.md) for the fixture recipe, test
+matrix, machine requirements, and skip behavior
+(`packages/voxhub-client/tests/test_e2e_sshd.py`).
