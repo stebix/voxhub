@@ -8,12 +8,22 @@ defined here as an ``attrs`` class.  Serialization:
 
 import enum
 import json
+import re
 from typing import Literal, Self, cast, get_args
 
 import attrs
 
-PROTOCOL_VERSION: int = 1
-"""Current wire protocol version.  Bumped on breaking changes."""
+PROTOCOL_VERSION: int = 2
+"""Current wire protocol version.  Bumped on breaking changes.
+
+Version 2: requests travel as a single JSON object on the server
+process's stdin (``voxhub-server rpc``) instead of argv flags, and
+integrate checksums are path-keyed :class:`ChecksumEntry` objects
+instead of packed ``<filename>:sha256:<hex>`` strings.
+"""
+
+_SHA256_HEX64 = re.compile(r'[0-9a-f]{64}')
+"""Bare sha256 digest shape: exactly 64 lowercase hex characters."""
 
 
 # -- Dataset attributes ------------------------------------------------------
@@ -230,12 +240,39 @@ class StoreInfo:
 
 @attrs.define
 class PrepareRequest:
-    """Arguments for ``prepare-pull``."""
+    """Arguments for ``prepare-pull``.
+
+    Mirrors the live server handler surface.  A staging-dir override is
+    deliberately absent: the staging path is server-authoritative
+    (minted under the operator-configured staging root) and must never
+    be client-controllable.
+    """
 
     store_name: str
-    staging_dir: str | None = None
     include_existing_annotations: list[str] | None = None
     compress: bool = False
+    annotator_id: str | None = None
+    """Optional identity for local/dev use.  Over SSH the key-bound
+    ``VOXHUB_ANNOTATOR`` environment variable is authoritative and a
+    disagreement fails the request."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> Self:
+        """Deserialize from a plain dict."""
+        include_raw = d.get('include_existing_annotations')
+        if include_raw is not None and not isinstance(include_raw, list):
+            raise TypeError(
+                f'Expected list for include_existing_annotations, got {type(include_raw)}'
+            )
+        annotator_raw = d.get('annotator_id')
+        return cls(
+            store_name=str(d['store_name']),
+            include_existing_annotations=(
+                None if include_raw is None else [str(p) for p in include_raw]
+            ),
+            compress=bool(d.get('compress', False)),
+            annotator_id=None if annotator_raw is None else str(annotator_raw),
+        )
 
 
 @attrs.define
@@ -272,6 +309,10 @@ class PrepareResponse:
         side; the client surfaces this prominently so the annotator is
         never silently denied a reference file they asked for.  Each
         entry has keys ``'path'`` and ``'reason'``.
+    memory_warnings : list[dict[str, object]]
+        Soft memory advisories raised while staging (see
+        ``voxhub_core.memory_budget.MemoryWarning.to_dict``).  Non-fatal;
+        surfaced so the annotator knows the server was under pressure.
     """
 
     protocol_version: int
@@ -286,6 +327,7 @@ class PrepareResponse:
     origin_lps: list[float]
     space_directions: list[list[float]]
     skipped_annotations: list[dict[str, str]] = attrs.Factory(list)
+    memory_warnings: list[dict[str, object]] = attrs.Factory(list)
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Self:
@@ -294,6 +336,11 @@ class PrepareResponse:
         skipped: list[dict[str, str]] = [
             {'path': str(e['path']), 'reason': str(e['reason'])}
             for e in skipped_raw  # type: ignore[union-attr]
+        ]
+        memory_raw = d.get('memory_warnings', []) or []
+        memory_warnings: list[dict[str, object]] = [
+            dict(w)  # type: ignore[call-overload]
+            for w in memory_raw  # type: ignore[union-attr]
         ]
         return cls(
             protocol_version=int(d['protocol_version']),  # type: ignore[arg-type]
@@ -311,6 +358,7 @@ class PrepareResponse:
                 for row in d['space_directions']  # type: ignore[union-attr]
             ],
             skipped_annotations=skipped,
+            memory_warnings=memory_warnings,
         )
 
 
@@ -318,18 +366,66 @@ class PrepareResponse:
 
 
 @attrs.define
+class ChecksumEntry:
+    """Integrity assertion for one staged annotation file.
+
+    ``path`` is relative to the staging directory, with POSIX
+    separators (``<store-dir>/<filename>``), so equal basenames in
+    different store subdirectories stay distinct.  ``sha256`` is the
+    bare 64-character lowercase hex digest of the file contents.
+    """
+
+    path: str
+    sha256: str
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> Self:
+        """Deserialize from a plain dict, validating the digest shape."""
+        path = d['path']
+        sha256 = d['sha256']
+        if not isinstance(path, str) or not path:
+            raise ValueError(f'checksum path must be a non-empty string, got {path!r}')
+        if not isinstance(sha256, str) or _SHA256_HEX64.fullmatch(sha256) is None:
+            raise ValueError(
+                f'sha256 must be exactly 64 lowercase hex characters, got {sha256!r}'
+            )
+        return cls(path=path, sha256=sha256)
+
+
+@attrs.define
+class IntegratedAnnotation:
+    """A single annotation written by ``integrate-annotations``."""
+
+    path: str
+    """Zarr-internal path of the written annotation array
+    (``annotations/<annotator>-<nano_id>/<instance>/data``)."""
+
+    ontology: str
+    ontology_version: int
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> Self:
+        """Deserialize from a plain dict."""
+        return cls(
+            path=str(d['path']),
+            ontology=str(d['ontology']),
+            ontology_version=int(d['ontology_version']),  # type: ignore[arg-type]
+        )
+
+
+@attrs.define
 class IntegrateResult:
     """Per-store result from ``integrate-annotations``."""
 
     status: str
-    annotations: list[AnnotationInfo]
+    annotations: list[IntegratedAnnotation]
     issues: list[IssueRecord]
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Self:
         """Deserialize from a plain dict."""
         annotations = [
-            AnnotationInfo.from_dict(a)  # type: ignore[arg-type]
+            IntegratedAnnotation.from_dict(a)  # type: ignore[arg-type]
             for a in d.get('annotations', [])  # type: ignore[union-attr]
         ]
         issues = [
@@ -345,14 +441,44 @@ class IntegrateResult:
 
 @attrs.define
 class IntegrateRequest:
-    """Arguments for ``integrate-annotations``."""
+    """Arguments for ``integrate-annotations``.
+
+    Mirrors the live server handler surface: exactly one of
+    ``expected_ontology`` / ``unconstrained`` must be given (enforced
+    server-side), and ``checksums`` carries staging-dir-relative,
+    path-keyed integrity assertions.
+    """
 
     staging_dir: str
     annotator_id: str
     machine_id: str
     nano_id: str
-    checksums: list[str] | None = None
+    checksums: list[ChecksumEntry] = attrs.Factory(list)
+    expected_ontology: list[str] = attrs.Factory(list)
+    unconstrained: bool = False
     force: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> Self:
+        """Deserialize from a plain dict."""
+        checksums_raw = d.get('checksums') or []
+        if not isinstance(checksums_raw, list):
+            raise TypeError(f'Expected list for checksums, got {type(checksums_raw)}')
+        expected_raw = d.get('expected_ontology') or []
+        if not isinstance(expected_raw, list):
+            raise TypeError(
+                f'Expected list for expected_ontology, got {type(expected_raw)}'
+            )
+        return cls(
+            staging_dir=str(d['staging_dir']),
+            annotator_id=str(d['annotator_id']),
+            machine_id=str(d['machine_id']),
+            nano_id=str(d['nano_id']),
+            checksums=[ChecksumEntry.from_dict(e) for e in checksums_raw],
+            expected_ontology=[str(o) for o in expected_raw],
+            unconstrained=bool(d.get('unconstrained', False)),
+            force=bool(d.get('force', False)),
+        )
 
 
 @attrs.define
