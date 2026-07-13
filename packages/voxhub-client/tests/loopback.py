@@ -13,12 +13,9 @@ the fake server's stdin, one JSON response object comes back on
 stdout, and no method or parameter ever appears in argv.
 
 The fake server is this very file executed as a script (see the
-``__main__`` block): it reads the stdin request, validates
-``protocol_version`` bidirectionally, then bridges the method to the
-real server's per-method subcommand surface via ``os.execv``.  The
-bridge exists only until the server's native ``rpc`` subcommand lands
-(Task A1 of the transport plan); at integration time the ``__main__``
-block collapses to an exec of ``voxhub-server rpc``.
+``__main__`` block): it ``os.execv``-s the real server's native ``rpc``
+subcommand with stdin passing through untouched, mirroring the
+production forced-command wrapper's rpc branch.
 
 Error handling in :meth:`LoopbackSshRunner.run` mirrors production —
 ``RemoteError`` on the error envelope, ``ProtocolMismatchError`` on
@@ -239,91 +236,18 @@ class LoopbackRsyncTransfer:
 # -- Fake server (script mode) -------------------------------------------------
 
 
-def _write_error(code: str, message: str) -> None:
-    """Emit a ``ServerError``-shaped envelope on stdout."""
-    sys.stdout.write(
-        json.dumps(
-            {
-                'protocol_version': PROTOCOL_VERSION,
-                'error': True,
-                'code': code,
-                'message': message,
-            }
-        )
-    )
-    sys.stdout.write('\n')
-
-
-def _legacy_argv(method: str, params: dict[str, Any]) -> list[str] | None:
-    """Translate an RPC ``(method, params)`` pair to the legacy argv surface.
-
-    Returns ``None`` for methods this bridge does not map — the caller
-    answers with an ``unknown_method`` envelope, matching the pinned
-    contract for the real ``rpc`` dispatch.
-    """
-    if method == 'list-stores':
-        argv = ['list-stores']
-        if params.get('if_version') is not None:
-            argv += ['--if-version', str(params['if_version'])]
-        return argv
-    if method == 'prepare-pull':
-        argv = ['prepare-pull', '--store', str(params['store_name'])]
-        if params.get('compress'):
-            argv.append('--compress')
-        include = params.get('include_existing_annotations')
-        if include:
-            argv.append('--include-existing-annotations')
-            argv.extend(str(p) for p in include)
-        return argv
-    if method == 'cleanup':
-        return ['cleanup', str(params['staging_dir'])]
-    if method == 'healthcheck':
-        return ['healthcheck']
-    return None
-
-
 def _fake_server_main() -> None:
-    """Read one RPC request from stdin and bridge it to the real server.
+    """Exec the real server's ``rpc`` subcommand, stdin passing through.
 
-    Implements the request half of the pinned wire contract (read stdin
-    to EOF, parse once, validate ``protocol_version`` bidirectionally,
-    dispatch on ``method``), then ``os.execv``-s the real per-method
-    server subcommand so its stdout/stderr/exit code pass through
-    untouched.
+    Mirrors the production forced-command wrapper's rpc branch: the RPC
+    request on stdin reaches the real ``voxhub-server rpc`` dispatch
+    untouched, and its stdout/stderr/exit code pass through verbatim —
+    so request parsing, version checking, and method dispatch are
+    exercised on the real server code path, not reimplemented here.
     """
-    raw = sys.stdin.read()
-    try:
-        request = json.loads(raw)
-    except json.JSONDecodeError:
-        _write_error('malformed_request', 'stdin is not a single JSON object')
-        sys.exit(1)
-    if not isinstance(request, dict):
-        _write_error('malformed_request', 'stdin is not a single JSON object')
-        sys.exit(1)
-
-    client_version = request.get('protocol_version')
-    if client_version != PROTOCOL_VERSION:
-        _write_error(
-            'protocol_mismatch',
-            f'Client protocol version {client_version}, '
-            f'server expects {PROTOCOL_VERSION}.',
-        )
-        sys.exit(1)
-
-    method = request.get('method')
-    params = request.get('params') or {}
-    if not isinstance(method, str) or not isinstance(params, dict):
-        _write_error('malformed_request', 'method/params have the wrong shape')
-        sys.exit(1)
-
-    argv = _legacy_argv(method, params)
-    if argv is None:
-        _write_error('unknown_method', f'Unknown RPC method: {method!r}')
-        sys.exit(1)
-
     os.execv(
         sys.executable,
-        [sys.executable, '-m', 'voxhub_core.server.cli', *argv],
+        [sys.executable, '-m', 'voxhub_core.server.cli', 'rpc'],
     )
 
 

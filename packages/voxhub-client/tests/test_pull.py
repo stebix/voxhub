@@ -436,9 +436,9 @@ class TestRunPullHappyPath:
             'prepare-pull',
             {
                 'store_name': 'patient-001',
-                'staging_dir': None,
                 'include_existing_annotations': None,
                 'compress': False,
+                'annotator_id': None,
             },
         )
 
