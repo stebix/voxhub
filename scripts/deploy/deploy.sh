@@ -147,6 +147,41 @@ else
 fi
 
 # ===================================================================
+# Step 1b: Provision rrsync
+# ===================================================================
+step "Provision rrsync"
+
+# rrsync (restricted rsync) confines annotator rsync sessions to the
+# staging root — the forced-command wrapper re-execs every rsync request
+# through it (see voxhub-forced-command.sh).  Debian ships rrsync with the
+# rsync package, but where depends on the release:
+#   * trixie and newer: /usr/bin/rrsync (executable, ready to use)
+#   * bullseye/bookworm: /usr/share/doc/rsync/scripts/rrsync.gz (gzipped
+#     doc copy, not executable) — install a copy to /usr/local/bin.
+# Idempotent: once a copy is on PATH (either variant), re-runs skip.
+RRSYNC_LOCAL="/usr/local/bin/rrsync"
+RRSYNC_DOC_GZ="/usr/share/doc/rsync/scripts/rrsync.gz"
+RRSYNC_DOC="/usr/share/doc/rsync/scripts/rrsync"
+
+if command -v rrsync &>/dev/null; then
+    skip "rrsync ($(command -v rrsync))"
+elif [[ -f "$RRSYNC_DOC_GZ" ]]; then
+    info "Installing rrsync from $RRSYNC_DOC_GZ"
+    if ! $DRY_RUN; then
+        gunzip -c "$RRSYNC_DOC_GZ" > "$RRSYNC_LOCAL"
+        chmod 755 "$RRSYNC_LOCAL"
+    fi
+    ok "Installed rrsync → $RRSYNC_LOCAL"
+elif [[ -f "$RRSYNC_DOC" ]]; then
+    info "Installing rrsync from $RRSYNC_DOC"
+    run cp "$RRSYNC_DOC" "$RRSYNC_LOCAL"
+    run chmod 755 "$RRSYNC_LOCAL"
+    ok "Installed rrsync → $RRSYNC_LOCAL"
+else
+    fail "rrsync not found — expected it on PATH or under /usr/share/doc/rsync/scripts/ (ships with the rsync package)"
+fi
+
+# ===================================================================
 # Step 2: Install uv system-wide
 # ===================================================================
 step "Install uv"
@@ -260,12 +295,26 @@ if [[ ! -f "$WRAPPER_SRC" ]]; then
     fail "Cannot find $WRAPPER_SRC — run this script from the scripts/deploy/ directory"
 fi
 
-if [[ -f "$FORCED_CMD" ]] && cmp -s "$WRAPPER_SRC" "$FORCED_CMD"; then
+# Render the staging root into the wrapper at install time (replaces the
+# @STAGING_ROOT@ token — see the comment block in voxhub-forced-command.sh
+# for why install-time rendering was chosen over run-time TOML parsing).
+# Pure-bash substitution, no sed: an arbitrary $STAGING_DIR (spaces,
+# slashes, &) can never corrupt the rendered script.
+WRAPPER_CONTENT="$(<"$WRAPPER_SRC")"
+WRAPPER_RENDERED="${WRAPPER_CONTENT//@STAGING_ROOT@/$STAGING_DIR}"
+
+# Idempotency: compare the *rendered* content against the installed file.
+# Re-runs with unchanged inputs converge to skip; installs still carrying
+# the old allowlist wrapper — or a stale staging root — differ and are
+# upgraded in place.
+if [[ -f "$FORCED_CMD" ]] && printf '%s\n' "$WRAPPER_RENDERED" | cmp -s - "$FORCED_CMD"; then
     skip "ForceCommand wrapper ($FORCED_CMD)"
 else
-    info "Installing $FORCED_CMD"
-    run cp "$WRAPPER_SRC" "$FORCED_CMD"
-    run chmod 755 "$FORCED_CMD"
+    info "Installing $FORCED_CMD (staging root: $STAGING_DIR)"
+    if ! $DRY_RUN; then
+        printf '%s\n' "$WRAPPER_RENDERED" > "$FORCED_CMD"
+        chmod 755 "$FORCED_CMD"
+    fi
     ok "Installed forced command wrapper"
 fi
 
