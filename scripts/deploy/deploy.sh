@@ -4,7 +4,7 @@
 # Usage:
 #   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data
 #   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --staging-dir /mnt/storage/voxhub/staging
-#   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --repo-url git@github.com:org/voxhub.git
+#   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --repo-url https://github.com/org/voxhub.git
 #   sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data --dry-run
 #
 # Idempotent — safe to re-run.  Re-running pulls latest code, re-syncs the
@@ -46,8 +46,8 @@ step() {
 STORES_DIR=""
 STAGING_DIR=""
 BACKUP_TARGET=""
-REPO_URL="git@github.com:stebix/voxhub.git"
-BRANCH="main"
+REPO_URL="https://github.com/stebix/voxhub.git"
+BRANCH="trunk"
 DRY_RUN=false
 INSTALL_DIR="/opt/voxhub"
 VOXHUB_USER="voxhub"

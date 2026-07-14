@@ -85,13 +85,15 @@ following — complete each before Phase A:
 3. **DNS or a pinned IP** for the VPS. *(Owner input.)* The client refers to the
    server by host/IP via `voxhub set-server`. A hostname in the admin's
    `~/.ssh/config` is optional but convenient.
-4. **Deploy key for the private repo.** `deploy.sh` defaults
-   `--repo-url git@github.com:stebix/voxhub.git` (SSH). The `voxhub` service user
-   is created with `nologin` and never runs git; **root/the sudo admin runs
-   `deploy.sh` and performs the clone**, so the deploy key (a GitHub deploy key or
-   the admin's key with repo read) must be on the admin's SSH agent / in
-   root's `~/.ssh`. Confirm `sudo git ls-remote git@github.com:stebix/voxhub.git`
-   succeeds before Phase A. (Alternatively pass an HTTPS `--repo-url`.)
+4. **Credentials for the private repo.** `deploy.sh` defaults
+   `--repo-url https://github.com/stebix/voxhub.git` (HTTPS, branch `trunk`). The
+   `voxhub` service user is created with `nologin` and never runs git;
+   **root/the sudo admin runs `deploy.sh` and performs the clone**, so root needs
+   non-interactive HTTPS auth (e.g. a repo-scoped read-only fine-grained PAT via
+   `git config --global credential.helper store`, or `gh auth setup-git`).
+   Confirm `sudo git ls-remote https://github.com/stebix/voxhub.git` succeeds
+   before Phase A. (Alternatively pass an SSH `--repo-url` with a deploy key on
+   root's `~/.ssh` / SSH agent.)
 5. **Firewall.** Allow inbound TCP 22 (or your chosen sshd port) from the
    third-party client host's egress IP. Hetzner Cloud Firewall or `ufw`. No other
    port is needed — voxhub is SSH-only, on-demand.
@@ -243,7 +245,7 @@ its sibling wrapper/backup scripts).
 ```bash
 findmnt /mnt/storage/voxhub            # volume mounted
 grep -q /mnt/storage/voxhub /etc/fstab && echo "in fstab" || echo "NOT in fstab — FIX"
-sudo git ls-remote git@github.com:stebix/voxhub.git >/dev/null && echo "repo reachable"
+sudo git ls-remote https://github.com/stebix/voxhub.git >/dev/null && echo "repo reachable"
 ```
 
 **A2. Dry-run deploy** (no changes; surfaces misconfiguration):
@@ -318,7 +320,7 @@ sudo ./deploy.sh --stores-dir /mnt/storage/voxhub/data \
 ```
 Expect **every** step to report `[SKIP] … (already done)` (packages, rrsync, uv,
 user, sshd config, wrapper via `cmp -s`, stores/staging dirs, config, crons) — the
-git step will `[OK] Updated to latest origin/main` (a fetch/reset, benign on an
+git step will `[OK] Updated to latest origin/trunk` (a fetch/reset, benign on an
 unchanged tree). No `authorized_keys` change. This confirms re-deploys are safe.
 
 **A9. Seed the synthetic store:**
