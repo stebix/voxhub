@@ -58,6 +58,13 @@ FORCED_CMD="/usr/local/bin/voxhub-forced-command.sh"
 UV_ROOT="/opt/voxhub-uv"
 UV_INSTALL_VERSION="${UV_INSTALL_VERSION:-0.5.11}"
 STEP_NUM=0
+# uid/gid to pin the voxhub user to.  Empty means "let useradd choose", which
+# is right for a first install.  On a redeploy that followed uninstall.sh,
+# the numbers are read from the state file below — see the UID hand-off note
+# in Step 3.
+VOXHUB_UID=""
+VOXHUB_GID=""
+UNINSTALL_STATE="/var/lib/voxhub/uninstall-state"
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -78,6 +85,11 @@ Options:
                          same disk only protects against operator error.
   --repo-url <url>       Git clone URL (default: $REPO_URL)
   --branch <name>        Branch to deploy (default: $BRANCH)
+  --uid <n>              Pin the '$VOXHUB_USER' user to this uid (default:
+                         reuse the uid recorded by uninstall.sh in
+                         $UNINSTALL_STATE, else let useradd choose)
+  --gid <n>              Pin the '$VOXHUB_USER' group to this gid (same
+                         default)
   --dry-run              Show what would be done without making changes
   -h, --help             Show this help
 EOF
@@ -91,6 +103,8 @@ while [[ $# -gt 0 ]]; do
         --backup-target) BACKUP_TARGET="$2"; shift 2 ;;
         --repo-url)    REPO_URL="$2"; shift 2 ;;
         --branch)      BRANCH="$2"; shift 2 ;;
+        --uid)         VOXHUB_UID="$2"; shift 2 ;;
+        --gid)         VOXHUB_GID="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=true; shift ;;
         -h|--help)     usage ;;
         *)             fail "Unknown option: $1" ;;
@@ -232,16 +246,53 @@ fi
 # ===================================================================
 step "Create system user '$VOXHUB_USER'"
 
+# The UID hand-off.  uninstall.sh removes the voxhub user but preserves the
+# data it owned (stores, backup snapshots).  Those files keep the *numeric*
+# uid/gid of the deleted account, so if useradd hands us a different number
+# here, every preserved file becomes orphaned: stores_dir survives because we
+# chown -R it below, but the backup snapshot tree does not fully — and
+# backup.sh's rotation then fails to rm -rf snapshots it no longer owns.
+# uninstall.sh therefore records the numbers, and we reclaim them.  Explicit
+# --uid/--gid win over the state file; both are optional on a first install.
+if [[ -z "$VOXHUB_UID" && -f "$UNINSTALL_STATE" ]]; then
+    VOXHUB_UID="$(sed -n 's/^uid=\([0-9]\{1,\}\)$/\1/p' "$UNINSTALL_STATE" | head -1)"
+    VOXHUB_GID="${VOXHUB_GID:-$(sed -n 's/^gid=\([0-9]\{1,\}\)$/\1/p' "$UNINSTALL_STATE" | head -1)}"
+    if [[ -n "$VOXHUB_UID" ]]; then
+        info "Reusing uid=$VOXHUB_UID gid=${VOXHUB_GID:-auto} from $UNINSTALL_STATE"
+    fi
+fi
+
+for num_var in VOXHUB_UID VOXHUB_GID; do
+    if [[ -n "${!num_var}" && ! "${!num_var}" =~ ^[0-9]+$ ]]; then
+        fail "--${num_var#VOXHUB_} must be numeric, got '${!num_var}'"
+    fi
+done
+
 if id "$VOXHUB_USER" &>/dev/null; then
     skip "User '$VOXHUB_USER' exists"
 else
-    info "Creating system user '$VOXHUB_USER'"
-    run useradd \
-        --system \
-        --shell /usr/sbin/nologin \
-        --create-home \
-        --home-dir "/home/$VOXHUB_USER" \
-        "$VOXHUB_USER"
+    USERADD_ARGS=(
+        --system
+        --shell /usr/sbin/nologin
+        --create-home
+        --home-dir "/home/$VOXHUB_USER"
+    )
+    # useradd --create-home would make a same-named group implicitly; when a
+    # gid is pinned we must create the group ourselves first so the number
+    # sticks, then point useradd at it.
+    if [[ -n "$VOXHUB_GID" ]]; then
+        if getent group "$VOXHUB_USER" &>/dev/null; then
+            skip "Group '$VOXHUB_USER' exists"
+        else
+            info "Creating group '$VOXHUB_USER' (gid $VOXHUB_GID)"
+            run groupadd --system --gid "$VOXHUB_GID" "$VOXHUB_USER"
+        fi
+        USERADD_ARGS+=(--gid "$VOXHUB_USER")
+    fi
+    [[ -n "$VOXHUB_UID" ]] && USERADD_ARGS+=(--uid "$VOXHUB_UID")
+
+    info "Creating system user '$VOXHUB_USER'${VOXHUB_UID:+ (uid $VOXHUB_UID)}"
+    run useradd "${USERADD_ARGS[@]}" "$VOXHUB_USER"
     ok "Created user '$VOXHUB_USER'"
 fi
 
@@ -574,7 +625,12 @@ else
     info "Creating $BACKUP_TARGET"
     run mkdir -p "$BACKUP_TARGET"
 fi
-run chown "$VOXHUB_USER:$VOXHUB_USER" "$BACKUP_TARGET"
+# Recursive: backup.sh's rotation does ``rm -rf`` on expired snapshot dirs,
+# which needs write permission *inside* them.  A top-level-only chown leaves
+# snapshots written by a previous (possibly differently-numbered) voxhub user
+# undeletable, and the nightly cron starts failing into backup.log.  Cheap in
+# practice — the snapshot tree is hardlinks, and chown does not break them.
+run chown -R "$VOXHUB_USER:$VOXHUB_USER" "$BACKUP_TARGET"
 
 BACKUP_CRON="30 3 * * * $BACKUP_BIN --stores-dir $STORES_DIR --target $BACKUP_TARGET --log-file $BACKUP_LOG"
 

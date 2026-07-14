@@ -272,6 +272,61 @@ Drill (run against a scratch directory first; ~5 minutes):
 
 ---
 
+## 6b. Uninstall → redeploy
+
+`scripts/deploy/uninstall.sh` is the inverse of `deploy.sh`, for when a redeploy
+must not inherit stale code, a stale venv, a stale forced-command wrapper or a
+stale staging tree. It preserves annotation data by default; `--purge-data` is
+the only way to lose it, and it demands the stores path be typed back verbatim.
+
+Standard cycle:
+
+```sh
+sudo ./uninstall.sh --dry-run                  # read the plan first
+sudo ./uninstall.sh                            # code out, data stays
+sudo ./deploy.sh --stores-dir $STORES_DIR      # clean install
+tar -xzf /var/backups/voxhub-uninstall-<stamp>.tar.gz -C /home/voxhub
+chown -R voxhub:voxhub /home/voxhub/.ssh       # annotators back online
+voxhub-server healthcheck
+```
+
+Order is not cosmetic. The script removes the sshd drop-in first (no annotator
+can open a session against a half-dismantled server), then the crons (gc and
+backup stop before the binaries they call vanish), then drains processes — and
+it *refuses* to proceed if `voxhub-server` is running, because killing an
+in-flight `integrate-annotations` is how a store acquires a half-written
+annotation. `--force` overrides that; use it only when you know what the
+process is.
+
+**The UID hand-off.** `userdel` frees the voxhub user's numeric uid, but the
+preserved stores and backup snapshots keep it stamped on every file. If the
+redeployed user were handed a *different* number, the backup snapshot tree
+would be orphaned and `backup.sh`'s rotation would start failing to `rm -rf`
+snapshots it no longer owns (visible as `backup_failed` in
+`/var/log/voxhub/backup.log`). So `uninstall.sh` records the uid/gid to
+`/var/lib/voxhub/uninstall-state` before deleting the user, and `deploy.sh`
+reads that file and recreates the account with the same numbers (override with
+`--uid` / `--gid`). **Do not delete the state file between an uninstall and the
+redeploy that follows it.** If it is lost, compare `stat -c %u` on a file under
+`$STORES_DIR` against `id -u voxhub` after the redeploy and, if they differ,
+`chown -R voxhub:voxhub $STORES_DIR $BACKUP_TARGET`.
+
+What is deliberately *not* removed: the apt packages (`rsync`, `git`, `curl`,
+`ca-certificates`) are shared system tools, and `/usr/bin/rrsync` belongs to
+the `rsync` package — only the `/usr/local/bin/rrsync` copy that `deploy.sh`
+installs itself (Step 1b, bullseye/bookworm path) is taken. The staging
+directory is emptied but the directory itself survives, since it may be a
+mount point.
+
+Escape hatches: `--keep-user` (annotators stay onboarded, no key restore
+needed) and `--keep-uv` (keeps the pinned toolchain and wheel cache, so the
+redeploy's `uv sync` does not re-download).
+
+Covered by `packages/voxhub-core/tests/test_uninstall.py`, which drives the
+real script against a fake root with stubbed privileged binaries.
+
+---
+
 ## Bottom line
 
 The code is better than average for a first deployment. The architecture hard walls
