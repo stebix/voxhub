@@ -309,15 +309,19 @@ SSHD_CONF="/etc/ssh/sshd_config.d/voxhub.conf"
 # bare 'yes'): it lets sshd honour the per-key environment="VOXHUB_ANNOTATOR=..."
 # option set by add-annotator.sh, which binds each key to an annotator identity.
 # The server treats that variable as authoritative for provenance.
+#
+# It must sit at global scope: sshd rejects PermitUserEnvironment inside a Match
+# block, and every directive after a Match line belongs to that block.
 SSHD_BLOCK="# voxhub annotator access — managed by deploy.sh
+PermitUserEnvironment VOXHUB_ANNOTATOR
+
 Match User $VOXHUB_USER
     ForceCommand $FORCED_CMD
     PasswordAuthentication no
     AllowAgentForwarding no
     AllowTcpForwarding no
     X11Forwarding no
-    PermitTTY no
-    PermitUserEnvironment VOXHUB_ANNOTATOR"
+    PermitTTY no"
 
 # Re-write the config unless BOTH the forced command and the key-bound identity
 # allowlist are already present — an older deployment that predates
@@ -335,12 +339,13 @@ else
     fi
     # Validate config before reloading
     if ! $DRY_RUN; then
-        if sshd -t 2>/dev/null; then
+        if SSHD_ERR=$(sshd -t 2>&1); then
             systemctl reload sshd
             ok "sshd config installed and reloaded"
         else
-            rm -f "$SSHD_CONF"
-            fail "sshd config validation failed — removed $SSHD_CONF, sshd NOT reloaded"
+            mv "$SSHD_CONF" "$SSHD_CONF.rejected"
+            printf '%s\n' "$SSHD_ERR" >&2
+            fail "sshd config validation failed — moved to $SSHD_CONF.rejected, sshd NOT reloaded"
         fi
     else
         ok "(dry-run) sshd config"
